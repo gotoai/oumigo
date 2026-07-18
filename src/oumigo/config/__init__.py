@@ -3,3 +3,7 @@
 Shared by both the worker (L1) and the manager (L3); owned by neither. The whole
 system resolves inputs (CLI > env > file > defaults) down to validated specs.
 """
+
+from oumigo.config.locate import config_search_path, resolve_config_dir
+
+__all__ = ["config_search_path", "resolve_config_dir"]

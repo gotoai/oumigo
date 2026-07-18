@@ -15,11 +15,12 @@ license-files = ["LICENSE"]
 dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",
-    "httpx>=0.27",       # async HTTP client (manager -> agent, router -> vllm)
-    "fastapi>=0.110",    # control/data-plane HTTP servers (agent + manager)
+    "httpx>=0.27",       # HTTP client (worker -> manager, router -> vllm)
+    "fastapi>=0.110",    # control/data-plane HTTP servers (worker + manager)
     "uvicorn>=0.29",
     "typer>=0.12",       # single CLI with subcommands
     "pyyaml>=6",         # config files
+    "zeroconf>=0.130",   # LAN discovery (mDNS / DNS-SD)
 ]
 
 [project.optional-dependencies]

@@ -21,7 +21,7 @@ class Provider(Protocol):
         ...
 
     def get_address(self, handle: Any) -> str:
-        """Reachable address (LAN or public) the manager/agent should use."""
+        """Reachable address (LAN or public) the manager/worker should use."""
         ...
 
     def terminate(self, handle: Any) -> None:

@@ -1,4 +1,4 @@
-"""Shared async HTTP client helpers (manager -> agent, router -> vLLM).
+"""Shared async HTTP client helpers (manager -> worker, router -> vLLM).
 
 Thin wrappers over httpx with sane timeouts/retries so call sites stay uniform.
 """

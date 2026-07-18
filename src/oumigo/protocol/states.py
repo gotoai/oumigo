@@ -9,9 +9,10 @@ from enum import Enum
 
 
 class NodeState(str, Enum):
-    REGISTERING = "registering"  # agent up, announcing itself to the manager
+    REGISTERING = "registering"  # coordinator up, announcing itself to the manager
     READY = "ready"              # vLLM healthy, no traffic yet
     SERVING = "serving"          # vLLM healthy, taking requests
     DRAINING = "draining"        # finishing in-flight work before stop
     STOPPED = "stopped"          # cleanly shut down
-    FAILED = "failed"            # terminal failure; restart policy gave up
+    FAILED = "failed"            # terminal failure; restart policy gave up (worker-reported)
+    LOST = "lost"                # manager stopped receiving heartbeats (manager-observed)

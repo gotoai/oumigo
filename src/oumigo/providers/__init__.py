@@ -7,5 +7,6 @@ implementation, not designed up front.
 """
 
 from oumigo.providers.base import Provider
+from oumigo.providers.factory import KNOWN_PROVIDERS, create_provider
 
-__all__ = ["Provider"]
+__all__ = ["KNOWN_PROVIDERS", "Provider", "create_provider"]
