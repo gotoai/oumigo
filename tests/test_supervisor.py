@@ -10,7 +10,7 @@ def test_build_argv_minimal() -> None:
     argv = build_argv(NodeSpec(model="acme/tiny"))
     assert argv[:3] == ["vllm", "serve", "acme/tiny"]
     assert "--host" in argv and "0.0.0.0" in argv
-    assert argv[argv.index("--port") + 1] == "8000"
+    assert argv[argv.index("--port") + 1] == "7001"
     assert argv[argv.index("--tensor-parallel-size") + 1] == "1"
     # optional flags absent when unset
     assert "--max-model-len" not in argv

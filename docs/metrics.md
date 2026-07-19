@@ -1,15 +1,15 @@
 # Metrics & Dashboard — Data Model Design
 
-> Status: **worker-side collection implemented**; the manager's `POST /metrics`
-> ingest is a placeholder pending the store (see *Storage*). Captures the design
-> decisions and reflects what is built. GPU (`pynvml`) and vLLM (`/metrics`)
-> collectors are a later phase.
+> Status: **implemented** — worker collection (host + GPU + vLLM), the manager's
+> in-memory sqlite ingest, and a console `metrics` command are all built. Captures
+> the design decisions and reflects what exists. The uPlot dashboard is the main
+> piece still outstanding (see *Deferred*).
 
 ## Purpose
 
 Monitor worker-node health and performance from the manager: GPU utilization and
 VRAM, node CPU and memory, error/restart counts, and (later) vLLM's own inference
-metrics (throughput, latency, queue depth, KV-cache usage). Surface it in a
+metrics (throughput, latency, queue depth, KV-cache usage). Surface them in a
 lightweight, built-in web dashboard.
 
 ## Goals / non-goals
@@ -102,14 +102,14 @@ value arrays) and makes multi-node rendering in uPlot trivial.
 
 ## What is collected
 
-All worker-side collection uses stdlib or GPU-core libraries:
+All worker-side collection uses stdlib, GPU-core libraries, or a local HTTP scrape:
 
 | Metric group | Source | Notes |
 |---|---|---|
 | CPU util %, memory used/total | `/proc` (stdlib file reads) | zero dependency; Linux is mandated |
 | GPU util %, VRAM used/total, temp, power | `pynvml` (NVML bindings) | GPU-core; `nvidia-smi` subprocess is a zero-Python-dep fallback |
 | error count, restart count, uptime | the worker **coordinator** | it owns the vLLM restart policy, so it owns these counters |
-| throughput, latency (TTFT/TPOT), queue, KV-cache | vLLM `/metrics` | **later phase**; "core vLLM stuff", not a third party |
+| throughput, latency (TTFT/TPOT), queue, KV-cache | vLLM `/metrics` | scraped + flattened from the local vLLM endpoint; "core vLLM stuff", not a third party |
 
 All metric keys follow a **`<domain>:<key>`** protocol — colon-separated, with a
 snake_case key — matching vLLM's own `vllm:` convention. Domains: `worker:` (host +
@@ -120,10 +120,12 @@ first GPU) — GPU is a sub-dimension of the node.
 
 ## Metric catalog — the exact set
 
-Two families: **host metrics** (always collected, stdlib) and **vLLM engine
-metrics** (scraped from vLLM's `/metrics`, later phase). Names below are the
-oumigo storage keys, in the `<domain>:<key>` protocol above; per-GPU keys embed the
-index (e.g. `gpu:#0_util_pct`).
+Three sources, all implemented: **host** (`worker:*`, stdlib `/proc`), **GPU**
+(`gpu:#N_*`, NVML / nvidia-smi), and **vLLM engine** (`vllm:*`, scraped from the
+local `/metrics`). Each degrades to nothing when unavailable — no GPU, or vLLM not
+yet serving — so the set present at any grid slot reflects what the node can see.
+Names below are the oumigo storage keys, in the `<domain>:<key>` protocol above;
+per-GPU keys embed the index (e.g. `gpu:#0_util_pct`).
 
 ### Host / node metrics — always on
 
@@ -144,10 +146,23 @@ cumulative jiffies, so the worker computes % from two reads across the grid inte
 — it is not an instantaneous read. `worker:mem_used_pct` is derivable but stored
 directly for a zero-math live gauge.
 
-(GPU metrics — `gpu:#N_util_pct`, `gpu:#N_vram_used_bytes`, temp, power via `pynvml`
-— are covered in *What is collected* above and unchanged.)
+### GPU metrics — per device, when present
 
-### vLLM engine metrics — scraped from `/metrics` (later phase)
+Source: **NVML** (`pynvml`) when importable, else an **`nvidia-smi`** subprocess,
+else silent (CPU-only node). `#N` is the GPU's sequence number; an individual
+reading that a card doesn't support (e.g. power on some laptops) is skipped as a
+gap, not fatal.
+
+| oumigo metric | Type | Unit | Description |
+|---|---|---|---|
+| `gpu:#N_util_pct` | gauge | 0–100 | GPU utilization |
+| `gpu:#N_vram_used_bytes` | gauge | bytes | VRAM in use |
+| `gpu:#N_vram_total_bytes` | gauge | bytes | total VRAM |
+| `gpu:#N_vram_used_pct` | gauge | 0–100 | `used / total × 100` (derived) |
+| `gpu:#N_temp_c` | gauge | °C | core temperature |
+| `gpu:#N_power_w` | gauge | watts | power draw |
+
+### vLLM engine metrics — scraped from `/metrics`
 
 The full V1 metric set vLLM exposes (authoritative source: `vllm/v1/metrics/
 loggers.py`). Stored under the `vllm:` domain. Counters are emitted with a
@@ -156,6 +171,13 @@ loggers.py`). Stored under the `vllm:` domain. Counters are emitted with a
 homogeneous fleet. Metrics marked **(situational)** only appear when that feature
 is enabled (LoRA, multi-modal, speculative decode, external KV connector, KV-block
 residency tracking).
+
+**How the scraper flattens (as implemented):** it keeps `vllm:` series and forms
+one storage key each — gauges and counter `…_total` pass through; histogram
+`_bucket` lines are dropped and only `_sum` / `_count` kept; `_info` gauges are
+skipped; the constant `model_name` label is folded away, and any remaining label's
+value is appended to the key so splits stay distinct (e.g. a `finished_reason`
+split → `vllm:request_success_total_stop`).
 
 **Engine / scheduler state — Gauges**
 
@@ -257,7 +279,7 @@ and histograms, so map each type in:
 - **Counters** → store the raw cumulative value; derive rates (tokens/s, req/s, hit
   ratio) on read from adjacent grid slots (matches *raw, derive on read*). A
   label-split counter such as `request_success_total{finished_reason=…}` expands to
-  one key per label value: `vllm:request_success_<reason>`.
+  one key per label value: `vllm:request_success_total_<reason>` (e.g. `…_stop`).
 - **Histograms** → do **not** store buckets in v1. Persist the two scalars a fleet
   dashboard actually uses — `_count` and `_sum` (mean = `Δsum / Δcount` on read). If
   per-node quantiles are wanted later, store a fixed set (p50/p95/p99) as their own
@@ -309,20 +331,23 @@ backfill is safe.
   value)`. **Not** a star/snowflake schema: at this scale (essentially one
   dimension — the node) normalized dimensions add joins for no payoff. The few
   node attributes (GPU model, etc.) are denormalized or read from the registry.
-- **Store (v1): in-memory `sqlite3`** (Python standard library) — one table with
-  the row above and a unique / upsert key on `(node_id, metric, timestamp)`. SQL
-  gives the dashboard group-by and rollups for free; retention is a periodic
-  `DELETE WHERE timestamp < …`. Zero external deps; handles this volume trivially.
+- **Store (v1): in-memory `sqlite3`** (Python standard library) — table
+  **`metric_fact`** holding the row above, PK / upsert key `(node_id, metric,
+  timestamp)`, plus a `timestamp` index for pruning. SQL gives the dashboard
+  group-by and rollups for free. Zero external deps; handles this volume trivially.
   *(The worker's own send-buffer — a bounded in-memory list, drain-on-success — is
   a separate structure; see Transport.)*
-- **Status:** the manager `POST /metrics` endpoint currently **accepts and counts**
-  points as a placeholder; wiring it to the sqlite table is the next task.
+- **Status: implemented.** `POST /metrics` upserts into `metric_fact`;
+  `GET /metrics/latest` returns each node's most recent grid slot (powers the
+  console `metrics` command).
 - **Rendering:** **pivot long → columnar on read** for uPlot (shared grid-slot x
   axis + one y array per node). Long-format is best for ingest/churn; columnar is
   best for the chart — convert at the boundary.
-- **Retention / churn eviction:** prune **by time**. A stopped node emits no new
-  rows and its old rows age out of the window on their own — churn self-heals; the
-  retention `DELETE` is the only cleanup path needed.
+- **Retention / churn eviction (24 h):** prune **by time** — each ingest runs
+  `DELETE FROM metric_fact WHERE timestamp < now−24h`, so the table holds at most
+  the last 24 hours. A stopped node's rows age out on their own — churn self-heals;
+  that `DELETE` is the only cleanup path. (Pruning is inline on ingest today —
+  cheap and indexed; a periodic sweep is an easy swap if the coupling is unwanted.)
 - **Raw, derive on read:** store vLLM counters as-is; compute rates (tokens/s) at
   query time from adjacent samples, so we can re-derive over any window.
 
@@ -337,8 +362,10 @@ weeks/months.
 Worker-side sampling and reporting run as **two background threads owned by the
 coordinator**, because the coordinator is a **synchronous, thread-driven loop**
 (its state machine ticks on the heartbeat, using `threading.Event`) — not an
-asyncio program. A sampler thread keeps the 5 s grid; a reporter thread ships the
-buffer every 30 s; they share the buffer under a lock.
+asyncio program. A sampler thread keeps the 5 s grid (host `/proc` + GPU NVML +
+a vLLM `/metrics` scrape); a reporter thread ships the buffer every 30 s; they
+share the buffer under a lock. The GPU sampler picks its backend once at start and
+releases NVML on stop.
 - **Not async** — the coordinator isn't an event loop, so async tasks would have
   nothing to run on. Threads match the code that exists.
 - **Not a separate process** — sampling `/proc` is microseconds of work; a process
@@ -347,9 +374,24 @@ buffer every 30 s; they share the buffer under a lock.
 - If vLLM supervision ever genuinely starves the sampler, split it into its own
   **process** — but do not pre-pay that.
 
-Manager-side, the ingest endpoint (and a future retention sweep) run as async
-handlers/tasks on the control-plane event loop, like the heartbeat reaper — the
-manager *is* an async FastAPI/uvicorn server.
+Manager-side, the ingest endpoint runs as an async handler on the control-plane
+event loop and prunes inline; the store guards its sqlite connection with a lock
+(defensive, like the registry). The manager *is* an async FastAPI/uvicorn server.
+
+## Inspection — the `metrics` console command
+
+Until the dashboard lands, the manager console (`oumigo manager run`) reads the
+store directly:
+
+- **`GET /metrics/latest`** (server) → each node's most recent grid slot and the
+  metrics at it: `[{node_id, timestamp, metrics: {name: value, …}}, …]`.
+- **`metrics`** (console) → prints that per worker: the latest received grid
+  timestamp (UTC) and each `metric = value`. No arguments today; a history/range
+  view (`metrics <node>`, `--watch`) is a natural extension the store already
+  supports.
+
+The console is an HTTP client in the parent process while the store lives in the
+server child, so inspection goes over HTTP, not shared memory.
 
 ## Visualization
 
@@ -365,24 +407,28 @@ manager *is* an async FastAPI/uvicorn server.
 ## v1 scope
 
 Two channels — **heartbeat (10 s, unbuffered, real-time/liveness)** and the
-**metrics batch (historical)** — kept separate. Metrics: grid-aligned sampling
-(5 s) · batched report (30 s), drain-on-success / restore-and-retry on failure ·
-worker send-buffer bounded to 30 min, evicting the oldest 5 min on overflow · flat
+**metrics batch (historical)** — kept separate. Metrics: three sources (host
+`/proc` + GPU NVML/nvidia-smi + vLLM `/metrics`) · grid-aligned sampling (5 s) ·
+batched report (30 s), drain-on-success / restore-and-retry on failure · worker
+send-buffer bounded to 30 min, evicting the oldest 5 min on overflow · flat
 `(node_id, timestamp, metric, value)` rows with `YYYY-MM-DD HH:MM:SS` UTC
-timestamps · manager store = **in-memory sqlite**, upsert by
+timestamps · manager store = **in-memory sqlite** (`metric_fact`, 24 h), upsert by
 `(node_id, metric, timestamp)` · time-based retention · gaps as gaps · raw
-counters, rates derived on read · uPlot dashboard via polled JSON. Worker
-sampling/reporting on background threads. No downsampling, no Prometheus.
+counters, rates derived on read · `metrics` console inspection. Worker
+sampling/reporting on background threads. No downsampling, no Prometheus. The uPlot
+dashboard is the remaining v1 piece.
 
 ## Deferred / open questions
 
-- **Manager ingest → sqlite:** wire `POST /metrics` into the in-memory table
-  (upsert + retention sweep). Currently a counting placeholder.
+- **uPlot dashboard** — the manager's static page + JSON API over the store.
+  `GET /metrics/latest` exists; a windowed range/query endpoint is still needed.
 - Optional **on-disk** sqlite for restart durability + retention-policy specifics.
-- vLLM `/metrics` and GPU (`pynvml`) collectors — the worker sampler has the
-  extension point (`collect_host_metrics`); waits on those functions.
+- Retention is inline-on-ingest today; move to a periodic async sweep if the
+  coupling ever becomes unwanted.
 - Optional read-only Prometheus-format `/metrics` interop endpoint.
 - Config surface: grid interval, report interval, and buffer capacity are
   coordinator kwargs today; plumb them through `manager.yaml` (mirrors the
   `heartbeat.*` config style).
-- uPlot dashboard (static page + JSON API).
+- `pynvml` is an optional (unlisted) dependency — add it to the `worker` extra in
+  `pyproject.toml` if NVML should be guaranteed rather than falling back to
+  `nvidia-smi`.

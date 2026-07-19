@@ -15,6 +15,8 @@ import yaml
 from oumigo.config.spec import NodeSpec
 
 DEFAULT_PROVIDER = "LAN"
+DEFAULT_DATA_PLANE_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so LAN clients reach the router
+DEFAULT_DATA_PLANE_PORT = 7012
 
 
 def load_manager_yaml(config_file: Path | None) -> dict:
@@ -30,6 +32,15 @@ def load_manager_yaml(config_file: Path | None) -> dict:
 def get_provider_name(config: dict) -> str:
     """The configured provider name, defaulting to LAN."""
     return str(config.get("provider", DEFAULT_PROVIDER))
+
+
+def get_data_plane(config: dict) -> tuple[str, int]:
+    """The data-plane (router) bind host/port from the `data_plane` block."""
+    dp = config.get("data_plane") or {}
+    return (
+        str(dp.get("host", DEFAULT_DATA_PLANE_HOST)),
+        int(dp.get("port", DEFAULT_DATA_PLANE_PORT)),
+    )
 
 
 def build_node_spec(config: dict) -> NodeSpec | None:

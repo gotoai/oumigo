@@ -2,7 +2,8 @@
 
 Accepts worker registrations and heartbeats, tracks them in an in-memory
 `Registry`, and (unless disabled) advertises the manager on the LAN via mDNS.
-No vLLM / routing yet.
+`run_server` also starts the data-plane router (`manager.router`) on the same
+event loop, sharing this `Registry` so routing follows live heartbeat state.
 
 Concurrency model: parallelism is by **process**, not threads. This runs in its
 own process (spawned by `manager run`, or launched directly / by systemd), and
@@ -28,7 +29,8 @@ from oumigo.common.logging import configure_logging, set_verbosity
 from oumigo.config.spec import NodeSpec
 from oumigo.manager.control.registry import Registry
 from oumigo.manager.control.store import MetricStore
-from oumigo.manager.settings import build_node_spec, load_manager_yaml
+from oumigo.manager.router.server import create_router_app
+from oumigo.manager.settings import build_node_spec, get_data_plane, load_manager_yaml
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -191,20 +193,24 @@ def run_server(
     config_file: Path | None = None,
     node_spec: NodeSpec | None = None,
 ) -> None:
-    """Run the control-plane server in the foreground (event loop on the main thread).
+    """Run the manager's control plane **and** data-plane router together.
 
-    Blocks until SIGINT/SIGTERM (uvicorn's own handling). SIGUSR1/SIGUSR2 toggle log
-    verbosity at runtime — used by an attached console in the parent process.
+    Both FastAPI apps run on one event loop in this process and share the same
+    `Registry`, so the router always routes against live heartbeat state. Blocks
+    until SIGINT/SIGTERM. SIGUSR1/SIGUSR2 toggle log verbosity at runtime — used by
+    an attached console in the parent process.
     """
     configure_logging(verbose)
 
-    # Fall back to building the spec from the config file when not passed one (e.g. a
-    # child server spawned by the launcher only receives --config-file).
-    if node_spec is None and config_file is not None:
-        node_spec = build_node_spec(load_manager_yaml(config_file))
+    # Load the config once for both the vLLM spec and the data-plane bind. A child
+    # server spawned by the launcher only receives --config-file, so re-read here.
+    manager_config = load_manager_yaml(config_file) if config_file is not None else {}
+    if node_spec is None:
+        node_spec = build_node_spec(manager_config)
+    data_host, data_port = get_data_plane(manager_config)
 
     registry = Registry()
-    app = create_app(
+    control_app = create_app(
         registry,
         token,
         heartbeat_interval,
@@ -214,11 +220,15 @@ def run_server(
         reaper_forget_after=forget_after,
         node_spec=node_spec,
     )
+    router_app = create_router_app(registry, node_spec)
 
     log.info(
-        "manager control plane on %s:%d (provider=%s, auth=%s, model=%s)",
+        "manager control plane on %s:%d | data plane on %s:%d "
+        "(provider=%s, auth=%s, model=%s)",
         host,
         port,
+        data_host,
+        data_port,
         provider_name,
         "enabled" if token else "disabled",
         node_spec.model if node_spec else "unset",
@@ -227,11 +237,50 @@ def run_server(
     signal.signal(signal.SIGUSR1, lambda *_: set_verbosity(True))   # console: verbose on
     signal.signal(signal.SIGUSR2, lambda *_: set_verbosity(False))  # console: verbose off
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_config=None,
-        access_log=False,
-        log_level="info" if verbose else "warning",
+    log_level = "info" if verbose else "warning"
+    asyncio.run(
+        _serve_both(
+            (control_app, host, port),
+            (router_app, data_host, data_port),
+            log_level,
+        )
     )
+
+
+async def _serve_both(
+    control: tuple[FastAPI, str, int],
+    router: tuple[FastAPI, str, int],
+    log_level: str,
+) -> None:
+    """Serve the control and router apps concurrently on one event loop.
+
+    uvicorn's per-server signal handlers would clobber each other (last one wins),
+    so we disable them and install a single handler that asks both to drain.
+    """
+    servers: list[uvicorn.Server] = []
+    for app, bind_host, bind_port in (control, router):
+        config = uvicorn.Config(
+            app,
+            host=bind_host,
+            port=bind_port,
+            log_config=None,
+            access_log=False,
+            log_level=log_level,
+        )
+        server = uvicorn.Server(config)
+        server.install_signal_handlers = lambda: None  # we manage shutdown centrally
+        servers.append(server)
+
+    loop = asyncio.get_running_loop()
+
+    def _request_shutdown() -> None:
+        for server in servers:
+            server.should_exit = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:  # pragma: no cover - non-Unix
+            pass
+
+    await asyncio.gather(*(server.serve() for server in servers))

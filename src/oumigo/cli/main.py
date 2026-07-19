@@ -125,7 +125,7 @@ def _resolve_manager_runtime(
         "provider": provider,
         "node_spec": build_node_spec(manager_config),
         "bind_host": host or control_plane.get("host", "0.0.0.0"),
-        "bind_port": port or int(control_plane.get("port", 7012)),
+        "bind_port": port or int(control_plane.get("port", 7014)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
         "heartbeat_timeout": int(heartbeat_cfg.get("timeout_s", 30)),
         "forget_after": int(heartbeat_cfg.get("forget_after_days", 14)) * 86400,
@@ -198,7 +198,8 @@ def manager_run(
 
     On a TTY: spawn the control-plane server as a child process and attach an
     interactive console over HTTP (quit stops the child). Headless (no TTY, e.g.
-    systemd): run the server directly. No vLLM / routing yet.
+    systemd): run the server directly. Serves the control plane and the data-plane
+    router (client inference calls forwarded to healthy worker vLLMs) together.
     """
     from oumigo.manager.auth import NO_TOKEN_WARNING
 
