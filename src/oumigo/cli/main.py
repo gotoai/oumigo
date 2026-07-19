@@ -53,19 +53,30 @@ def worker_run(
         envvar="OUMIGO_DISCOVER_TIMEOUT",
         help="Seconds to wait for mDNS discovery of the manager (when no --manager-url).",
     ),
+    env_file: Optional[Path] = typer.Option(
+        Path(".env"),
+        "--env-file",
+        help="Load KEY=VALUE vars from this file into the environment (inherited by "
+        "vLLM). Existing environment variables win. Skipped if the file is absent.",
+    ),
 ) -> None:
-    """Resolve identity, find the manager (explicit URL or mDNS), register, heartbeat.
+    """Load the env file, resolve identity, find the manager, register, and supervise vLLM.
 
-    No vLLM yet — this is the registration path only.
+    The env file is applied before anything reads the environment, so vars like
+    HF_HOME / HF_TOKEN / VLLM_* reach the vLLM child process the coordinator spawns.
     """
     import logging
 
+    from oumigo.common.env import load_env_file
     from oumigo.manager.auth import resolve_manager_token  # shared bearer token
     from oumigo.worker.coordinator import run_worker
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+
+    if env_file is not None:
+        load_env_file(env_file)
 
     try:
         token = resolve_manager_token(token_file)
@@ -84,22 +95,22 @@ def worker_run(
 
 
 def _resolve_manager_runtime(
-    config: Optional[Path], token_file: Optional[Path], host: Optional[str], port: Optional[int]
+    config_file: Optional[Path], token_file: Optional[Path], host: Optional[str], port: Optional[int]
 ) -> dict:
-    """Resolve config dir, token, provider, and bind host/port for the manager."""
-    from oumigo.config import resolve_config_dir
+    """Resolve config file, token, provider, and bind host/port for the manager."""
+    from oumigo.config import resolve_config_file
     from oumigo.manager.auth import resolve_manager_token
-    from oumigo.manager.settings import get_provider_name, load_manager_yaml
+    from oumigo.manager.settings import build_node_spec, get_provider_name, load_manager_yaml
     from oumigo.providers import create_provider
 
-    config_dir = resolve_config_dir(config)
+    config_file = resolve_config_file(config_file)
     try:
         token = resolve_manager_token(token_file)
     except OSError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
-    manager_config = load_manager_yaml(config_dir)
+    manager_config = load_manager_yaml(config_file)
     try:
         provider = create_provider(get_provider_name(manager_config))
     except ValueError as exc:
@@ -109,9 +120,10 @@ def _resolve_manager_runtime(
     control_plane = manager_config.get("control_plane", {}) or {}
     heartbeat_cfg = manager_config.get("heartbeat", {}) or {}
     return {
-        "config_dir": config_dir,
+        "config_file": config_file,
         "token": token,
         "provider": provider,
+        "node_spec": build_node_spec(manager_config),
         "bind_host": host or control_plane.get("host", "0.0.0.0"),
         "bind_port": port or int(control_plane.get("port", 8080)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
@@ -122,8 +134,12 @@ def _resolve_manager_runtime(
 
 @manager_app.command("serve")
 def manager_serve(
-    config: Optional[Path] = typer.Option(
-        None, "--config", "-c", help="Config directory (overrides the search path)."
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        "-c",
+        envvar="OUMIGO_CONFIG_FILE",
+        help="Path to the manager config file (overrides the search path).",
     ),
     token_file: Optional[Path] = typer.Option(
         None, "--token-file", help="Path to a file containing the shared bearer token."
@@ -140,7 +156,7 @@ def manager_serve(
     from oumigo.manager.auth import NO_TOKEN_WARNING
     from oumigo.manager.control.server import run_server
 
-    rt = _resolve_manager_runtime(config, token_file, host, port)
+    rt = _resolve_manager_runtime(config_file, token_file, host, port)
     if rt["token"] is None:
         typer.echo(NO_TOKEN_WARNING, err=True)
 
@@ -154,13 +170,19 @@ def manager_serve(
         forget_after=rt["forget_after"],
         advertise=not no_mdns,
         verbose=verbose,
+        config_file=rt["config_file"],
+        node_spec=rt["node_spec"],
     )
 
 
 @manager_app.command("run")
 def manager_run(
-    config: Optional[Path] = typer.Option(
-        None, "--config", "-c", help="Config directory (overrides the search path)."
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        "-c",
+        envvar="OUMIGO_CONFIG_FILE",
+        help="Path to the manager config file (overrides the search path).",
     ),
     token_file: Optional[Path] = typer.Option(
         None, "--token-file", help="Path to a file containing the shared bearer token."
@@ -180,7 +202,7 @@ def manager_run(
     """
     from oumigo.manager.auth import NO_TOKEN_WARNING
 
-    rt = _resolve_manager_runtime(config, token_file, host, port)
+    rt = _resolve_manager_runtime(config_file, token_file, host, port)
 
     if not sys.stdin.isatty():
         # Headless: run the server directly in this process.
@@ -198,6 +220,8 @@ def manager_run(
             forget_after=rt["forget_after"],
             advertise=not no_mdns,
             verbose=verbose,
+            config_file=rt["config_file"],
+            node_spec=rt["node_spec"],
         )
         return
 
@@ -205,8 +229,8 @@ def manager_run(
     from oumigo.manager.launcher import run_with_child_server
 
     forward = ["--host", rt["bind_host"], "--port", str(rt["bind_port"])]
-    if rt["config_dir"] is not None:
-        forward += ["--config", str(rt["config_dir"])]
+    if rt["config_file"] is not None:
+        forward += ["--config-file", str(rt["config_file"])]
     if no_mdns:
         forward.append("--no-mdns")
     if verbose:

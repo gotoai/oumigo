@@ -1,9 +1,11 @@
 """Typed configuration schemas — the validated specs everything resolves to.
 
-`NodeSpec` describes one vLLM replica (the concrete args for one server).
-`ClusterSpec` describes the desired fleet; the manager expands it into NodeSpecs.
+`NodeSpec` describes one vLLM replica (the concrete args for one server). It is
+also the wire payload the manager hands a worker at registration, so the worker
+knows exactly what `vllm serve` to run — a homogeneous fleet means every worker
+gets the same spec.
 
-Fields below are placeholders to be fleshed out during implementation.
+`ClusterSpec` describes the desired fleet; the manager expands it into NodeSpecs.
 """
 
 from __future__ import annotations
@@ -12,12 +14,36 @@ from pydantic import BaseModel, Field
 
 
 class NodeSpec(BaseModel):
-    """Concrete description of a single vLLM replica / worker node."""
+    """Concrete description of a single vLLM replica / worker node.
+
+    Fields map directly onto `vllm serve` arguments (see
+    `oumigo.worker.supervisor.build_argv`). Local-only concerns (HF/vLLM cache
+    dirs) are NOT here — those come from the worker's own environment.
+    """
 
     model: str = Field(..., description="Model id/path passed to `vllm serve`.")
-    port: int = Field(8000, description="Port the vLLM server binds (0.0.0.0).")
-    # vLLM knobs: dtype, tensor_parallel_size, gpu_memory_utilization, download_dir, ...
-    # Provider placeholders (inert until L2 lands): image_id, flavor, gpu_count, ...
+    host: str = Field(default="0.0.0.0", description="Host the vLLM server binds.")
+    port: int = Field(default=8000, description="Port the vLLM server binds.")
+
+    # vLLM tuning knobs (mirror the manager.yaml `model:` block).
+    dtype: str = Field(
+        default="auto", description="auto | bfloat16 | float16 (Pascal: force float16)."
+    )
+    tensor_parallel_size: int = Field(
+        default=1, ge=1, description="GPUs to shard the model across."
+    )
+    gpu_memory_utilization: float = Field(
+        default=0.90, gt=0, le=1, description="Fraction of VRAM vLLM may use."
+    )
+    max_model_len: int | None = Field(
+        default=None, description="Max context length; None uses the model default."
+    )
+    download_dir: str | None = Field(
+        default=None, description="Where vLLM downloads weights; None uses HF_HOME / the HF default."
+    )
+    extra_args: list[str] = Field(
+        default_factory=list, description="Verbatim extra `vllm serve` flags (escape hatch)."
+    )
 
 
 class ClusterSpec(BaseModel):

@@ -24,6 +24,7 @@ class NodeRecord:
     capabilities: dict
     registered_at: float
     last_seen: float
+    run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -60,14 +61,15 @@ class Registry:
             self._nodes[node_id] = record
             return record
 
-    def heartbeat(self, node_id: str, state: str) -> bool:
-        """Update last_seen. Returns False if the node is unknown (should re-register)."""
+    def heartbeat(self, node_id: str, state: str, run_state: str | None = None) -> bool:
+        """Update last_seen + state. Returns False if the node is unknown (should re-register)."""
         with self._lock:
             record = self._nodes.get(node_id)
             if record is None:
                 return False
             record.last_seen = time.time()
             record.state = state
+            record.run_state = run_state
             return True
 
     def list(self) -> list[NodeRecord]:

@@ -17,6 +17,7 @@ import asyncio
 import logging
 import signal
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -24,7 +25,9 @@ from zeroconf.asyncio import AsyncZeroconf
 
 from oumigo import discovery
 from oumigo.common.logging import configure_logging, set_verbosity
+from oumigo.config.spec import NodeSpec
 from oumigo.manager.control.registry import Registry
+from oumigo.manager.settings import build_node_spec, load_manager_yaml
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -43,6 +46,7 @@ def create_app(
     advertise_port: int | None = None,
     reaper_timeout: float | None = None,
     reaper_forget_after: float | None = None,
+    node_spec: NodeSpec | None = None,
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
@@ -105,15 +109,24 @@ def create_app(
             capabilities=req.capabilities.model_dump(),
         )
         log.info("registered node %s at %s (incarnation=%d)", req.node_id, req.address, req.incarnation)
+        if node_spec is None:
+            log.warning("no model configured; node %s gets no vLLM config", req.node_id)
         return RegisterResponse(
-            accepted=True, node_id=req.node_id, heartbeat_interval_s=heartbeat_interval
+            accepted=True,
+            node_id=req.node_id,
+            heartbeat_interval_s=heartbeat_interval,
+            node_spec=node_spec,
         )
 
     @app.post("/heartbeat", response_model=HeartbeatResponse)
     async def heartbeat(req: HeartbeatRequest, _: None = Depends(check_auth)) -> HeartbeatResponse:
-        known = registry.heartbeat(req.node_id, req.state.value)
+        run_state = req.run_state.value if req.run_state is not None else None
+        known = registry.heartbeat(req.node_id, req.node_state.value, run_state)
         if not known:
             log.warning("heartbeat from unknown node %s (asking it to re-register)", req.node_id)
+        # STOP delivery hook: a future console/router command sets a per-node command
+        # here (HeartbeatResponse.command). None for now — the pull channel is wired,
+        # the trigger is not.
         return HeartbeatResponse(ok=True, known=known)
 
     @app.get("/nodes")
@@ -159,6 +172,8 @@ def run_server(
     forget_after: float = 14 * 86400,
     advertise: bool = True,
     verbose: bool = False,
+    config_file: Path | None = None,
+    node_spec: NodeSpec | None = None,
 ) -> None:
     """Run the control-plane server in the foreground (event loop on the main thread).
 
@@ -166,6 +181,11 @@ def run_server(
     verbosity at runtime — used by an attached console in the parent process.
     """
     configure_logging(verbose)
+
+    # Fall back to building the spec from the config file when not passed one (e.g. a
+    # child server spawned by the launcher only receives --config-file).
+    if node_spec is None and config_file is not None:
+        node_spec = build_node_spec(load_manager_yaml(config_file))
 
     registry = Registry()
     app = create_app(
@@ -176,14 +196,16 @@ def run_server(
         advertise_port=port if advertise else None,
         reaper_timeout=heartbeat_timeout,
         reaper_forget_after=forget_after,
+        node_spec=node_spec,
     )
 
     log.info(
-        "manager control plane on %s:%d (provider=%s, auth=%s)",
+        "manager control plane on %s:%d (provider=%s, auth=%s, model=%s)",
         host,
         port,
         provider_name,
         "enabled" if token else "disabled",
+        node_spec.model if node_spec else "unset",
     )
 
     signal.signal(signal.SIGUSR1, lambda *_: set_verbosity(True))   # console: verbose on

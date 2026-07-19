@@ -10,12 +10,21 @@ from __future__ import annotations
 import os
 import signal
 import time
+from pathlib import Path
 
 import httpx
 
 from oumigo import __version__
 
+try:
+    # Importing readline transparently upgrades input() with line editing and
+    # arrow-key history (like bash). Absent it, arrow keys emit raw escape codes.
+    import readline
+except ImportError:  # pragma: no cover - readline is stdlib on Linux (mandated platform)
+    readline = None  # type: ignore[assignment]
+
 PROMPT = "oumigo> "
+HISTORY_LENGTH = 200  # commands retained in the console history cache
 
 
 class ManagerConsole:
@@ -29,19 +38,52 @@ class ManagerConsole:
 
     def run(self) -> None:
         self._running = True
+        self._init_history()
         self._banner()
-        while self._running:
-            try:
-                line = input(PROMPT).strip()
-            except EOFError:  # Ctrl-D → clean exit
-                print()
-                self._quit()
-                break
-            except KeyboardInterrupt:  # Ctrl-C cancels the line, not the process
-                print()
-                continue
-            if line:
-                self._dispatch(line)
+        try:
+            while self._running:
+                try:
+                    line = input(PROMPT).strip()
+                except EOFError:  # Ctrl-D → clean exit
+                    print()
+                    self._quit()
+                    break
+                except KeyboardInterrupt:  # Ctrl-C cancels the line, not the process
+                    print()
+                    continue
+                if line:
+                    self._dispatch(line)
+        finally:
+            self._save_history()
+
+    # --- command history (bash-like arrow-key navigation) --------------------
+
+    @staticmethod
+    def _history_path() -> Path:
+        """User-level history file, alongside other oumigo state (XDG state dir)."""
+        state_home = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+        return Path(state_home) / "oumigo" / "console_history"
+
+    def _init_history(self) -> None:
+        if readline is None:
+            return
+        path = self._history_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_file():
+                readline.read_history_file(str(path))
+        except OSError:
+            pass  # history is a convenience; never block the console on it
+        readline.set_history_length(HISTORY_LENGTH)
+
+    def _save_history(self) -> None:
+        if readline is None:
+            return
+        try:
+            readline.set_history_length(HISTORY_LENGTH)
+            readline.write_history_file(str(self._history_path()))
+        except OSError:
+            pass
 
     def _dispatch(self, line: str) -> None:
         cmd, *args = line.split()

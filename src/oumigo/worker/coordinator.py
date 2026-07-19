@@ -1,8 +1,17 @@
 """Coordinator — the long-lived worker-node process.
 
-For v1 (no vLLM yet) it: resolves the node identity, finds the manager (explicit
-URL, else mDNS discovery), registers, and heartbeats until stopped. vLLM
-supervision plugs in here later.
+Owns the node state machine (see docs/worker-node-states.md) and drives it from a
+single loop whose tick is the heartbeat:
+
+    REGISTERING -> INITIALIZING -> SERVING -> DRAINING -> STOPPED
+                        ^  (restart)             |
+                        +---- crash -------------+  (policy exhausted -> FAILED)
+
+Each tick reconciles the vLLM child's real status into the node state, then
+heartbeats that state to the manager and acts on any command it returns (STOP).
+Keeping reconcile and heartbeat on one loop means the long INITIALIZING window
+(model load — minutes) is *visible* to the manager rather than looking like a
+silent, LOST node.
 """
 
 from __future__ import annotations
@@ -10,17 +19,226 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 from pathlib import Path
 
 import httpx
 
 from oumigo import discovery
-from oumigo.protocol.messages import HeartbeatRequest, NodeCapabilities, RegisterRequest
-from oumigo.protocol.states import NodeState
+from oumigo.config.spec import NodeSpec
+from oumigo.protocol.messages import (
+    HeartbeatRequest,
+    HeartbeatResponse,
+    NodeCapabilities,
+    RegisterRequest,
+    RegisterResponse,
+    WorkerCommand,
+)
+from oumigo.protocol.states import NodeState, RunState
 from oumigo.worker import client
 from oumigo.worker.identity import resolve_node_identity
+from oumigo.worker.supervisor import VLLMProcess
 
 log = logging.getLogger("oumigo.worker")
+
+
+class WorkerCoordinator:
+    """Registers with the manager, supervises vLLM, and drives the state machine."""
+
+    def __init__(
+        self,
+        manager_url: str,
+        token: str | None,
+        node_id: str,
+        register_req: RegisterRequest,
+        *,
+        max_restarts: int = 3,
+        restart_backoff_s: float = 5.0,
+        stop_grace_s: float = 30.0,
+        drain_timeout_s: float = 120.0,
+    ) -> None:
+        self.manager_url = manager_url
+        self.token = token
+        self.node_id = node_id
+        self.register_req = register_req
+        self.max_restarts = max_restarts
+        self.restart_backoff_s = restart_backoff_s
+        self.stop_grace_s = stop_grace_s
+        self.drain_timeout_s = drain_timeout_s
+
+        self.node_state: NodeState = NodeState.REGISTERING
+        self.run_state: RunState | None = None
+        self.interval: float = 10.0
+        self.spec: NodeSpec | None = None
+        self.supervisor: VLLMProcess | None = None
+        self._restarts = 0
+
+        self._stop = threading.Event()   # graceful stop requested (signal or STOP command)
+        self._force = threading.Event()  # second signal: stop draining, kill now
+
+    # --- entrypoint ----------------------------------------------------------
+
+    def run(self) -> None:
+        self._install_signals()
+        resp = self._register()
+        spec = resp.node_spec
+        if spec is None:
+            raise SystemExit(
+                "manager accepted registration but returned no vLLM config; "
+                "set model.name in the manager's manager.yaml — nothing to serve"
+            )
+        self._start_vllm(spec)
+        self._loop()
+        # Loop returns on a graceful stop (drain + shut down) or on FAILED (already dead).
+        if self.node_state != NodeState.FAILED:
+            self._drain_and_stop()
+        log.info("coordinator exiting (final state=%s)", self.node_state.value)
+
+    # --- main loop -----------------------------------------------------------
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._reconcile()
+            if self.node_state == NodeState.FAILED:
+                self._send_heartbeat()  # tell the manager promptly, then give up
+                return
+            resp = self._send_heartbeat()
+            if resp is None:
+                continue  # transient blip; stay alive and retry next tick
+            if not resp.known:
+                log.warning("manager does not know us; re-registering")
+                self._reregister()
+            elif resp.command == WorkerCommand.STOP:
+                log.info("received STOP from manager")
+                self._stop.set()
+                return
+
+    def _reconcile(self) -> None:
+        """Fold the vLLM child's real status into node_state / run_state."""
+        sup = self.supervisor
+        if sup is None:
+            return
+        if sup.running:
+            if self.node_state == NodeState.INITIALIZING and sup.is_healthy():
+                log.info("vLLM healthy -> SERVING")
+                self.node_state = NodeState.SERVING
+            if self.node_state == NodeState.SERVING:
+                self.run_state = sup.run_state()
+            return
+        # Not running and we didn't ask it to stop -> unexpected exit.
+        log.warning("vLLM exited unexpectedly (code=%s)", sup.poll())
+        self._handle_crash()
+
+    def _handle_crash(self) -> None:
+        self.run_state = None
+        if self._restarts >= self.max_restarts:
+            log.error("vLLM restart policy exhausted (%d attempts) -> FAILED", self._restarts)
+            self.node_state = NodeState.FAILED
+            return
+        self._restarts += 1
+        backoff = min(self.restart_backoff_s * self._restarts, 30.0)
+        log.info(
+            "restarting vLLM (attempt %d/%d) after %.0fs backoff",
+            self._restarts,
+            self.max_restarts,
+            backoff,
+        )
+        self.node_state = NodeState.INITIALIZING
+        if self._stop.wait(backoff):  # interruptible: a stop during backoff aborts the restart
+            return
+        assert self.spec is not None
+        self.supervisor = VLLMProcess(self.spec)
+        self.supervisor.start()
+
+    # --- steps ---------------------------------------------------------------
+
+    def _register(self) -> RegisterResponse:
+        try:
+            resp = client.register(self.manager_url, self.register_req, self.token)
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code == 401:
+                raise SystemExit("registration rejected (401): check the shared bearer token")
+            raise SystemExit(f"registration failed: HTTP {code}")
+        except httpx.RequestError as exc:
+            raise SystemExit(f"could not reach manager at {self.manager_url}: {exc}")
+        self.interval = resp.heartbeat_interval_s or 10
+        log.info(
+            "registered with manager %s (accepted=%s, heartbeat=%.0fs)",
+            self.manager_url,
+            resp.accepted,
+            self.interval,
+        )
+        return resp
+
+    def _reregister(self) -> None:
+        try:
+            client.register(self.manager_url, self.register_req, self.token)
+        except Exception as exc:  # noqa: BLE001 - best-effort; next tick retries
+            log.warning("re-registration failed: %s", exc)
+
+    def _start_vllm(self, spec: NodeSpec) -> None:
+        self.spec = spec
+        self.node_state = NodeState.INITIALIZING
+        self.supervisor = VLLMProcess(spec)
+        self.supervisor.start()
+        log.info("loading model %s on port %d (this can take minutes)", spec.model, spec.port)
+
+    def _drain_and_stop(self) -> None:
+        """DRAINING: refuse new work, let in-flight finish, then stop vLLM -> STOPPED."""
+        sup = self.supervisor
+        if sup is None or not sup.running:
+            self.node_state = NodeState.STOPPED
+            self.run_state = None
+            self._send_heartbeat()
+            return
+
+        self.node_state = NodeState.DRAINING
+        deadline = time.monotonic() + self.drain_timeout_s
+        while (
+            not self._force.is_set()
+            and time.monotonic() < deadline
+            and sup.run_state() == RunState.EXECUTING
+        ):
+            self.run_state = RunState.EXECUTING
+            log.info("draining: waiting for in-flight requests to finish")
+            self._send_heartbeat()
+            time.sleep(min(self.interval, max(0.0, deadline - time.monotonic())))
+
+        sup.stop(self.stop_grace_s)
+        self.node_state = NodeState.STOPPED
+        self.run_state = None
+        self._send_heartbeat()
+        log.info("vLLM stopped cleanly -> STOPPED")
+
+    # --- helpers -------------------------------------------------------------
+
+    def _send_heartbeat(self) -> HeartbeatResponse | None:
+        try:
+            return client.heartbeat(
+                self.manager_url,
+                HeartbeatRequest(
+                    node_id=self.node_id,
+                    node_state=self.node_state,
+                    run_state=self.run_state,
+                ),
+                self.token,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the worker alive across blips
+            log.warning("heartbeat failed: %s", exc)
+            return None
+
+    def _install_signals(self) -> None:
+        def handler(signum: int, _frame: object) -> None:
+            if self._stop.is_set():
+                log.warning("second signal (%d); forcing shutdown", signum)
+                self._force.set()
+            else:
+                log.info("signal %d received; draining and shutting down", signum)
+                self._stop.set()
+
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
 
 
 def run_worker(
@@ -29,6 +247,7 @@ def run_worker(
     state_dir: Path | None = None,
     discover_timeout: float = discovery.DEFAULT_DISCOVER_TIMEOUT,
 ) -> None:
+    """Resolve identity, find the manager, then hand off to the coordinator loop."""
     node_id, incarnation, path = resolve_node_identity(state_dir)
     log.info("node identity %s (incarnation %d) [%s]", node_id, incarnation, path)
 
@@ -42,46 +261,11 @@ def run_worker(
             )
         log.info("discovered manager at %s", manager_url)
 
-    address = discovery.get_lan_ip()
     register_req = RegisterRequest(
         node_id=node_id,
-        address=address,
+        address=discovery.get_lan_ip(),
         incarnation=incarnation,
         state=NodeState.REGISTERING,
         capabilities=NodeCapabilities(),
     )
-    try:
-        resp = client.register(manager_url, register_req, token)
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code == 401:
-            raise SystemExit("registration rejected (401): check the shared bearer token")
-        raise SystemExit(f"registration failed: HTTP {code}")
-    except httpx.RequestError as exc:
-        raise SystemExit(f"could not reach manager at {manager_url}: {exc}")
-    interval = resp.heartbeat_interval_s or 10
-    log.info(
-        "registered with manager %s (accepted=%s, heartbeat=%ds)",
-        manager_url,
-        resp.accepted,
-        interval,
-    )
-
-    stop = threading.Event()
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-
-    while not stop.wait(interval):
-        try:
-            hb = client.heartbeat(
-                manager_url, HeartbeatRequest(node_id=node_id, state=NodeState.READY), token
-            )
-            if not hb.known:
-                log.warning("manager does not know us; re-registering")
-                client.register(manager_url, register_req, token)
-            else:
-                log.debug("heartbeat ok")
-        except Exception as exc:  # noqa: BLE001 - keep the worker alive across blips
-            log.warning("heartbeat failed: %s", exc)
-
-    log.info("worker stopping")
+    WorkerCoordinator(manager_url, token, node_id, register_req).run()
