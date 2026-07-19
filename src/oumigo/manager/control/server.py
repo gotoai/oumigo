@@ -27,10 +27,12 @@ from oumigo import discovery
 from oumigo.common.logging import configure_logging, set_verbosity
 from oumigo.config.spec import NodeSpec
 from oumigo.manager.control.registry import Registry
+from oumigo.manager.control.store import MetricStore
 from oumigo.manager.settings import build_node_spec, load_manager_yaml
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
+    MetricsReport,
     RegisterRequest,
     RegisterResponse,
 )
@@ -47,6 +49,7 @@ def create_app(
     reaper_timeout: float | None = None,
     reaper_forget_after: float | None = None,
     node_spec: NodeSpec | None = None,
+    store: MetricStore | None = None,
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
@@ -54,6 +57,8 @@ def create_app(
     background task so registration happens after the socket is serving (no race)
     and without delaying startup or blocking the loop.
     """
+
+    store = store or MetricStore()
 
     async def check_auth(authorization: str | None = Header(default=None)) -> None:
         if token is None:
@@ -128,6 +133,17 @@ def create_app(
         # here (HeartbeatResponse.command). None for now — the pull channel is wired,
         # the trigger is not.
         return HeartbeatResponse(ok=True, known=known)
+
+    @app.post("/metrics")
+    async def metrics(report: MetricsReport, _: None = Depends(check_auth)) -> dict:
+        written = store.ingest(report.node_id, report.points)
+        log.debug("metrics: ingested %d points from node %s", written, report.node_id)
+        return {"ok": True, "accepted": written}
+
+    @app.get("/metrics/latest")
+    async def metrics_latest() -> dict:
+        # The last grid slot received per node — powers the console `metrics` command.
+        return {"nodes": store.latest_per_node()}
 
     @app.get("/nodes")
     async def nodes() -> dict:

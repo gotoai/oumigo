@@ -99,6 +99,7 @@ class ManagerConsole:
             "help": self._help,
             "status": self._status,
             "nodes": self._nodes,
+            "metrics": self._metrics,
             "verbose": self._verbose,
             "version": lambda args: print(__version__),
             "quit": lambda args: self._quit(),
@@ -124,6 +125,7 @@ class ManagerConsole:
         print("  help              show this help")
         print("  status            show manager status")
         print("  nodes             list registered worker nodes")
+        print("  metrics           show each worker's latest received grid metrics")
         print("  verbose [on|off]  stream server logs to the console (toggle)")
         print("  version           print the oumigo version")
         print("  quit | exit       stop the manager (server + console)")
@@ -153,6 +155,20 @@ class ManagerConsole:
                 f"  {record['node_id']}  {record['address']}  "
                 f"state={record['state']}  last_seen={now - record['last_seen']:.0f}s ago"
             )
+
+    def _metrics(self, args: list[str]) -> None:
+        data = self._get("/metrics/latest")
+        if data is None:
+            return
+        nodes = data.get("nodes", [])
+        if not nodes:
+            print("no metrics received yet.")
+            return
+        for record in nodes:
+            metrics = record.get("metrics", {})
+            print(f"  {record['node_id']}  @ {record['timestamp']} UTC  ({len(metrics)} metrics)")
+            for name, value in metrics.items():
+                print(f"      {name} = {value:g}")
 
     def _verbose(self, args: list[str]) -> None:
         if args and args[0].lower() in ("on", "off"):

@@ -23,11 +23,11 @@ class NodeSpec(BaseModel):
 
     model: str = Field(..., description="Model id/path passed to `vllm serve`.")
     host: str = Field(default="0.0.0.0", description="Host the vLLM server binds.")
-    port: int = Field(default=8000, description="Port the vLLM server binds.")
+    port: int = Field(default=7001, description="Port the vLLM server binds.")
 
     # vLLM tuning knobs (mirror the manager.yaml `model:` block).
     dtype: str = Field(
-        default="auto", description="auto | bfloat16 | float16 (Pascal: force float16)."
+        default="auto", description="vLLM dtype: auto | bfloat16 | float16."
     )
     tensor_parallel_size: int = Field(
         default=1, ge=1, description="GPUs to shard the model across."

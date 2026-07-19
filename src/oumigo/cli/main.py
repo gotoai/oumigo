@@ -125,7 +125,7 @@ def _resolve_manager_runtime(
         "provider": provider,
         "node_spec": build_node_spec(manager_config),
         "bind_host": host or control_plane.get("host", "0.0.0.0"),
-        "bind_port": port or int(control_plane.get("port", 8080)),
+        "bind_port": port or int(control_plane.get("port", 7012)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
         "heartbeat_timeout": int(heartbeat_cfg.get("timeout_s", 30)),
         "forget_after": int(heartbeat_cfg.get("forget_after_days", 14)) * 86400,

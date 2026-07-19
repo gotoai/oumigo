@@ -7,6 +7,7 @@ import httpx
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
+    MetricsReport,
     RegisterRequest,
     RegisterResponse,
 )
@@ -40,3 +41,16 @@ def heartbeat(
     )
     resp.raise_for_status()
     return HeartbeatResponse.model_validate(resp.json())
+
+
+def send_metrics(
+    manager_url: str, report: MetricsReport, token: str | None = None, timeout: float = 10.0
+) -> None:
+    """POST a buffered metrics batch. Raises on non-2xx so the caller can re-buffer."""
+    resp = httpx.post(
+        f"{manager_url.rstrip('/')}/metrics",
+        json=report.model_dump(mode="json"),
+        headers=_headers(token),
+        timeout=timeout,
+    )
+    resp.raise_for_status()

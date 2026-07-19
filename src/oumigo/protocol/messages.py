@@ -74,3 +74,26 @@ class HeartbeatResponse(BaseModel):
     ok: bool
     known: bool = True
     command: WorkerCommand | None = None
+
+
+class MetricPoint(BaseModel):
+    """One metric data point in a batch. `node_id` is hoisted to the report level.
+
+    `timestamp` is the grid-slot wall-clock in 'YYYY-MM-DD HH:MM:SS' (UTC) form, so
+    the manager stores rows as (node_id, timestamp, metric, value) — the long/narrow
+    fact model in docs/metrics.md.
+    """
+
+    timestamp: str
+    metric: str
+    value: float
+
+
+class MetricsReport(BaseModel):
+    """Worker -> manager: a buffered batch of grid-aligned samples (historical channel).
+
+    Separate from the heartbeat: delay-tolerant, buffered, and retried on failure.
+    """
+
+    node_id: str
+    points: list[MetricPoint]

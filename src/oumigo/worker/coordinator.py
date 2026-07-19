@@ -37,6 +37,7 @@ from oumigo.protocol.messages import (
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.worker import client
 from oumigo.worker.identity import resolve_node_identity
+from oumigo.worker.metrics import MetricsCollector
 from oumigo.worker.supervisor import VLLMProcess
 
 log = logging.getLogger("oumigo.worker")
@@ -56,6 +57,11 @@ class WorkerCoordinator:
         restart_backoff_s: float = 5.0,
         stop_grace_s: float = 30.0,
         drain_timeout_s: float = 120.0,
+        metrics_enabled: bool = True,
+        metrics_grid_s: float = 5.0,
+        metrics_report_s: float = 30.0,
+        metrics_capacity_s: float = 1800.0,
+        metrics_evict_chunk_s: float = 300.0,
     ) -> None:
         self.manager_url = manager_url
         self.token = token
@@ -65,12 +71,18 @@ class WorkerCoordinator:
         self.restart_backoff_s = restart_backoff_s
         self.stop_grace_s = stop_grace_s
         self.drain_timeout_s = drain_timeout_s
+        self.metrics_enabled = metrics_enabled
+        self.metrics_grid_s = metrics_grid_s
+        self.metrics_report_s = metrics_report_s
+        self.metrics_capacity_s = metrics_capacity_s
+        self.metrics_evict_chunk_s = metrics_evict_chunk_s
 
         self.node_state: NodeState = NodeState.REGISTERING
         self.run_state: RunState | None = None
         self.interval: float = 10.0
         self.spec: NodeSpec | None = None
         self.supervisor: VLLMProcess | None = None
+        self.metrics: MetricsCollector | None = None
         self._restarts = 0
 
         self._stop = threading.Event()   # graceful stop requested (signal or STOP command)
@@ -88,10 +100,12 @@ class WorkerCoordinator:
                 "set model.name in the manager's manager.yaml — nothing to serve"
             )
         self._start_vllm(spec)
+        self._start_metrics()
         self._loop()
         # Loop returns on a graceful stop (drain + shut down) or on FAILED (already dead).
         if self.node_state != NodeState.FAILED:
             self._drain_and_stop()
+        self._stop_metrics()
         log.info("coordinator exiting (final state=%s)", self.node_state.value)
 
     # --- main loop -----------------------------------------------------------
@@ -183,6 +197,35 @@ class WorkerCoordinator:
         self.supervisor = VLLMProcess(spec)
         self.supervisor.start()
         log.info("loading model %s on port %d (this can take minutes)", spec.model, spec.port)
+
+    def _start_metrics(self) -> None:
+        """Start grid-aligned metrics sampling + reporting (background threads)."""
+        if not self.metrics_enabled:
+            return
+        # vLLM exposes /metrics on 127.0.0.1:<port>; the scraper no-ops until it serves.
+        vllm_url = f"http://127.0.0.1:{self.spec.port}" if self.spec else None
+        self.metrics = MetricsCollector(
+            self.manager_url,
+            self.token,
+            self.node_id,
+            grid_s=self.metrics_grid_s,
+            report_s=self.metrics_report_s,
+            capacity_s=self.metrics_capacity_s,
+            evict_chunk_s=self.metrics_evict_chunk_s,
+            vllm_url=vllm_url,
+        )
+        self.metrics.start()
+        log.info(
+            "metrics collector started (grid=%.0fs, report=%.0fs, buffer=%.0fs)",
+            self.metrics_grid_s,
+            self.metrics_report_s,
+            self.metrics_capacity_s,
+        )
+
+    def _stop_metrics(self) -> None:
+        if self.metrics is not None:
+            self.metrics.stop()
+            self.metrics = None
 
     def _drain_and_stop(self) -> None:
         """DRAINING: refuse new work, let in-flight finish, then stop vLLM -> STOPPED."""
