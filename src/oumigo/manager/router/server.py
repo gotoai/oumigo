@@ -21,8 +21,14 @@ may run vLLM on a different port — it preflight-negotiates a free one at start
 `node_spec.port` for a worker that hasn't reported its port yet.
 
 Endpoints are a thin passthrough of the vLLM OpenAI API (`/v1/chat/completions`,
-`/v1/completions`, `/v1/models`), including **SSE streaming** — the request body is
-forwarded verbatim and the upstream response is relayed chunk-by-chunk.
+`/v1/completions`, `/v1/models`), including **SSE streaming** — the upstream response
+is relayed chunk-by-chunk.
+
+Model field: a client **may** send a `model` in the request body, but the router
+**always ignores and overwrites it** with the fleet's real model name (the model the
+manager configured, handed to every worker at registration). The homogeneous fleet
+serves exactly one model, so the manager is the source of truth — a client can't 404
+by naming a model the worker's vLLM doesn't serve.
 """
 
 from __future__ import annotations
@@ -202,6 +208,7 @@ def create_router_app(
     """Build the data-plane FastAPI app that proxies to healthy worker vLLMs."""
     default_capacity = node_spec.max_concurrent_requests if node_spec else 4
     vllm_port = node_spec.port if node_spec else None
+    fleet_model = node_spec.model if node_spec else None  # authoritative model name
     pool = WorkerPool(registry, default_capacity, queue_timeout)
 
     @asynccontextmanager
@@ -241,15 +248,23 @@ def create_router_app(
                 raise HTTPException(503, "no model configured; workers have no vLLM to route to")
             url = f"http://{record.address}:{port}" + path
             body = await request.body()
-            headers = _filter_request_headers(request.headers)
+            headers = _filter_request_headers(request.headers)  # drops content-length; httpx recomputes
             client: httpx.AsyncClient = request.app.state.client
 
+            # Parse the body once: detect streaming AND overwrite the client's `model`
+            # with the fleet's real model name (spec: the client's value is ignored, the
+            # manager is authoritative). Non-JSON / non-dict bodies pass through untouched.
             streaming = False
             if body:
                 try:
-                    streaming = bool(json.loads(body).get("stream"))
+                    payload = json.loads(body)
                 except (ValueError, TypeError):
-                    streaming = False
+                    payload = None
+                if isinstance(payload, dict):
+                    streaming = bool(payload.get("stream"))
+                    if fleet_model is not None:
+                        payload["model"] = fleet_model
+                        body = json.dumps(payload).encode()
 
             if streaming:
                 up_req = client.build_request(method, url, content=body, headers=headers)

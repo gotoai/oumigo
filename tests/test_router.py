@@ -177,6 +177,18 @@ def test_forward_chat_completion(upstream) -> None:
     assert resp.json() == {"echo_model": "acme/mock", "path": "/v1/chat/completions"}
 
 
+def test_router_overwrites_client_model_with_fleet_model(upstream) -> None:
+    # Client asks for a bogus model; the router must overwrite it with the fleet's
+    # real model name (NodeSpec.model) before forwarding, so vLLM never 404s.
+    with TestClient(_router_app(upstream)) as client:  # fleet model = "acme/mock"
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "client/whatever", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["echo_model"] == "acme/mock"  # upstream saw the fleet model, not the client's
+
+
 def test_forward_models(upstream) -> None:
     with TestClient(_router_app(upstream)) as client:
         resp = client.get("/v1/models")
