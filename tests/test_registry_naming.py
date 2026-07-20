@@ -39,3 +39,15 @@ def test_name_is_exposed_in_as_dict() -> None:
     d = rec.as_dict()
     assert d["seq"] == 1
     assert d["name"] == "Worker#1"
+
+
+def test_heartbeat_records_negotiated_port_and_survives_reregister() -> None:
+    reg = Registry()
+    _register(reg, "uuid-a")
+    assert reg.list()[0].port is None  # unknown until reported
+    reg.heartbeat("uuid-a", "serving", "idle", port=7005)
+    assert reg.list()[0].port == 7005
+    reg.heartbeat("uuid-a", "serving", "idle")  # omitted -> keep last known
+    assert reg.list()[0].port == 7005
+    _register(reg, "uuid-a")  # re-register must not wipe the negotiated port
+    assert reg.list()[0].port == 7005

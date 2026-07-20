@@ -38,7 +38,7 @@ from oumigo.protocol.states import NodeState, RunState
 from oumigo.worker import client
 from oumigo.worker.identity import resolve_node_identity
 from oumigo.worker.metrics import MetricsCollector
-from oumigo.worker.supervisor import VLLMProcess
+from oumigo.worker.supervisor import PortUnavailable, VLLMProcess, find_free_port
 
 log = logging.getLogger("oumigo.worker")
 
@@ -82,6 +82,7 @@ class WorkerCoordinator:
         self.run_state: RunState | None = None
         self.interval: float = 10.0
         self.spec: NodeSpec | None = None
+        self.vllm_port: int | None = None  # actual (preflight-selected) port; reported to manager
         self.supervisor: VLLMProcess | None = None
         self.metrics: MetricsCollector | None = None
         self._restarts = 0
@@ -166,7 +167,10 @@ class WorkerCoordinator:
         if self._stop.wait(backoff):  # interruptible: a stop during backoff aborts the restart
             return
         assert self.spec is not None
-        self.supervisor = VLLMProcess(self.spec)
+        port = self._select_port(self.spec)  # re-preflight: the port may have freed or moved
+        if port is None:
+            return  # FAILED set by _select_port
+        self.supervisor = VLLMProcess(self.spec, port=port)
         self.supervisor.start()
 
     # --- steps ---------------------------------------------------------------
@@ -198,10 +202,32 @@ class WorkerCoordinator:
 
     def _start_vllm(self, spec: NodeSpec) -> None:
         self.spec = spec
+        port = self._select_port(spec)
+        if port is None:
+            return  # port selection failed -> node is FAILED, the loop reports it
         self.node_state = NodeState.INITIALIZING
-        self.supervisor = VLLMProcess(spec)
+        self.supervisor = VLLMProcess(spec, port=port)
         self.supervisor.start()
-        log.info("loading model %s on port %d (this can take minutes)", spec.model, spec.port)
+        log.info("loading model %s on port %d (this can take minutes)", spec.model, port)
+
+    def _select_port(self, spec: NodeSpec) -> int | None:
+        """Preflight a free port at/after the preferred one; None (and FAILED) if none.
+
+        Done before launch because vLLM binds only after the model loads — scanning
+        here costs a socket bind, not a model load. Sets `self.vllm_port` so the
+        heartbeat can report the actual port the router must target.
+        """
+        try:
+            port = find_free_port(spec.host, spec.port)
+        except PortUnavailable as exc:
+            log.error("cannot start vLLM: %s -> FAILED", exc)
+            self.node_state = NodeState.FAILED
+            self.vllm_port = None
+            return None
+        if port != spec.port:
+            log.warning("preferred vLLM port %d is in use; falling over to %d", spec.port, port)
+        self.vllm_port = port
+        return port
 
     def _start_metrics(self) -> None:
         """Start grid-aligned metrics sampling + reporting (background threads)."""
@@ -270,6 +296,7 @@ class WorkerCoordinator:
                     node_id=self.node_id,
                     node_state=self.node_state,
                     run_state=self.run_state,
+                    vllm_port=self.vllm_port,
                 ),
                 self.token,
             )

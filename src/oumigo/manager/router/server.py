@@ -5,8 +5,11 @@ The router is health-aware: it only ever forwards to workers the control-plane
 `Registry` object in-process with the control plane, so selection always sees the
 latest heartbeat-driven state without a network hop.
 
-Homogeneous fleet: every worker serves the same model on the same port
-(`node_spec.port`), so a target is just `http://{worker.address}:{port}`.
+Homogeneous *model*, per-worker *port*: every worker serves the same model, but
+each may run vLLM on a different port — it preflight-negotiates a free one at
+startup (preferred = `node_spec.port`) and reports it on its heartbeat. So a target
+is `http://{worker.address}:{worker.port}`, falling back to the fleet-default
+`node_spec.port` for a worker that hasn't reported its port yet.
 
 Endpoints are a thin passthrough of the vLLM OpenAI API (`/v1/chat/completions`,
 `/v1/completions`, `/v1/models`), including **SSE streaming** — the request body is
@@ -112,12 +115,15 @@ def create_router_app(
     app = FastAPI(title="oumigo data plane (router)", lifespan=lifespan)
 
     def _upstream_base() -> str:
-        if vllm_port is None:
-            raise HTTPException(503, "no model configured; workers have no vLLM to route to")
         record = selector.pick()
         if record is None:
             raise HTTPException(503, "no healthy (SERVING) workers available")
-        return f"http://{record.address}:{vllm_port}"
+        # Each worker reports its actual (preflight-negotiated) port; fall back to the
+        # fleet default from node_spec for workers that haven't reported one yet.
+        port = record.port if record.port is not None else vllm_port
+        if port is None:
+            raise HTTPException(503, "no model configured; workers have no vLLM to route to")
+        return f"http://{record.address}:{port}"
 
     async def _forward(request: Request, method: str, path: str) -> Response:
         base = _upstream_base()

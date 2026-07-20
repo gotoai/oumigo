@@ -26,6 +26,7 @@ class NodeRecord:
     last_seen: float
     run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
     seq: int = 0  # 1-based order of first registration; drives the friendly name
+    port: int | None = None  # worker's actual vLLM port (negotiated); None until reported
 
     @property
     def name(self) -> str:
@@ -72,12 +73,15 @@ class Registry:
                 registered_at=existing.registered_at if existing else now,
                 last_seen=now,
                 seq=seq,
+                port=existing.port if existing else None,  # keep negotiated port across re-register
             )
             self._nodes[node_id] = record
             return record
 
-    def heartbeat(self, node_id: str, state: str, run_state: str | None = None) -> bool:
-        """Update last_seen + state. Returns False if the node is unknown (should re-register)."""
+    def heartbeat(
+        self, node_id: str, state: str, run_state: str | None = None, port: int | None = None
+    ) -> bool:
+        """Update last_seen + state (+ port when reported). False if the node is unknown."""
         with self._lock:
             record = self._nodes.get(node_id)
             if record is None:
@@ -85,6 +89,8 @@ class Registry:
             record.last_seen = time.time()
             record.state = state
             record.run_state = run_state
+            if port is not None:  # worker's negotiated vLLM port; keep last known if omitted
+                record.port = port
             return True
 
     def list(self) -> list[NodeRecord]:

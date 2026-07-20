@@ -1,9 +1,13 @@
-"""Unit tests for the pure argv builder — no subprocess spawned."""
+"""Unit tests for the pure argv builder + port preflight — no subprocess spawned."""
 
 from __future__ import annotations
 
+import socket
+
+import pytest
+
 from oumigo.config.spec import NodeSpec
-from oumigo.worker.supervisor import build_argv
+from oumigo.worker.supervisor import PortUnavailable, build_argv, find_free_port
 
 
 def test_build_argv_minimal() -> None:
@@ -50,3 +54,44 @@ def test_build_node_spec_from_manager_config() -> None:
     assert spec.model == "acme/tiny"
     assert spec.dtype == "float16"
     assert spec.tensor_parallel_size == 2
+
+
+# --- port preflight -------------------------------------------------------------
+
+
+def test_build_argv_port_override() -> None:
+    argv = build_argv(NodeSpec(model="m", port=7001), port=7005)
+    assert argv[argv.index("--port") + 1] == "7005"
+
+
+def test_find_free_port_returns_preferred_when_free() -> None:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free = s.getsockname()[1]
+    # socket closed -> the port is free again; preflight should hand it straight back
+    assert find_free_port("127.0.0.1", free) == free
+
+
+def test_find_free_port_skips_occupied() -> None:
+    occ = socket.socket()
+    occ.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    occ.bind(("127.0.0.1", 0))
+    port = occ.getsockname()[1]
+    occ.listen()
+    try:
+        assert find_free_port("127.0.0.1", port) > port  # skipped the occupied one
+    finally:
+        occ.close()
+
+
+def test_find_free_port_raises_when_exhausted() -> None:
+    occ = socket.socket()
+    occ.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    occ.bind(("127.0.0.1", 0))
+    port = occ.getsockname()[1]
+    occ.listen()
+    try:
+        with pytest.raises(PortUnavailable):
+            find_free_port("127.0.0.1", port, max_tries=1)  # only the occupied port
+    finally:
+        occ.close()

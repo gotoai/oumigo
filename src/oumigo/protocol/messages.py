@@ -62,6 +62,7 @@ class HeartbeatRequest(BaseModel):
     node_id: str
     node_state: NodeState
     run_state: RunState | None = None
+    vllm_port: int | None = None  # worker's actual serving port (may differ from model.port)
 
 
 class HeartbeatResponse(BaseModel):

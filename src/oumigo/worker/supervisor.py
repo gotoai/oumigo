@@ -9,7 +9,9 @@ GPU-only dependency); it only ever runs `vllm serve` as a child process.
 
 from __future__ import annotations
 
+import errno
 import logging
+import socket
 import subprocess
 
 import httpx
@@ -20,8 +22,41 @@ from oumigo.protocol.states import RunState
 log = logging.getLogger("oumigo.worker.vllm")
 
 
-def build_argv(spec: NodeSpec) -> list[str]:
-    """Translate a NodeSpec into an exact `vllm serve` argv. Pure function."""
+class PortUnavailable(RuntimeError):
+    """No free port was found in the scanned range (all in use)."""
+
+
+def find_free_port(host: str, preferred: int, max_tries: int = 64) -> int:
+    """First bindable TCP port at/after ``preferred``, scanning up to ``max_tries``.
+
+    A **preflight** so vLLM never loads a model on a doomed port — vLLM binds the
+    port only after the (multi-minute) model load, so detecting a conflict by
+    launching and watching it fail would cost a full load per attempt. Ports already
+    in use (``EADDRINUSE``) are skipped; any other bind error is *not* a conflict and
+    is re-raised rather than papered over by incrementing. ``host`` mirrors what vLLM
+    binds (``spec.host``, typically ``0.0.0.0``) so a clash on any interface counts.
+    """
+    for candidate in range(preferred, preferred + max_tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # mirror uvicorn
+            try:
+                sock.bind((host, candidate))
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    continue  # taken — try the next port
+                raise  # a different failure (perms, bad host): not ours to retry
+            return candidate
+    raise PortUnavailable(
+        f"no free port in [{preferred}, {preferred + max_tries}) on {host}"
+    )
+
+
+def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
+    """Translate a NodeSpec into an exact `vllm serve` argv. Pure function.
+
+    ``port`` overrides ``spec.port`` — the coordinator may pick a different free port
+    when the preferred one is taken on the host. Defaults to ``spec.port``.
+    """
     argv = [
         "vllm",
         "serve",
@@ -29,7 +64,7 @@ def build_argv(spec: NodeSpec) -> list[str]:
         "--host",
         spec.host,
         "--port",
-        str(spec.port),
+        str(port if port is not None else spec.port),
         "--dtype",
         spec.dtype,
         "--tensor-parallel-size",
@@ -53,11 +88,12 @@ class VLLMProcess:
     in the worker's .env apply to the child unchanged.
     """
 
-    def __init__(self, spec: NodeSpec) -> None:
+    def __init__(self, spec: NodeSpec, port: int | None = None) -> None:
         self.spec = spec
-        self.argv = build_argv(spec)
+        self.port = port if port is not None else spec.port
+        self.argv = build_argv(spec, self.port)
         self._proc: subprocess.Popen | None = None
-        self._local = f"http://127.0.0.1:{spec.port}"
+        self._local = f"http://127.0.0.1:{self.port}"
 
     # --- lifecycle -----------------------------------------------------------
 
