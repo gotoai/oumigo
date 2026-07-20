@@ -143,7 +143,7 @@ class HFEngine:
 
     def __init__(
         self, model_id: str, *, quantize: str = "4bit", dtype: str = "auto",
-        device: str = "auto", max_new_tokens: int = 256,
+        device: str = "auto", max_new_tokens: int = 8192,
     ) -> None:
         self.model_id = model_id
         self.quantize = quantize  # "4bit" | "8bit" | "none" (only applied on CUDA)
@@ -831,7 +831,7 @@ def main() -> None:
         help="Model dtype when NOT quantizing (auto: bf16/fp16 on GPU, fp32 on CPU).",
     )
     parser.add_argument(
-        "--max-new-tokens", type=int, default=256,
+        "--max-new-tokens", type=int, default=8192,
         help="Default generation length when the request omits max_tokens.",
     )
     parser.add_argument(
