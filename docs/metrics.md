@@ -172,12 +172,52 @@ homogeneous fleet. Metrics marked **(situational)** only appear when that featur
 is enabled (LoRA, multi-modal, speculative decode, external KV connector, KV-block
 residency tracking).
 
-**How the scraper flattens (as implemented):** it keeps `vllm:` series and forms
-one storage key each — gauges and counter `…_total` pass through; histogram
-`_bucket` lines are dropped and only `_sum` / `_count` kept; `_info` gauges are
-skipped; the constant `model_name` label is folded away, and any remaining label's
-value is appended to the key so splits stay distinct (e.g. a `finished_reason`
-split → `vllm:request_success_total_stop`).
+**How the scraper flattens (as implemented) — three routes.** Each `vllm:` series
+takes exactly one path. The constant `model_name` label is folded away, and any
+remaining label value is appended to the key so splits stay distinct (e.g. a
+`finished_reason` split → `vllm:request_success_total_stop`):
+
+1. **Kept as original (pass-through).** Gauges and `…_total` counters are stored
+   verbatim under their own key — the value vLLM reports *is* what we persist.
+2. **Transformed before reporting.** The six *selected* histograms below are
+   converted **on the worker** into a fixed distribution summary — seven scalar keys
+   per histogram — and their raw buckets / `_sum` are **not** reported.
+3. **Dropped.** Every other histogram, all `_info` gauges, prometheus_client
+   `_created` timestamp series (emitted for every counter/histogram), and a small
+   **explicit exclusion list** — `vllm:engine_sleep_state` (all `state=` splits) and
+   `vllm:estimated_*` (MFU counters) — are ignored in V1.
+
+**Selected histograms → distribution summary.** For a selected histogram `XXX`, the
+worker emits these seven keys (and nothing else for that metric):
+
+| Key | Meaning |
+|---|---|
+| `XXX_count` | cumulative observation count — a **counter** (resets only on vLLM restart) |
+| `XXX_mean` | `_sum / _count` — exact mean |
+| `XXX_min` | p0 — edge of the lowest populated bucket |
+| `XXX_tile25` | 25th percentile |
+| `XXX_median` | 50th percentile (p50) |
+| `XXX_tile75` | 75th percentile |
+| `XXX_max` | p100 — edge of the highest populated bucket |
+
+Applied to exactly these (all other histograms are ignored in V1.0):
+
+- `vllm:e2e_request_latency_seconds`
+- `vllm:time_to_first_token_seconds`
+- `vllm:request_time_per_output_token_seconds`
+- `vllm:request_queue_time_seconds`
+- `vllm:request_prompt_tokens`
+- `vllm:request_generation_tokens`
+
+**Accuracy & semantics.** `_count` and `_mean` are **exact**. The percentiles
+(`_min` / `_tile25` / `_median` / `_tile75` / `_max`) are **bucket-edge estimates** —
+a Prometheus histogram keeps no raw samples, so interior tiles are interpolated
+within vLLM's bucket boundaries and `_min` / `_max` are the edges of the
+lowest/highest *populated* buckets, not the true extremes. All seven are
+**lifetime-cumulative** snapshots (the histogram resets only on a vLLM restart),
+sampled each grid slot: `_mean` and the percentiles read as **gauges** (a level,
+taken as-is), while `_count` stays a **counter** (a window count is `Δcount` between
+slots, and needs restart-safe delta handling).
 
 **Engine / scheduler state — Gauges**
 
@@ -187,7 +227,7 @@ split → `vllm:request_success_total_stop`).
 | `vllm:num_requests_waiting` | requests queued awaiting scheduling |
 | `vllm:kv_cache_usage_perc` | fraction of KV-cache blocks in use (0–1) |
 | `vllm:num_requests_waiting_by_reason` | waiting requests broken out by reason *(situational)* |
-| `vllm:engine_sleep_state` | engine awake/sleeping indicator *(situational)* |
+| `vllm:engine_sleep_state` | engine awake/sleeping indicator *(situational)* — **excluded from the V1 set** (all `state=` splits: `_awake` / `_discard_all` / `_weights_offloaded`) |
 | `vllm:lora_requests_info` | per-adapter running/waiting counts *(situational, info)* |
 | `vllm:cache_config_info` | static cache-config info gauge *(info)* |
 
@@ -214,30 +254,31 @@ split → `vllm:request_success_total_stop`).
 | `vllm:mm_cache_queries_total` | multi-modal cache queries |
 | `vllm:mm_cache_hits_total` | multi-modal cache hits |
 
-**Latency — Histograms** (seconds)
+**Latency — Histograms** (seconds). ✓ = **summarized** (7-key distribution summary);
+the rest are dropped in V1.0.
 
-| Metric | Description |
-|---|---|
-| `vllm:time_to_first_token_seconds` | time to first token (TTFT) |
-| `vllm:inter_token_latency_seconds` | inter-token latency |
-| `vllm:request_time_per_output_token_seconds` | time per output token (TPOT), per request |
-| `vllm:e2e_request_latency_seconds` | end-to-end request latency |
-| `vllm:request_queue_time_seconds` | time in WAITING phase |
-| `vllm:request_inference_time_seconds` | time in RUNNING phase |
-| `vllm:request_prefill_time_seconds` | time in PREFILL phase |
-| `vllm:request_decode_time_seconds` | time in DECODE phase |
+| Metric | Description | V1.0 |
+|---|---|---|
+| `vllm:time_to_first_token_seconds` | time to first token (TTFT) | ✓ summarized |
+| `vllm:inter_token_latency_seconds` | inter-token latency | dropped |
+| `vllm:request_time_per_output_token_seconds` | time per output token (TPOT), per request | ✓ summarized |
+| `vllm:e2e_request_latency_seconds` | end-to-end request latency | ✓ summarized |
+| `vllm:request_queue_time_seconds` | time in WAITING phase | ✓ summarized |
+| `vllm:request_inference_time_seconds` | time in RUNNING phase | dropped |
+| `vllm:request_prefill_time_seconds` | time in PREFILL phase | dropped |
+| `vllm:request_decode_time_seconds` | time in DECODE phase | dropped |
 
 **Request shape — Histograms**
 
-| Metric | Description |
-|---|---|
-| `vllm:iteration_tokens_total` | tokens per engine step (a histogram despite the name) |
-| `vllm:request_prompt_tokens` | input prompt token counts |
-| `vllm:request_generation_tokens` | generation token counts |
-| `vllm:request_max_num_generation_tokens` | max requested generation tokens |
-| `vllm:request_params_n` | the `n` sampling parameter |
-| `vllm:request_params_max_tokens` | the `max_tokens` parameter |
-| `vllm:request_prefill_kv_computed_tokens` | new KV tokens computed during prefill *(situational)* |
+| Metric | Description | V1.0 |
+|---|---|---|
+| `vllm:iteration_tokens_total` | tokens per engine step (a histogram despite the name) | dropped |
+| `vllm:request_prompt_tokens` | input prompt token counts | ✓ summarized |
+| `vllm:request_generation_tokens` | generation token counts | ✓ summarized |
+| `vllm:request_max_num_generation_tokens` | max requested generation tokens | dropped |
+| `vllm:request_params_n` | the `n` sampling parameter | dropped |
+| `vllm:request_params_max_tokens` | the `max_tokens` parameter | dropped |
+| `vllm:request_prefill_kv_computed_tokens` | new KV tokens computed during prefill *(situational)* | dropped |
 
 **KV-block residency — Histograms** *(situational; seconds)*
 
@@ -260,15 +301,32 @@ on; not part of the baseline fleet dashboard, listed for completeness:
 | `vllm:nixl_num_descriptors` | Histogram | NIXL KV connector |
 | `vllm:nixl_post_time_seconds` | Histogram | NIXL KV connector |
 | `vllm:nixl_xfer_time_seconds` | Histogram | NIXL KV connector |
-| `vllm:estimated_flops_per_gpu_total` | Counter | `--enable-mfu-metrics` |
-| `vllm:estimated_read_bytes_per_gpu_total` | Counter | `--enable-mfu-metrics` |
-| `vllm:estimated_write_bytes_per_gpu_total` | Counter | `--enable-mfu-metrics` |
+| `vllm:estimated_flops_per_gpu_total` | Counter | `--enable-mfu-metrics` — **excluded from V1** |
+| `vllm:estimated_read_bytes_per_gpu_total` | Counter | `--enable-mfu-metrics` — **excluded from V1** |
+| `vllm:estimated_write_bytes_per_gpu_total` | Counter | `--enable-mfu-metrics` — **excluded from V1** |
 
 **Deprecation / hidden metrics.** vLLM hides a deprecated metric one minor version
 after deprecation; it can be re-enabled with
 `--show-hidden-metrics-for-version=X.Y` and is removed one version later. The
 scraper should tolerate a metric disappearing across a vLLM upgrade (store a gap,
 per *gaps stay gaps*) rather than treating it as an error.
+
+### Start-time constants (synthesized by the worker)
+
+Two lifetime-constant stamps are **synthesized by the worker** (not scraped) and
+reported like any other metric. Their value is a **float UTC epoch — seconds since
+1970** ("timeticks"), the same representation prometheus_client uses for `_created`
+(which we otherwise drop). These are the only timestamp-valued metrics kept.
+
+| Metric | Meaning | Set / reset |
+|---|---|---|
+| `worker:start_timestamp` | when the worker (coordinator) process started | once at coordinator start; constant for the process lifetime |
+| `vllm:start_timestamp` | when the node last entered **SERVING** | stamped on each `INITIALIZING → SERVING` edge; **absent while not serving** (cleared on crash, re-stamped on restart) |
+
+vLLM ships no native "start" metric, so `vllm:start_timestamp` is defined as the
+moment the coordinator's state machine reaches SERVING (vLLM healthy and accepting
+requests); it resets on every vLLM restart. All other counter/histogram `_created`
+stamps are dropped as noise.
 
 ### Storing non-scalar metric types
 
@@ -280,10 +338,13 @@ and histograms, so map each type in:
   ratio) on read from adjacent grid slots (matches *raw, derive on read*). A
   label-split counter such as `request_success_total{finished_reason=…}` expands to
   one key per label value: `vllm:request_success_total_<reason>` (e.g. `…_stop`).
-- **Histograms** → do **not** store buckets in v1. Persist the two scalars a fleet
-  dashboard actually uses — `_count` and `_sum` (mean = `Δsum / Δcount` on read). If
-  per-node quantiles are wanted later, store a fixed set (p50/p95/p99) as their own
-  keys. Full bucket retention is a deferred, opt-in concern.
+- **Histograms** → **transform on the worker** into a seven-key distribution summary
+  (`_count`, `_mean`, `_min`, `_tile25`, `_median`, `_tile75`, `_max`) for the six
+  selected metrics; each key is stored as its own scalar. Raw buckets and `_sum` are
+  not reported, and every other histogram is dropped in V1.0. `_count` is a counter
+  (window counts via `Δ` on read); `_mean` and the percentiles are gauge-like level
+  snapshots. Percentiles are bucket-edge estimates — see § "vLLM engine metrics".
+  Full bucket retention (for exact/arbitrary quantiles) remains a deferred concern.
 
 ## Transport — batched report, own cadence
 

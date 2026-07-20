@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,7 +32,12 @@ from oumigo.config.spec import NodeSpec
 from oumigo.manager.control.registry import Registry
 from oumigo.manager.control.store import MetricStore
 from oumigo.manager.router.server import create_router_app
-from oumigo.manager.settings import build_node_spec, get_data_plane, load_manager_yaml
+from oumigo.manager.settings import (
+    build_node_spec,
+    get_dashboard,
+    get_data_plane,
+    load_manager_yaml,
+)
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -147,6 +154,14 @@ def create_app(
         # The last grid slot received per node — powers the console `metrics` command.
         return {"nodes": store.latest_per_node()}
 
+    @app.get("/metrics/since")
+    async def metrics_since(after: str = "", prefix: str = "") -> dict:
+        # Watermark read seam for the reporting plane's incremental pull. Open (no
+        # auth), like the other read endpoints. `prefix` is a comma list of metric
+        # domains to keep (e.g. "worker:,gpu:"); empty means all.
+        prefixes = [p for p in prefix.split(",") if p]
+        return {"points": store.since(after, prefixes or None)}
+
     @app.get("/nodes")
     async def nodes() -> dict:
         return {"nodes": [r.as_dict() for r in registry.list()]}
@@ -208,6 +223,7 @@ def run_server(
     if node_spec is None:
         node_spec = build_node_spec(manager_config)
     data_host, data_port = get_data_plane(manager_config)
+    dash_enabled, dash_host, dash_port = get_dashboard(manager_config)
 
     registry = Registry()
     control_app = create_app(
@@ -237,14 +253,62 @@ def run_server(
     signal.signal(signal.SIGUSR1, lambda *_: set_verbosity(True))   # console: verbose on
     signal.signal(signal.SIGUSR2, lambda *_: set_verbosity(False))  # console: verbose off
 
+    # Reporting plane: bundled with the manager, but its own process for fault
+    # isolation (a render hang there must never touch inference or heartbeats). It
+    # pulls from this control plane over loopback, so point it at 127.0.0.1:<port>.
+    dashboard = None
+    if dash_enabled:
+        dashboard = _spawn_dashboard(port, dash_host, dash_port, verbose)
+
     log_level = "info" if verbose else "warning"
-    asyncio.run(
-        _serve_both(
-            (control_app, host, port),
-            (router_app, data_host, data_port),
-            log_level,
+    try:
+        asyncio.run(
+            _serve_both(
+                (control_app, host, port),
+                (router_app, data_host, data_port),
+                log_level,
+            )
         )
-    )
+    finally:
+        if dashboard is not None:
+            _terminate(dashboard)
+
+
+def _spawn_dashboard(
+    control_port: int, host: str, port: int, verbose: bool
+) -> subprocess.Popen | None:
+    """Start the reporting-plane dashboard as a child process, or None if it fails.
+
+    Runs in a new session so a terminal Ctrl-C reaches only the manager, which owns
+    this child's lifecycle (terminated in `run_server`'s finally). A dashboard that
+    fails to launch must never take the control plane down — hence the best-effort
+    guard.
+    """
+    cmd = [
+        sys.executable, "-m", "oumigo.manager.dashboard",
+        "--host", host,
+        "--port", str(port),
+        "--control-url", f"http://127.0.0.1:{control_port}",
+    ]
+    if verbose:
+        cmd.append("--verbose")
+    try:
+        child = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603 - fixed argv
+    except OSError as exc:
+        log.warning("reporting-plane dashboard failed to start (%s); continuing without it", exc)
+        return None
+    log.info("reporting-plane dashboard on %s:%d (child pid %d)", host, port, child.pid)
+    return child
+
+
+def _terminate(child: subprocess.Popen) -> None:
+    """Best-effort graceful stop of a child process, escalating to kill."""
+    if child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
 
 
 async def _serve_both(

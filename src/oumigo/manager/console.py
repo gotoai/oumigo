@@ -168,7 +168,9 @@ class ManagerConsole:
             metrics = record.get("metrics", {})
             print(f"  {record['node_id']}  @ {record['timestamp']} UTC  ({len(metrics)} metrics)")
             for name, value in metrics.items():
-                print(f"      {name} = {value:g}")
+                # start-timestamps are float UTC epoch seconds — show full, not 1.8e+09.
+                shown = f"{value:.3f}" if name.endswith("_timestamp") else f"{value:g}"
+                print(f"      {name} = {shown}")
 
     def _verbose(self, args: list[str]) -> None:
         if args and args[0].lower() in ("on", "off"):

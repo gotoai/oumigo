@@ -113,6 +113,28 @@ class MetricStore:
         out.sort(key=lambda r: r["node_id"])
         return out
 
+    def since(self, after: str, prefixes: Iterable[str] | None = None) -> list[dict]:
+        """Raw points with ``timestamp > after``, optionally filtered by metric prefix.
+
+        Powers the reporting plane's incremental pull (a separate process that can't
+        share this in-memory connection). ``after`` is a grid-slot timestamp string
+        (``''`` returns the whole retained window); ``prefixes`` keeps only metrics
+        starting with any of them (e.g. ``('worker:', 'gpu:')``). Rows ascend by
+        timestamp so the caller can advance its watermark to the last one seen.
+        """
+        query = "SELECT node_id, metric, timestamp, value FROM metric_fact WHERE timestamp > ?"
+        params: list = [after]
+        prefixes = list(prefixes or ())
+        if prefixes:
+            # Our prefixes are fixed literals with no LIKE wildcards ('_'/'%'), so a
+            # plain LIKE is safe here; '%' is the intended "rest of the name" match.
+            query += " AND (" + " OR ".join(["metric LIKE ?"] * len(prefixes)) + ")"
+            params += [f"{p}%" for p in prefixes]
+        query += " ORDER BY timestamp"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [{"node_id": n, "metric": m, "timestamp": t, "value": v} for n, m, t, v in rows]
+
     def count(self) -> int:
         with self._lock:
             (n,) = self._conn.execute("SELECT COUNT(*) FROM metric_fact").fetchone()

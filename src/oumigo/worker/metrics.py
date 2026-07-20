@@ -52,6 +52,11 @@ M_MEM_TOTAL = "worker:mem_total_bytes"
 M_MEM_USED = "worker:mem_used_bytes"
 M_MEM_USED_PCT = "worker:mem_used_pct"
 
+# Lifetime-constant start stamps (float UTC epoch seconds — "timeticks"). Constant
+# per process start / restart; see docs/metrics.md.
+M_WORKER_START = "worker:start_timestamp"  # coordinator (worker) process start
+M_VLLM_START = "vllm:start_timestamp"       # moment the node last entered SERVING
+
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"  # UTC, grid-aligned
 
 
@@ -306,22 +311,128 @@ def _parse_smi_csv(text: str) -> dict[str, float]:
 
 _LABEL_RE = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
 # Constant / high-cardinality labels folded away: the fleet is one model, so
-# `model_name` is noise; `le` marks histogram buckets we don't store.
+# `model_name` is noise; `le` is handled specially (it marks histogram buckets).
 _NOISE_LABELS = frozenset({"model_name", "model", "engine"})
+
+# Histograms transformed into a per-node distribution summary before reporting
+# (count/mean/min/tile25/median/tile75/max). Every other histogram is dropped in
+# V1.0. See docs/metrics.md § "vLLM engine metrics".
+_HIST_AGGREGATE_METRICS = frozenset(
+    {
+        "vllm:e2e_request_latency_seconds",
+        "vllm:time_to_first_token_seconds",
+        "vllm:request_time_per_output_token_seconds",
+        "vllm:request_queue_time_seconds",
+        "vllm:request_prompt_tokens",
+        "vllm:request_generation_tokens",
+    }
+)
+
+# vLLM series explicitly excluded from the V1 set (still documented). Matched by
+# name prefix: the label-split `engine_sleep_state` gauge (awake/discard_all/
+# weights_offloaded) and the MFU `estimated_*` counters (`--enable-mfu-metrics`).
+_EXCLUDED_PREFIXES = ("vllm:engine_sleep_state", "vllm:estimated_")
 
 
 def _sanitize(value: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
 
 
+def _bucket_points(buckets: dict[str, float]) -> list[tuple[float, float]]:
+    """Cumulative buckets as sorted ``(upper_bound, count)`` pairs; ``+Inf`` last."""
+    pts: list[tuple[float, float]] = []
+    for le, count in buckets.items():
+        if le.lstrip("+").lower() == "inf":
+            bound = math.inf
+        else:
+            try:
+                bound = float(le)
+            except ValueError:
+                continue
+        pts.append((bound, count))
+    pts.sort(key=lambda p: p[0])
+    return pts
+
+
+def _quantile_interp(pts: list[tuple[float, float]], total: float, q: float) -> float | None:
+    """Prometheus-style linear interpolation of quantile ``q`` over cumulative buckets."""
+    if total <= 0 or not pts:
+        return None
+    rank = q * total
+    prev_bound, prev_count = 0.0, 0.0
+    for bound, count in pts:
+        if count >= rank:
+            if math.isinf(bound):  # landed in +Inf -> best we can say is the largest finite edge
+                return prev_bound if prev_count > 0 else None
+            in_bucket = count - prev_count
+            if in_bucket <= 0:
+                return round(bound, 6)
+            return round(prev_bound + (bound - prev_bound) * (rank - prev_count) / in_bucket, 6)
+        prev_bound, prev_count = bound, count
+    return round(pts[-1][0], 6)
+
+
+def _histogram_aggregates(
+    base: str, buckets: dict[str, float], hsum: float, hcount: float
+) -> dict[str, float]:
+    """A histogram's distribution summary: count, mean, min, tiles 25/50/75, max.
+
+    ``_count`` and ``_mean`` are exact. The percentiles are **bucket-edge estimates**
+    (a Prometheus histogram keeps no raw samples): interior tiles are interpolated
+    within vLLM's bucket boundaries, and ``_min``/``_max`` are the edges of the
+    lowest/highest populated buckets — not the true extremes. All are lifetime-
+    cumulative (the histogram resets only on a vLLM restart), a snapshot per slot.
+    """
+    out: dict[str, float] = {f"{base}_count": hcount}
+    if hcount <= 0:
+        return out  # no observations yet -> only the (zero) count; the rest is undefined
+    out[f"{base}_mean"] = round(hsum / hcount, 6)
+
+    pts = _bucket_points(buckets)
+    if not pts:
+        return out
+    finite = [(b, c) for b, c in pts if not math.isinf(b)]
+
+    # min: upper edge of the first bucket that captured any observation.
+    minimum: float | None = None
+    for bound, count in pts:
+        if count > 0:
+            minimum = bound if not math.isinf(bound) else (finite[-1][0] if finite else None)
+            break
+    # max: upper edge of the highest finite bucket that captured an observation.
+    maximum: float | None = finite[-1][0] if finite else None
+    prev = 0.0
+    for bound, count in finite:
+        if count > prev:
+            maximum = bound
+        prev = count
+
+    for key, val in (
+        (f"{base}_min", minimum),
+        (f"{base}_tile25", _quantile_interp(pts, hcount, 0.25)),
+        (f"{base}_median", _quantile_interp(pts, hcount, 0.50)),
+        (f"{base}_tile75", _quantile_interp(pts, hcount, 0.75)),
+        (f"{base}_max", maximum),
+    ):
+        if val is not None:
+            out[key] = val
+    return out
+
+
 def _parse_prometheus(text: str, prefix: str = "vllm:") -> dict[str, float]:
     """Flatten Prometheus text into ``{storage_key: value}`` for `prefix` metrics.
 
-    Histograms keep only their `_sum`/`_count` series (buckets dropped); `_info`
-    gauges are skipped; remaining non-noise labels are appended to the key so
-    label-split series (e.g. `request_success_total` by finish reason) stay distinct.
+    Three routes: gauges and ``…_total`` counters pass through unchanged; the six
+    selected histograms (`_HIST_AGGREGATE_METRICS`) are transformed into a
+    count/mean/min/tile25/median/tile75/max summary; every other histogram, plus
+    ``_info`` gauges, is dropped. The constant `model_name` label is folded away and
+    any remaining label value is appended to the key so splits stay distinct (e.g. a
+    `finished_reason` split → `vllm:request_success_total_stop`).
     """
-    out: dict[str, float] = {}
+    scalars: dict[str, float] = {}
+    # (base, suffix) -> {"buckets": {le: count}, "sum": float, "count": float}
+    hist: dict[tuple[str, str], dict] = {}
+
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -333,8 +444,12 @@ def _parse_prometheus(text: str, prefix: str = "vllm:") -> dict[str, float]:
             name, _, tail = line.partition(" ")
             labels_part = ""
         name = name.strip()
-        if not name.startswith(prefix) or name.endswith("_bucket") or name.endswith("_info"):
+        # `_info` gauges and prometheus_client `_created` series (a creation-time
+        # unix stamp emitted for every counter/histogram) are noise — drop both.
+        if not name.startswith(prefix) or name.endswith("_info") or name.endswith("_created"):
             continue
+        if name.startswith(_EXCLUDED_PREFIXES):
+            continue  # explicitly not in the V1 set (see docs/metrics.md)
         tokens = tail.split()
         if not tokens:
             continue
@@ -342,13 +457,43 @@ def _parse_prometheus(text: str, prefix: str = "vllm:") -> dict[str, float]:
             value = float(tokens[0])
         except ValueError:
             continue
-        labels = {k: v for k, v in _LABEL_RE.findall(labels_part) if k not in _NOISE_LABELS}
-        if labels:
-            suffix = "_".join(_sanitize(labels[k]) for k in sorted(labels))
-            key = f"{name}_{suffix}"
-        else:
-            key = name
-        out[key] = value  # model_name collapse => last wins (single-model fleet)
+
+        all_labels = dict(_LABEL_RE.findall(labels_part))
+        le = all_labels.get("le")
+        sig = {k: v for k, v in all_labels.items() if k not in _NOISE_LABELS and k != "le"}
+        suffix = "_".join(_sanitize(sig[k]) for k in sorted(sig)) if sig else ""
+
+        # Histogram components route to the aggregator — only for the selected metrics;
+        # any other histogram's bucket/_sum/_count lines are dropped here.
+        if name.endswith("_bucket"):
+            base = name[: -len("_bucket")]
+            if base in _HIST_AGGREGATE_METRICS and le is not None:
+                fam = hist.setdefault((base, suffix), {"buckets": {}, "sum": 0.0, "count": 0.0})
+                fam["buckets"][le] = value
+            continue
+        if name.endswith("_sum"):
+            base = name[: -len("_sum")]
+            if base in _HIST_AGGREGATE_METRICS:
+                hist.setdefault((base, suffix), {"buckets": {}, "sum": 0.0, "count": 0.0})[
+                    "sum"
+                ] = value
+            continue
+        if name.endswith("_count"):
+            base = name[: -len("_count")]
+            if base in _HIST_AGGREGATE_METRICS:
+                hist.setdefault((base, suffix), {"buckets": {}, "sum": 0.0, "count": 0.0})[
+                    "count"
+                ] = value
+            continue
+
+        # Gauge or `…_total` counter -> pass through unchanged.
+        key = f"{name}_{suffix}" if suffix else name
+        scalars[key] = value  # model_name collapse => last wins (single-model fleet)
+
+    out = dict(scalars)
+    for (base, suffix), h in hist.items():
+        agg_base = f"{base}_{suffix}" if suffix else base
+        out.update(_histogram_aggregates(agg_base, h["buckets"], h["sum"], h["count"]))
     return out
 
 
@@ -461,6 +606,7 @@ class MetricsCollector:
         capacity_s: float = 1800.0,
         evict_chunk_s: float = 300.0,
         vllm_url: str | None = None,
+        worker_start: float | None = None,
         send: SendFn = _default_send,
     ) -> None:
         self.manager_url = manager_url
@@ -475,6 +621,11 @@ class MetricsCollector:
         self._gpu = _GpuSampler()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # Start stamps (float epoch). worker_start is fixed for this process; the
+        # coordinator sets/clears _vllm_start on the SERVING edge (atomic assignment,
+        # single writer/reader across threads — no lock needed).
+        self._worker_start = worker_start if worker_start is not None else time.time()
+        self._vllm_start: float | None = None
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -498,6 +649,16 @@ class MetricsCollector:
         if flush:
             self._flush_once()
 
+    # --- serving-state stamps (called by the coordinator) --------------------
+
+    def mark_serving(self) -> None:
+        """Record the moment the node (re)entered SERVING — the vLLM start stamp."""
+        self._vllm_start = time.time()
+
+    def clear_serving(self) -> None:
+        """Node left SERVING (crash/restart): drop the stamp until it serves again."""
+        self._vllm_start = None
+
     # --- sampler -------------------------------------------------------------
 
     def _sample_loop(self) -> None:
@@ -513,6 +674,10 @@ class MetricsCollector:
         metrics = collect_host_metrics(self._cpu)
         metrics.update(self._gpu.sample())                    # gpu:#N_* (empty if no GPU)
         metrics.update(collect_vllm_metrics(self.vllm_url))   # vllm:*   (empty until serving)
+        metrics[M_WORKER_START] = self._worker_start          # constant float epoch (UTC)
+        vllm_start = self._vllm_start
+        if vllm_start is not None:                            # only while SERVING
+            metrics[M_VLLM_START] = vllm_start
         rows = [
             MetricRow(self.node_id, grid_epoch, ts, name, value)
             for name, value in metrics.items()

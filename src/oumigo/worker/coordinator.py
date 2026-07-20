@@ -77,6 +77,7 @@ class WorkerCoordinator:
         self.metrics_capacity_s = metrics_capacity_s
         self.metrics_evict_chunk_s = metrics_evict_chunk_s
 
+        self._started_at = time.time()  # worker:start_timestamp (float UTC epoch)
         self.node_state: NodeState = NodeState.REGISTERING
         self.run_state: RunState | None = None
         self.interval: float = 10.0
@@ -136,6 +137,8 @@ class WorkerCoordinator:
             if self.node_state == NodeState.INITIALIZING and sup.is_healthy():
                 log.info("vLLM healthy -> SERVING")
                 self.node_state = NodeState.SERVING
+                if self.metrics is not None:
+                    self.metrics.mark_serving()  # stamp vllm:start_timestamp on this edge
             if self.node_state == NodeState.SERVING:
                 self.run_state = sup.run_state()
             return
@@ -145,6 +148,8 @@ class WorkerCoordinator:
 
     def _handle_crash(self) -> None:
         self.run_state = None
+        if self.metrics is not None:
+            self.metrics.clear_serving()  # left SERVING; re-stamped when it serves again
         if self._restarts >= self.max_restarts:
             log.error("vLLM restart policy exhausted (%d attempts) -> FAILED", self._restarts)
             self.node_state = NodeState.FAILED
@@ -213,6 +218,7 @@ class WorkerCoordinator:
             capacity_s=self.metrics_capacity_s,
             evict_chunk_s=self.metrics_evict_chunk_s,
             vllm_url=vllm_url,
+            worker_start=self._started_at,
         )
         self.metrics.start()
         log.info(

@@ -18,6 +18,9 @@ DEFAULT_PROVIDER = "LAN"
 DEFAULT_DATA_PLANE_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so LAN clients reach the router
 DEFAULT_DATA_PLANE_PORT = 7012
 
+DEFAULT_DASHBOARD_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so the LAN can view it
+DEFAULT_DASHBOARD_PORT = 7080  # 7070 is commonly taken (AnyDesk); reporting plane uses 7080
+
 
 def load_manager_yaml(config_file: Path | None) -> dict:
     """Load the manager config file, or ``{}`` if absent."""
@@ -40,6 +43,20 @@ def get_data_plane(config: dict) -> tuple[str, int]:
     return (
         str(dp.get("host", DEFAULT_DATA_PLANE_HOST)),
         int(dp.get("port", DEFAULT_DATA_PLANE_PORT)),
+    )
+
+
+def get_dashboard(config: dict) -> tuple[bool, str, int]:
+    """The reporting-plane dashboard's enabled flag + bind host/port from `dashboard`.
+
+    Bundled with the manager and on by default; `dashboard.enabled: false` is an
+    escape hatch (e.g. a port conflict). Host/port default to 0.0.0.0:7080.
+    """
+    db = config.get("dashboard") or {}
+    return (
+        bool(db.get("enabled", True)),
+        str(db.get("host", DEFAULT_DASHBOARD_HOST)),
+        int(db.get("port", DEFAULT_DASHBOARD_PORT)),
     )
 
 

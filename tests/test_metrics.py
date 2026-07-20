@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from oumigo.protocol.messages import MetricsReport
 from oumigo.worker.metrics import (
     M_CPU_UTIL,
@@ -12,6 +14,7 @@ from oumigo.worker.metrics import (
     MetricsBuffer,
     MetricsCollector,
     _cpu_util_pct,
+    _histogram_aggregates,
     _parse_cpu_times,
     _parse_meminfo,
     _parse_prometheus,
@@ -139,10 +142,24 @@ vllm:kv_cache_usage_perc{model_name="acme/x"} 0.42
 vllm:prompt_tokens_total{model_name="acme/x"} 12345.0
 vllm:request_success_total{model_name="acme/x",finished_reason="stop"} 10.0
 vllm:request_success_total{model_name="acme/x",finished_reason="length"} 2.0
-# TYPE vllm:time_to_first_token_seconds histogram
-vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="0.1"} 5.0
-vllm:time_to_first_token_seconds_sum{model_name="acme/x"} 4.2
-vllm:time_to_first_token_seconds_count{model_name="acme/x"} 12.0
+# TYPE vllm:time_to_first_token_seconds histogram   (SELECTED -> summarized)
+vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="0.01"} 0.0
+vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="0.05"} 2.0
+vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="0.1"} 6.0
+vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="0.5"} 9.0
+vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="1.0"} 10.0
+vllm:time_to_first_token_seconds_bucket{model_name="acme/x",le="+Inf"} 10.0
+vllm:time_to_first_token_seconds_sum{model_name="acme/x"} 2.5
+vllm:time_to_first_token_seconds_count{model_name="acme/x"} 10.0
+vllm:time_to_first_token_seconds_created{model_name="acme/x"} 1784520000.0
+# TYPE vllm:inter_token_latency_seconds histogram   (NOT selected -> dropped)
+vllm:inter_token_latency_seconds_bucket{model_name="acme/x",le="0.1"} 3.0
+vllm:inter_token_latency_seconds_bucket{model_name="acme/x",le="+Inf"} 4.0
+vllm:inter_token_latency_seconds_sum{model_name="acme/x"} 0.3
+vllm:inter_token_latency_seconds_count{model_name="acme/x"} 4.0
+vllm:engine_sleep_state{model_name="acme/x",state="awake"} 1.0
+vllm:engine_sleep_state{model_name="acme/x",state="discard_all"} 0.0
+vllm:estimated_flops_per_gpu_total{model_name="acme/x"} 1.2e9
 vllm:cache_config_info{block_size="16"} 1.0
 """
 
@@ -157,16 +174,73 @@ def test_parse_prometheus_gauges_counters_labels_histograms() -> None:
     # label-split counter -> one key per finish reason
     assert out["vllm:request_success_total_stop"] == 10.0
     assert out["vllm:request_success_total_length"] == 2.0
-    # histogram: buckets dropped, sum/count kept (mean derivable on read)
-    assert out["vllm:time_to_first_token_seconds_sum"] == 4.2
-    assert out["vllm:time_to_first_token_seconds_count"] == 12.0
+    # selected histogram -> transformed into a distribution summary (no raw sum/buckets)
+    ttft = "vllm:time_to_first_token_seconds"
+    assert out[f"{ttft}_count"] == 10.0
+    assert out[f"{ttft}_mean"] == 0.25
+    assert out[f"{ttft}_min"] == 0.05
+    assert out[f"{ttft}_max"] == 1.0
+    assert out[f"{ttft}_tile25"] == pytest.approx(0.05625)
+    assert out[f"{ttft}_median"] == pytest.approx(0.0875)
+    assert out[f"{ttft}_tile75"] == pytest.approx(0.3)
+    assert f"{ttft}_sum" not in out
     assert not any(k.endswith("_bucket") for k in out)
+    # prometheus `_created` timestamps are dropped, not passed through as a metric
+    assert not any(k.endswith("_created") for k in out)
+    # non-selected histogram fully dropped
+    assert not any(k.startswith("vllm:inter_token_latency_seconds") for k in out)
+    # explicitly excluded from V1: engine_sleep_state + estimated_* dropped
+    assert not any(k.startswith("vllm:engine_sleep_state") for k in out)
+    assert not any(k.startswith("vllm:estimated_") for k in out)
     # _info gauge skipped
     assert not any(k.endswith("_info") for k in out)
 
 
+def test_histogram_aggregates_five_number_summary() -> None:
+    buckets = {"0.01": 0.0, "0.05": 2.0, "0.1": 6.0, "0.5": 9.0, "1.0": 10.0, "+Inf": 10.0}
+    out = _histogram_aggregates("m", buckets, hsum=2.5, hcount=10.0)
+    assert out["m_count"] == 10.0
+    assert out["m_mean"] == 0.25
+    assert out["m_min"] == 0.05  # first populated bucket edge
+    assert out["m_max"] == 1.0  # last populated finite bucket edge
+    assert out["m_tile25"] == pytest.approx(0.05625)
+    assert out["m_median"] == pytest.approx(0.0875)
+    assert out["m_tile75"] == pytest.approx(0.3)
+
+
+def test_histogram_aggregates_no_observations_only_count() -> None:
+    out = _histogram_aggregates("m", {"+Inf": 0.0}, hsum=0.0, hcount=0.0)
+    assert out == {"m_count": 0.0}
+
+
 def test_collect_vllm_metrics_no_url_is_empty() -> None:
     assert collect_vllm_metrics(None) == {}
+
+
+def test_sample_emits_worker_start_and_vllm_start_on_serving() -> None:
+    import time
+
+    from oumigo.worker.metrics import M_VLLM_START, M_WORKER_START, MetricsCollector
+
+    c = MetricsCollector(
+        "http://m", None, "node-x", vllm_url=None, worker_start=1_784_520_000.0
+    )
+    c._sample_at(int(time.time() // 5 * 5))
+    rows = {r.metric: r.value for r in c._buffer.snapshot()}
+    assert rows[M_WORKER_START] == 1_784_520_000.0  # constant float epoch
+    assert M_VLLM_START not in rows  # not SERVING yet -> absent
+
+    c.mark_serving()
+    c._sample_at(int(time.time() // 5 * 5) + 5)
+    rows2 = {r.metric: r.value for r in c._buffer.snapshot()}
+    assert M_VLLM_START in rows2 and rows2[M_VLLM_START] > 0
+
+    c.clear_serving()  # simulate a crash leaving SERVING
+    slot = int(time.time() // 5 * 5) + 10
+    c._sample_at(slot)
+    after_clear = {r.metric for r in c._buffer.snapshot() if r.grid_epoch == slot}
+    assert M_WORKER_START in after_clear  # worker stamp is always present
+    assert M_VLLM_START not in after_clear  # vllm stamp gone until it serves again
 
 
 def test_collect_host_metrics_shape() -> None:

@@ -25,9 +25,17 @@ class NodeRecord:
     registered_at: float
     last_seen: float
     run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
+    seq: int = 0  # 1-based order of first registration; drives the friendly name
+
+    @property
+    def name(self) -> str:
+        """Human-facing label — the manager owns the seq -> UUID mapping."""
+        return f"Worker#{self.seq}"
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["name"] = self.name  # a property, so not captured by asdict
+        return d
 
 
 class Registry:
@@ -36,6 +44,7 @@ class Registry:
     def __init__(self) -> None:
         self._nodes: dict[str, NodeRecord] = {}
         self._lock = threading.Lock()
+        self._seq = 0  # monotonic; assigns Worker#N on first registration
 
     def register(
         self,
@@ -49,6 +58,11 @@ class Registry:
         now = time.time()
         with self._lock:
             existing = self._nodes.get(node_id)
+            if existing is not None:
+                seq = existing.seq  # keep the same name across re-registrations
+            else:
+                self._seq += 1
+                seq = self._seq
             record = NodeRecord(
                 node_id=node_id,
                 address=address,
@@ -57,6 +71,7 @@ class Registry:
                 capabilities=capabilities,
                 registered_at=existing.registered_at if existing else now,
                 last_seen=now,
+                seq=seq,
             )
             self._nodes[node_id] = record
             return record
