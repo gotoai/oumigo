@@ -14,20 +14,27 @@ this runs ONE genuine worker end-to-end against a test manager:
     numbers, sampled and reported exactly as a real worker would. vLLM metrics are
     ignored: the collector is given no vLLM URL, so `vllm:*` is simply empty (and we
     never stamp `vllm:start_timestamp` — there is no vLLM);
-  * **real control plane** — registers, learns its cadence + preferred port, then
-    heartbeats its node/run state. The heartbeat starts *before* the model finishes
-    loading, so the (minutes-long) INITIALIZING window is visible to the manager,
-    flipping to SERVING once the model is ready — just like the real coordinator.
+  * **real control plane** — finds the manager (explicit `--manager-url`/env, else
+    mDNS discovery on the LAN, exactly like the real worker), registers, learns its
+    cadence + preferred port, then heartbeats its node/run state. The heartbeat starts
+    *before* the model finishes loading, so the (minutes-long) INITIALIZING window is
+    visible to the manager, flipping to SERVING once the model is ready.
 
-Single worker only (no `--workers`, no dummy fleet). Run against a DEDICATED test
-manager on the same host — not your production one:
+Single worker only (no `--workers`, no dummy fleet). Same-host quick test:
 
-    # test_manager.yaml
-    #   data_plane: {host: 127.0.0.1, port: 7017}
-    #   dashboard:  {enabled: false}
+    # test_manager.yaml — data_plane: {host: 127.0.0.1, port: 7017}
     oumigo manager serve -c test_manager.yaml --no-mdns --host 127.0.0.1 --port 7016
-    python tests/worker_hf_test.py --manager-url http://127.0.0.1:7016 \
-        --model Qwen/Qwen2.5-0.5B-Instruct
+    python tests/worker_hf_test.py --host 127.0.0.1 \
+        --manager-url http://127.0.0.1:7016 --model Qwen/Qwen2.5-0.5B-Instruct
+
+Cross-host (worker on another LAN machine): start the manager advertising on the LAN
+(bind 0.0.0.0, mDNS ON — do NOT pass --no-mdns), then just run the worker with no
+--manager-url and it discovers the manager over mDNS; `--host` defaults to this host's
+LAN IP so the manager's router can reach the served model:
+
+    oumigo manager serve -c manager.yaml --host 0.0.0.0 --port 7014
+    python tests/worker_hf_test.py            # discovers the manager on the LAN
+    #  ...or point it explicitly: --manager-url http://<manager-LAN-IP>:7014
 
 The manager needn't have a model configured: the worker reports its own preflight-
 negotiated port, and takes the model from `--model` (falling back to the manager's
@@ -71,13 +78,17 @@ from oumigo.protocol.messages import (
     RegisterResponse,
 )
 from oumigo.common.env import load_env_file  # stdlib .env loader (reused from the worker)
+from oumigo.discovery import (  # same mDNS discovery the real worker uses
+    DEFAULT_DISCOVER_TIMEOUT,
+    discover_manager,
+    get_lan_ip,
+)
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.worker.metrics import MetricsCollector  # real host+GPU sampling/reporting
 from oumigo.worker.supervisor import PortUnavailable, find_free_port  # reuse worker port logic
 
 log = logging.getLogger("oumigo.worker_hf")
 
-HOST = "127.0.0.1"          # advertised address + bind host (same-host test default)
 DEFAULT_BASE_PORT = 7001    # preferred serving port when the manager has no model.port
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"  # small, open, has a chat template
 _STREAM_DONE = object()     # sentinel: the streamer iterator is exhausted
@@ -581,8 +592,32 @@ def _text_chunk(cid: str, created: int, model: str, *, text: str, finish: str | 
 # --- orchestration --------------------------------------------------------------
 
 
+async def _resolve_manager_url(manager_url: str | None, discover_timeout: float) -> str:
+    """Return the manager URL: an explicit URL/env wins; otherwise mDNS-discover it.
+
+    Mirrors the real worker: with no URL we browse the LAN (the manager must be
+    advertising — i.e. not started with --no-mdns). The blocking browse runs off the
+    event loop so a Ctrl-C during discovery still lands.
+    """
+    if manager_url:
+        return manager_url
+    log.info(
+        "no --manager-url; discovering a manager on the LAN via mDNS (up to %.0fs)...",
+        discover_timeout,
+    )
+    found = await asyncio.to_thread(discover_manager, discover_timeout)
+    if not found:
+        raise SystemExit(
+            f"could not discover a manager on the LAN within {discover_timeout:.0f}s; "
+            "set --manager-url / $OUMIGO_MANAGER_URL (and check the manager isn't --no-mdns)"
+        )
+    log.info("discovered manager at %s", found)
+    return found
+
+
 async def _run(args: argparse.Namespace) -> None:
-    worker = HFWorker(manager_url=args.manager_url, token=args.token, host=args.host)
+    manager_url = await _resolve_manager_url(args.manager_url, args.discover_timeout)
+    worker = HFWorker(manager_url=manager_url, token=args.token, host=args.host)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -645,7 +680,7 @@ async def _run(args: argparse.Namespace) -> None:
         worker.start_metrics()  # real worker:* + gpu:* sampling begins now
         print(
             f"HF worker up: model={model_id} on {worker.host}:{worker.port}, "
-            f"manager={args.manager_url}. Ctrl-C to stop."
+            f"manager={worker.manager_url}. Ctrl-C to stop."
         )
         await asyncio.gather(hb_task, serve_task, return_exceptions=True)
 
@@ -714,11 +749,18 @@ def main() -> None:
         "--max-new-tokens", type=int, default=256,
         help="Default generation length when the request omits max_tokens.",
     )
-    parser.add_argument("--host", default=HOST, help="Address to bind and advertise.")
     parser.add_argument(
-        "--manager-url",
-        default=os.environ.get("OUMIGO_MANAGER_URL", "http://127.0.0.1:7014"),
-        help="Manager control-plane URL.",
+        "--host", default=get_lan_ip(),
+        help="Address to bind and advertise (defaults to this host's LAN IP so the "
+             "manager's router can reach it; use 127.0.0.1 for a same-host test).",
+    )
+    parser.add_argument(
+        "--manager-url", default=os.environ.get("OUMIGO_MANAGER_URL"),
+        help="Manager control-plane URL. If omitted, discover it on the LAN via mDNS.",
+    )
+    parser.add_argument(
+        "--discover-timeout", type=float, default=DEFAULT_DISCOVER_TIMEOUT,
+        help="Seconds to browse the LAN for a manager when --manager-url is omitted.",
     )
     parser.add_argument(
         "--token", default=os.environ.get("OUMIGO_MANAGER_TOKEN"),
