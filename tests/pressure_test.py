@@ -758,8 +758,8 @@ def main() -> None:
                    help="data-plane (router) port (default: 7012)")
     p.add_argument("--clients", type=int, default=1,
                    help="parallel clients = concurrency (default: 1)")
-    p.add_argument("--history", type=int, default=4,
-                   help="prior (Q,A) turns each client keeps as context (default: 5)")
+    p.add_argument("--history", type=int, default=3,
+                   help="prior (Q,A) turns each client keeps as context (default: 3)")
     p.add_argument("--questions", type=int, default=5,
                    help="questions each client asks (default: 5)")
     p.add_argument("--stream", type=_bool, default=True, metavar="YES|NO",

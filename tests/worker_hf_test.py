@@ -9,11 +9,13 @@ this runs ONE genuine worker end-to-end against a test manager:
     (`--quantize`, needed to fit large models in VRAM), and serves the same OpenAI API
     the router forwards (non-streaming JSON *and* SSE streaming when `stream=true`),
     generating with `transformers` instead of vLLM;
-  * **real metrics** — reuses the production `MetricsCollector`, so the reported
-    `worker:*` (host) and `gpu:*` (NVML / nvidia-smi) series are the machine's real
-    numbers, sampled and reported exactly as a real worker would. vLLM metrics are
-    ignored: the collector is given no vLLM URL, so `vllm:*` is simply empty (and we
-    never stamp `vllm:start_timestamp` — there is no vLLM);
+  * **real metrics** — reuses the production `MetricsCollector`, so `worker:*` (host)
+    and `gpu:*` (NVML / nvidia-smi) are the machine's real numbers. It also exposes a
+    vLLM-style Prometheus `/metrics` endpoint fed by actual requests (latency histogram
+    + token/finished-reason counters); the collector scrapes it just like a real vLLM,
+    yielding `vllm:e2e_request_latency_seconds_*`, `vllm:prompt_tokens_total`,
+    `vllm:generation_tokens_total`, `vllm:request_success_total_<reason>`, and
+    `vllm:start_timestamp`;
   * **real control plane** — finds the manager (explicit `--manager-url`/env, else
     mDNS discovery on the LAN, exactly like the real worker), registers, learns its
     cadence + preferred port, then heartbeats its node/run state. The heartbeat starts
@@ -61,14 +63,14 @@ import os
 import signal
 import time
 from collections.abc import AsyncIterator
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any
 from uuid import uuid4
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from oumigo.protocol.messages import (
     HeartbeatRequest,
@@ -313,6 +315,78 @@ def _next_piece(streamer) -> Any:
         return _STREAM_DONE
 
 
+# --- vLLM-style request metrics -------------------------------------------------
+
+# Upper bounds (le) for the e2e-latency histogram, mirroring vLLM's own buckets. The
+# metrics collector interpolates tiles from these edges, so tile/min/max are bucket-
+# edge estimates (exactly as with a real vLLM histogram), not exact sample quantiles.
+E2E_LATENCY_BUCKETS: tuple[float, ...] = (
+    0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0,
+    float("inf"),
+)
+
+
+def _fmt_bucket(edge: float) -> str:
+    """Render a bucket upper bound like vLLM does ('10' not '10.0', '0.3' as-is)."""
+    return str(int(edge)) if edge == int(edge) else str(edge)
+
+
+class _VLLMStats:
+    """Accumulates real per-request stats, rendered as vLLM-style Prometheus text.
+
+    The worker exposes this at GET /metrics; the production `MetricsCollector` scrapes
+    it exactly as it would a real vLLM, so `_parse_prometheus` aggregates the latency
+    histogram into `vllm:e2e_request_latency_seconds_{count,mean,min,tile25,median,
+    tile75,max}` and passes the token/`request_success_total_<reason>` counters through
+    unchanged — the same metric names a real vLLM worker would report. All counters are
+    lifetime-cumulative (they reset on worker restart), just like vLLM's.
+    """
+
+    _FINISH_REASONS = ("abort", "error", "length", "repetition", "stop")
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.prompt_tokens_total = 0
+        self.generation_tokens_total = 0
+        self.success = {r: 0 for r in self._FINISH_REASONS}
+        self.latency_sum = 0.0
+        self.latency_count = 0
+        self.bucket_cum = [0] * len(E2E_LATENCY_BUCKETS)  # cumulative counts, le-ordered
+
+    def record(
+        self, latency_s: float, prompt_tokens: int, completion_tokens: int,
+        finish_reason: str = "stop",
+    ) -> None:
+        """Fold one finished request into the counters + latency histogram."""
+        with self._lock:
+            self.prompt_tokens_total += int(prompt_tokens)
+            self.generation_tokens_total += int(completion_tokens)
+            self.success[finish_reason] = self.success.get(finish_reason, 0) + 1
+            self.latency_sum += float(latency_s)
+            self.latency_count += 1
+            for i, edge in enumerate(E2E_LATENCY_BUCKETS):
+                if latency_s <= edge:  # cumulative: an obs falls in this and every larger bucket
+                    self.bucket_cum[i] += 1
+
+    def render(self) -> str:
+        """Prometheus exposition text for the vllm:* metrics (empty-ish until requests run)."""
+        with self._lock:
+            lines = [
+                f"vllm:prompt_tokens_total {self.prompt_tokens_total}",
+                f"vllm:generation_tokens_total {self.generation_tokens_total}",
+            ]
+            for r in self._FINISH_REASONS:
+                lines.append(
+                    f'vllm:request_success_total{{finished_reason="{r}"}} {self.success[r]}'
+                )
+            for edge, cum in zip(E2E_LATENCY_BUCKETS, self.bucket_cum):
+                le = "+Inf" if edge == float("inf") else _fmt_bucket(edge)
+                lines.append(f'vllm:e2e_request_latency_seconds_bucket{{le="{le}"}} {cum}')
+            lines.append(f"vllm:e2e_request_latency_seconds_sum {self.latency_sum:.6f}")
+            lines.append(f"vllm:e2e_request_latency_seconds_count {self.latency_count}")
+        return "\n".join(lines) + "\n"
+
+
 # --- the worker -----------------------------------------------------------------
 
 
@@ -337,6 +411,7 @@ class HFWorker:
 
         self.engine: HFEngine | None = None
         self.metrics: MetricsCollector | None = None
+        self.vllm_stats = _VLLMStats()  # real request stats -> vLLM-style /metrics
         self._stop = asyncio.Event()
         self._server: uvicorn.Server | None = None
 
@@ -402,6 +477,10 @@ class HFWorker:
             mid = self.engine.model_id if self.engine else "hf-model"
             return {"object": "list", "data": [{"id": mid, "object": "model"}]}
 
+        @app.get("/metrics")
+        async def metrics() -> Response:  # vLLM-style exposition, scraped by the collector
+            return PlainTextResponse(self.vllm_stats.render())
+
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Response:
             return await self._handle(request, chat=True)
@@ -425,10 +504,12 @@ class HFWorker:
             )
 
         self.inflight += 1
+        t0 = time.monotonic()
         try:
             text, p_toks, c_toks = await asyncio.to_thread(self.engine.generate, body, chat)
         finally:
             self.inflight -= 1
+        self.vllm_stats.record(time.monotonic() - t0, p_toks, c_toks)
         log.info(
             "served %s: prompt=%d toks -> completion=%d toks",
             "chat" if chat else "completion", p_toks, c_toks,
@@ -452,6 +533,7 @@ class HFWorker:
         self.inflight += 1
         cid = f"{'chatcmpl' if chat else 'cmpl'}-hf-{uuid4().hex[:12]}"
         created = int(time.time())
+        t0 = time.monotonic()
         loop = asyncio.get_running_loop()
         pieces: list[str] = []
         try:
@@ -472,14 +554,15 @@ class HFWorker:
                 yield _sse(_chat_chunk(cid, created, model, delta={}, finish="stop"))
             else:
                 yield _sse(_text_chunk(cid, created, model, text="", finish="stop"))
+            c_toks = self.engine.count_tokens("".join(pieces))
             if include_usage:
-                c_toks = self.engine.count_tokens("".join(pieces))
                 usage = {"prompt_tokens": input_len, "completion_tokens": c_toks,
                          "total_tokens": input_len + c_toks}
                 obj = "chat.completion.chunk" if chat else "text_completion"
                 yield _sse({"id": cid, "object": obj, "created": created, "model": model,
                             "choices": [], "usage": usage})
             yield "data: [DONE]\n\n"
+            self.vllm_stats.record(time.monotonic() - t0, input_len, c_toks)
             log.info("streamed %s: prompt=%d toks", "chat" if chat else "completion", input_len)
         finally:
             self.inflight -= 1
@@ -516,18 +599,20 @@ class HFWorker:
             await self._send_heartbeat(client)
 
     def start_metrics(self) -> None:
-        """Start the real host+GPU metrics collector. vLLM metrics are ignored.
+        """Start the real metrics collector: host + GPU, plus vLLM-style request metrics.
 
-        `vllm_url=None` makes the vLLM scraper a no-op (empty `vllm:*`), and we never
-        call `mark_serving()`, so no `vllm:start_timestamp` is stamped either — only
-        genuine `worker:*` and `gpu:*` (plus `worker:start_timestamp`) are reported.
+        `vllm_url` points at this worker's own `/metrics` (fed by `_VLLMStats` from real
+        requests), so the collector scrapes and aggregates `vllm:*` exactly as it would
+        for a real vLLM. `mark_serving()` stamps `vllm:start_timestamp` at this edge.
         """
+        vllm_url = f"http://{self.host}:{self.port}"
         self.metrics = MetricsCollector(
             self.manager_url, self.token, self.node_id,
-            vllm_url=None, worker_start=self.started_at,
+            vllm_url=vllm_url, worker_start=self.started_at,
         )
         self.metrics.start()
-        log.info("real metrics collector started (worker:* + gpu:*, vllm:* ignored)")
+        self.metrics.mark_serving()  # stamp vllm:start_timestamp
+        log.info("real metrics collector started (worker:* + gpu:* + vllm:* from %s/metrics)", vllm_url)
 
     def stop_metrics(self) -> None:
         if self.metrics is not None:
