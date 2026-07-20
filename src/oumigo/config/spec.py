@@ -35,6 +35,12 @@ class NodeSpec(BaseModel):
     gpu_memory_utilization: float = Field(
         default=0.90, gt=0, le=1, description="Fraction of VRAM vLLM may use."
     )
+    max_concurrent_requests: int = Field(
+        default=4, ge=1,
+        description="Router admission cap: max in-flight requests sent to one worker "
+                    "before others are preferred / the request queues. Negotiable — the "
+                    "manager seeds this value; a worker may report its own on heartbeat.",
+    )
     max_model_len: int | None = Field(
         default=None, description="Max context length; None uses the model default."
     )

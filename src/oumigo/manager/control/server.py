@@ -135,7 +135,10 @@ def create_app(
     @app.post("/heartbeat", response_model=HeartbeatResponse)
     async def heartbeat(req: HeartbeatRequest, _: None = Depends(check_auth)) -> HeartbeatResponse:
         run_state = req.run_state.value if req.run_state is not None else None
-        known = registry.heartbeat(req.node_id, req.node_state.value, run_state, req.vllm_port)
+        known = registry.heartbeat(
+            req.node_id, req.node_state.value, run_state, req.vllm_port,
+            req.max_concurrent_requests,
+        )
         if not known:
             log.warning("heartbeat from unknown node %s (asking it to re-register)", req.node_id)
         # STOP delivery hook: a future console/router command sets a per-node command

@@ -63,6 +63,7 @@ class HeartbeatRequest(BaseModel):
     node_state: NodeState
     run_state: RunState | None = None
     vllm_port: int | None = None  # worker's actual serving port (may differ from model.port)
+    max_concurrent_requests: int | None = None  # worker's negotiated in-flight cap (None = unchanged)
 
 
 class HeartbeatResponse(BaseModel):

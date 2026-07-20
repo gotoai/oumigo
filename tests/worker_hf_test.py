@@ -577,6 +577,9 @@ class HFWorker:
         req = HeartbeatRequest(
             node_id=self.node_id, node_state=self.node_state, run_state=run_state,
             vllm_port=self.port,  # tell the router which (preflight-negotiated) port to target
+            # This worker generates one request at a time (no batching), so tell the
+            # router to admit only one in-flight request to it — overriding the fleet default.
+            max_concurrent_requests=1,
         )
         try:
             resp = await client.post(

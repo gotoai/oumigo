@@ -76,6 +76,7 @@ def build_node_spec(config: dict) -> NodeSpec | None:
     return NodeSpec(
         model=str(name),
         port=int(model.get("port", 7001)),
+        max_concurrent_requests=int(model.get("max_concurrent_requests", 4)),
         dtype=str(model.get("dtype", "auto")),
         tensor_parallel_size=int(model.get("tensor_parallel_size", 1)),
         gpu_memory_utilization=float(model.get("gpu_memory_utilization", 0.80)),

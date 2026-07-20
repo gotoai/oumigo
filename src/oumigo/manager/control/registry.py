@@ -27,6 +27,9 @@ class NodeRecord:
     run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
     seq: int = 0  # 1-based order of first registration; drives the friendly name
     port: int | None = None  # worker's actual vLLM port (negotiated); None until reported
+    # Worker's negotiated in-flight cap; None until reported (router falls back to the
+    # fleet default from node_spec.max_concurrent_requests).
+    max_concurrent_requests: int | None = None
 
     @property
     def name(self) -> str:
@@ -74,14 +77,21 @@ class Registry:
                 last_seen=now,
                 seq=seq,
                 port=existing.port if existing else None,  # keep negotiated port across re-register
+                # keep negotiated in-flight cap across re-register
+                max_concurrent_requests=existing.max_concurrent_requests if existing else None,
             )
             self._nodes[node_id] = record
             return record
 
     def heartbeat(
-        self, node_id: str, state: str, run_state: str | None = None, port: int | None = None
+        self,
+        node_id: str,
+        state: str,
+        run_state: str | None = None,
+        port: int | None = None,
+        max_concurrent_requests: int | None = None,
     ) -> bool:
-        """Update last_seen + state (+ port when reported). False if the node is unknown."""
+        """Update last_seen + state (+ port / in-flight cap when reported). False if unknown."""
         with self._lock:
             record = self._nodes.get(node_id)
             if record is None:
@@ -91,6 +101,8 @@ class Registry:
             record.run_state = run_state
             if port is not None:  # worker's negotiated vLLM port; keep last known if omitted
                 record.port = port
+            if max_concurrent_requests is not None:  # negotiated in-flight cap; keep last if omitted
+                record.max_concurrent_requests = max_concurrent_requests
             return True
 
     def list(self) -> list[NodeRecord]:
