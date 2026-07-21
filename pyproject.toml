@@ -26,7 +26,24 @@ dependencies = [
 [project.optional-dependencies]
 worker = [
     # Installed only on GPU worker nodes (L1). Heavy; pin a tested range later.
+    # One unified venv serves BOTH backends: `oumigo worker run --backend=vllm|transformer`.
+    #
+    # torch is intentionally NOT listed: vLLM hard-pins it (e.g. torch==2.11.0 for
+    # vLLM 0.25.x) and pulls the matching CUDA wheel transitively. Do NOT install a
+    # separate/unpinned torch — vLLM's pin is authoritative and the HF stack below
+    # rides on it. See INSTALL.md for the GPU-box flow.
     "vllm>=0.5",
+
+    # --backend=transformer: HF-Transformers serving (oumigo.worker.hf_server). vLLM
+    # itself requires transformers v5, so these coexist with vLLM in one venv.
+    "transformers>=5.10.1",  # Gemma 4 needs transformers v5
+    "accelerate",            # device_map / sharded model loading
+    "bitsandbytes",          # 4-bit (nf4) quantization on CUDA
+    "pillow",                # multimodal processor dependency (also a vLLM dep)
+    "timm",                  # multimodal processor dependency
+    # NOTE: fastapi / uvicorn / httpx are already base deps; pytest is in [dev];
+    # python-dotenv is unneeded (oumigo has a stdlib .env loader). So they are not
+    # repeated here — `pip install -e '.[worker]'` already covers the serving stack.
 ]
 manager = [
     # Manager-only extras (dashboard tooling, etc.). No vLLM here, by design.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 
+from oumigo.config.spec import NodeSpec
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -15,6 +16,21 @@ from oumigo.protocol.messages import (
 
 def _headers(token: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def fetch_node_spec(
+    manager_url: str, token: str | None = None, timeout: float = 10.0
+) -> NodeSpec | None:
+    """GET the fleet's vLLM spec so the worker can preflight its port before it
+    registers. Returns None when the manager has no model configured yet."""
+    resp = httpx.get(
+        f"{manager_url.rstrip('/')}/spec",
+        headers=_headers(token),
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json().get("node_spec")
+    return NodeSpec.model_validate(data) if data is not None else None
 
 
 def register(

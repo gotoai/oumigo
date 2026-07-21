@@ -113,6 +113,12 @@ def create_app(
 
     app = FastAPI(title="oumigo manager control plane", lifespan=lifespan)
 
+    @app.get("/spec")
+    async def spec() -> dict:
+        """Hand the fleet's vLLM spec to a worker so it can preflight its port and
+        derive its node_id *before* registering. None until a model is configured."""
+        return {"node_spec": node_spec.model_dump() if node_spec is not None else None}
+
     @app.post("/register", response_model=RegisterResponse)
     async def register(req: RegisterRequest, _: None = Depends(check_auth)) -> RegisterResponse:
         registry.register(
@@ -121,8 +127,13 @@ def create_app(
             state=req.state.value,
             incarnation=req.incarnation,
             capabilities=req.capabilities.model_dump(),
+            port=req.vllm_port,
+            model=req.model,
         )
-        log.info("registered node %s at %s (incarnation=%d)", req.node_id, req.address, req.incarnation)
+        log.info(
+            "registered worker %s at %s:%s (incarnation=%d)",
+            req.node_id, req.address, req.vllm_port, req.incarnation,
+        )
         if node_spec is None:
             log.warning("no model configured; node %s gets no vLLM config", req.node_id)
         return RegisterResponse(
@@ -165,13 +176,13 @@ def create_app(
         prefixes = [p for p in prefix.split(",") if p]
         return {"points": store.since(after, prefixes or None)}
 
-    @app.get("/nodes")
-    async def nodes() -> dict:
-        return {"nodes": [r.as_dict() for r in registry.list()]}
+    @app.get("/workers")
+    async def workers() -> dict:
+        return {"workers": [r.as_dict() for r in registry.list()]}
 
     @app.get("/status")
     async def status() -> dict:
-        data = {"nodes": registry.count(), "auth": token is not None}
+        data = {"workers": registry.count(), "auth": token is not None}
         if status_info:
             data.update(status_info)
         return data

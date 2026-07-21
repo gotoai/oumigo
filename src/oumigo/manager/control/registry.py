@@ -27,6 +27,7 @@ class NodeRecord:
     run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
     seq: int = 0  # 1-based order of first registration; drives the friendly name
     port: int | None = None  # worker's actual vLLM port (negotiated); None until reported
+    model: str | None = None  # effective model the worker serves (env-negotiable); None until reported
     # Worker's negotiated in-flight cap; None until reported (router falls back to the
     # fleet default from node_spec.max_concurrent_requests).
     max_concurrent_requests: int | None = None
@@ -57,8 +58,15 @@ class Registry:
         state: str,
         incarnation: int,
         capabilities: dict,
+        port: int | None = None,
+        model: str | None = None,
     ) -> NodeRecord:
-        """Idempotent: keyed on node_id, so a re-register updates in place."""
+        """Idempotent: keyed on node_id, so a re-register updates in place.
+
+        `port` is the worker's actual vLLM port (part of its node_id) and `model` its
+        effective (env-negotiated) model; both are known at registration, but a
+        re-register that omits either keeps the last value.
+        """
         now = time.time()
         with self._lock:
             existing = self._nodes.get(node_id)
@@ -76,7 +84,10 @@ class Registry:
                 registered_at=existing.registered_at if existing else now,
                 last_seen=now,
                 seq=seq,
-                port=existing.port if existing else None,  # keep negotiated port across re-register
+                # worker reports its actual port at registration; keep last known if omitted
+                port=port if port is not None else (existing.port if existing else None),
+                # worker reports its effective model at registration; keep last if omitted
+                model=model if model is not None else (existing.model if existing else None),
                 # keep negotiated in-flight cap across re-register
                 max_concurrent_requests=existing.max_concurrent_requests if existing else None,
             )

@@ -28,10 +28,17 @@ class WorkerCommand(str, Enum):
 
 
 class RegisterRequest(BaseModel):
-    """Worker -> manager: announce identity and ask to join the fleet."""
+    """Worker -> manager: announce identity and ask to join the fleet.
+
+    `node_id` is the deterministic `sha256("oumigo:<address>:<vllm_port>")[:16]`
+    the worker derives after preflighting its port, so it is reported together with
+    that `vllm_port` (the manager can recompute and validate the pair).
+    """
 
     node_id: str
     address: str                       # LAN-reachable address the worker advertises
+    vllm_port: int | None = None       # actual (preflight-selected) vLLM port; part of node_id
+    model: str | None = None           # effective model the worker serves (env-negotiable)
     incarnation: int = 0               # bumped each worker start; same identity
     state: NodeState = NodeState.REGISTERING
     capabilities: NodeCapabilities = Field(default_factory=NodeCapabilities)

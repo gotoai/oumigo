@@ -1,6 +1,6 @@
 """Interactive manager console — an HTTP client.
 
-Attaches to a running control-plane server over HTTP (`/status`, `/nodes`).
+Attaches to a running control-plane server over HTTP (`/status`, `/workers`).
 `oumigo manager run` (on a TTY) spawns the server as a child process and runs this
 console against it; `verbose` toggles the child server's log verbosity via signals.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import signal
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -98,7 +99,7 @@ class ManagerConsole:
         return {
             "help": self._help,
             "status": self._status,
-            "nodes": self._nodes,
+            "workers": self._workers,
             "metrics": self._metrics,
             "verbose": self._verbose,
             "version": lambda args: print(__version__),
@@ -124,7 +125,7 @@ class ManagerConsole:
         print("commands:")
         print("  help              show this help")
         print("  status            show manager status")
-        print("  nodes             list registered worker nodes")
+        print("  workers           list registered workers (id, ip, port, state, uptime)")
         print("  metrics           show each worker's latest received grid metrics")
         print("  verbose [on|off]  stream server logs to the console (toggle)")
         print("  version           print the oumigo version")
@@ -139,22 +140,61 @@ class ManagerConsole:
         print(f"  provider      : {data.get('provider', '?')}")
         print(f"  auth          : {'enabled' if data.get('auth') else 'disabled (no token)'}")
         print(f"  verbose       : {'on' if self.verbose else 'off'}")
-        print(f"  nodes         : {data.get('nodes', 0)} registered")
+        print(f"  workers       : {data.get('workers', 0)} registered")
 
-    def _nodes(self, args: list[str]) -> None:
-        data = self._get("/nodes")
+    # vLLM stamps this the moment a worker (re)enters SERVING; float UTC epoch seconds.
+    _VLLM_START_METRIC = "vllm:start_timestamp"
+
+    def _workers(self, args: list[str]) -> None:
+        data = self._get("/workers")
         if data is None:
             return
-        nodes = data.get("nodes", [])
-        if not nodes:
-            print("no worker nodes registered yet.")
+        workers = data.get("workers", [])
+        if not workers:
+            print("no workers registered yet.")
             return
+
+        starts = self._vllm_starts()  # node_id -> vllm:start_timestamp (float epoch)
         now = time.time()
-        for record in nodes:
-            print(
-                f"  {record['node_id']}  {record['address']}  "
-                f"state={record['state']}  last_seen={now - record['last_seen']:.0f}s ago"
-            )
+        rows = []
+        for r in sorted(workers, key=lambda r: r.get("seq", 0)):
+            start = starts.get(r["node_id"])
+            rows.append((
+                r.get("name", f"Worker#{r.get('seq', 0)}"),
+                r["node_id"],
+                r.get("address") or "-",
+                str(r["port"]) if r.get("port") is not None else "-",
+                r["state"],
+                r.get("model") or "-",
+                self._fmt_utc(start),
+                f"{now - r['last_seen']:.0f}s ago",
+            ))
+
+        headers = ("WORKER", "HASH ID", "IP", "PORT", "STATE", "MODEL_NAME", "START (UTC)", "LAST SEEN")
+        widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print("  " + fmt.format(*headers))
+        for row in rows:
+            print("  " + fmt.format(*row))
+
+    def _vllm_starts(self) -> dict[str, float]:
+        """Map node_id -> vLLM start epoch from the latest grid slot, for the uptime column."""
+        data = self._get("/metrics/latest")
+        if data is None:
+            return {}
+        out: dict[str, float] = {}
+        for record in data.get("nodes", []):
+            value = record.get("metrics", {}).get(self._VLLM_START_METRIC)
+            if value is not None:
+                out[record["node_id"]] = value
+        return out
+
+    @staticmethod
+    def _fmt_utc(epoch: float | None) -> str:
+        """Format a float UTC epoch as 'YYYY-MM-DD HH:MM:SS'; '-' when unknown."""
+        if not epoch:
+            return "-"
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     def _metrics(self, args: list[str]) -> None:
         data = self._get("/metrics/latest")

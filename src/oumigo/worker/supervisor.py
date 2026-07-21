@@ -1,10 +1,14 @@
-"""vLLMProcess — the subprocess seam.
+"""The backend subprocess seam — vLLM or HF-transformers.
 
-Builds the `vllm serve` argv from a NodeSpec, spawns it, polls /health, exposes a
-coarse run-state, and shuts down cleanly. `build_argv` is kept a pure function so
-"given this spec, produce exactly this argv" is trivially unit-testable without
-spawning anything — and this module never imports vllm (it's an optional,
-GPU-only dependency); it only ever runs `vllm serve` as a child process.
+Both backends are supervised identically: build an argv from a NodeSpec, spawn it,
+poll /health, read a coarse run-state off /metrics, and shut down cleanly. They
+differ only in the argv (`build_argv` for `vllm serve`, `build_hf_argv` for the
+in-repo `oumigo.worker.hf_server`); the HF server deliberately mimics vLLM's HTTP
+surface (/health, /v1/*, vLLM-style /metrics) so `_ServerProcess` observes both the
+same way. `build_argv`/`build_hf_argv` are pure functions so "given this spec,
+produce exactly this argv" is unit-testable without spawning anything — and this
+module never imports vllm/torch (both are optional, GPU-only); it only runs them as
+child processes.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import errno
 import logging
 import socket
 import subprocess
+import sys
 
 import httpx
 
@@ -80,29 +85,57 @@ def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     return argv
 
 
-class VLLMProcess:
-    """Spawns and supervises a single `vllm serve` child process.
+def build_hf_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
+    """Translate a NodeSpec into an argv for the in-repo HF-transformers server. Pure.
 
-    Health is polled locally over 127.0.0.1 (vLLM binds 0.0.0.0). The process
-    inherits this worker's environment, so HF_HOME / VLLM_CACHE_ROOT / HF_TOKEN set
-    in the worker's .env apply to the child unchanged.
+    Launches ``python -m oumigo.worker.hf_server`` — a small OpenAI-compatible server
+    that generates with `transformers` and exposes the same HTTP surface as vLLM, so
+    the coordinator supervises, routes to, and scrapes it identically. HF cache/token
+    come from the inherited environment (HF_HOME / HF_TOKEN), not argv.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        "oumigo.worker.hf_server",
+        "--model",
+        spec.model,
+        "--host",
+        spec.host,
+        "--port",
+        str(port if port is not None else spec.port),
+        "--dtype",
+        spec.dtype,
+    ]
+    if spec.max_model_len is not None:
+        argv += ["--max-model-len", str(spec.max_model_len)]
+    argv += list(spec.extra_args)
+    return argv
+
+
+class _ServerProcess:
+    """Spawns and supervises one backend child (vLLM or HF server), observing it over HTTP.
+
+    Health is polled locally over 127.0.0.1 (the backend binds 0.0.0.0). The child
+    inherits this worker's environment, so HF_HOME / VLLM_CACHE_ROOT / HF_TOKEN set in
+    the worker's .env apply unchanged. Subclasses only supply the argv + a `name`.
     """
 
-    def __init__(self, spec: NodeSpec, port: int | None = None) -> None:
-        self.spec = spec
-        self.port = port if port is not None else spec.port
-        self.argv = build_argv(spec, self.port)
+    name = "backend"
+
+    def __init__(self, argv: list[str], port: int) -> None:
+        self.port = port
+        self.argv = argv
         self._proc: subprocess.Popen | None = None
         self._local = f"http://127.0.0.1:{self.port}"
 
     # --- lifecycle -----------------------------------------------------------
 
     def start(self) -> None:
-        """Spawn `vllm serve`. Non-blocking — readiness is observed via `is_healthy`."""
+        """Spawn the backend. Non-blocking — readiness is observed via `is_healthy`."""
         if self._proc is not None and self._proc.poll() is None:
-            raise RuntimeError("vLLM process already running")
-        log.info("starting vLLM: %s", " ".join(self.argv))
-        # Inherit stdout/stderr so vLLM's own logs stream to the coordinator's console.
+            raise RuntimeError(f"{self.name} process already running")
+        log.info("starting %s: %s", self.name, " ".join(self.argv))
+        # Inherit stdout/stderr so the backend's own logs stream to the coordinator.
         self._proc = subprocess.Popen(self.argv)  # noqa: S603 - argv built from a typed spec
 
     def poll(self) -> int | None:
@@ -116,7 +149,7 @@ class VLLMProcess:
         return self._proc is not None and self._proc.poll() is None
 
     def stop(self, grace_s: float = 30.0) -> int | None:
-        """Ask vLLM to exit (SIGTERM), escalate to SIGKILL after `grace_s`.
+        """Ask the backend to exit (SIGTERM), escalate to SIGKILL after `grace_s`.
 
         Returns the exit code (or None if it was never started).
         """
@@ -124,12 +157,12 @@ class VLLMProcess:
             return None
         if self._proc.poll() is not None:
             return self._proc.returncode
-        log.info("stopping vLLM (SIGTERM, grace=%.0fs)", grace_s)
+        log.info("stopping %s (SIGTERM, grace=%.0fs)", self.name, grace_s)
         self._proc.terminate()
         try:
             self._proc.wait(timeout=grace_s)
         except subprocess.TimeoutExpired:
-            log.warning("vLLM did not exit within %.0fs; sending SIGKILL", grace_s)
+            log.warning("%s did not exit within %.0fs; sending SIGKILL", self.name, grace_s)
             self._proc.kill()
             self._proc.wait()
         return self._proc.returncode
@@ -137,7 +170,7 @@ class VLLMProcess:
     # --- observation ---------------------------------------------------------
 
     def is_healthy(self, timeout_s: float = 2.0) -> bool:
-        """True once vLLM answers 200 on /health (model loaded, ready to serve)."""
+        """True once the backend answers 200 on /health (model loaded, ready to serve)."""
         try:
             resp = httpx.get(f"{self._local}/health", timeout=timeout_s)
             return resp.status_code == 200
@@ -145,7 +178,7 @@ class VLLMProcess:
             return False
 
     def run_state(self, timeout_s: float = 2.0) -> RunState:
-        """Best-effort IDLE/EXECUTING from vLLM's /metrics.
+        """Best-effort IDLE/EXECUTING from the backend's /metrics.
 
         Coarse by design (see docs/worker-node-states.md): any in-flight or queued
         request reads as EXECUTING. Falls back to IDLE if /metrics is unavailable or
@@ -161,6 +194,28 @@ class VLLMProcess:
             return RunState.EXECUTING if in_flight > 0 else RunState.IDLE
         except httpx.HTTPError:
             return RunState.IDLE
+
+
+class VLLMProcess(_ServerProcess):
+    """Supervises a single `vllm serve` child process."""
+
+    name = "vLLM"
+
+    def __init__(self, spec: NodeSpec, port: int | None = None) -> None:
+        self.spec = spec
+        resolved = port if port is not None else spec.port
+        super().__init__(build_argv(spec, resolved), resolved)
+
+
+class HFProcess(_ServerProcess):
+    """Supervises a single `oumigo.worker.hf_server` (HF-transformers) child process."""
+
+    name = "HF-transformers"
+
+    def __init__(self, spec: NodeSpec, port: int | None = None) -> None:
+        self.spec = spec
+        resolved = port if port is not None else spec.port
+        super().__init__(build_hf_argv(spec, resolved), resolved)
 
 
 def _sum_gauges(prometheus_text: str, metric_names: tuple[str, ...]) -> float:

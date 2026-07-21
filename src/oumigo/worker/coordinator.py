@@ -17,6 +17,7 @@ silent, LOST node.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import time
@@ -36,15 +37,26 @@ from oumigo.protocol.messages import (
 )
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.worker import client
-from oumigo.worker.identity import resolve_node_identity
+from oumigo.worker.identity import resolve_worker_identity
 from oumigo.worker.metrics import MetricsCollector
-from oumigo.worker.supervisor import PortUnavailable, VLLMProcess, find_free_port
+from oumigo.worker.supervisor import (
+    HFProcess,
+    PortUnavailable,
+    VLLMProcess,
+    _ServerProcess,
+    find_free_port,
+)
 
 log = logging.getLogger("oumigo.worker")
 
+# Worker backends: which inference server the coordinator supervises.
+BACKEND_VLLM = "vllm"
+BACKEND_TRANSFORMER = "transformer"
+BACKENDS = (BACKEND_VLLM, BACKEND_TRANSFORMER)
+
 
 class WorkerCoordinator:
-    """Registers with the manager, supervises vLLM, and drives the state machine."""
+    """Registers with the manager, supervises the backend, and drives the state machine."""
 
     def __init__(
         self,
@@ -53,6 +65,9 @@ class WorkerCoordinator:
         node_id: str,
         register_req: RegisterRequest,
         *,
+        spec: NodeSpec,
+        vllm_port: int,
+        backend: str = BACKEND_VLLM,
         max_restarts: int = 3,
         restart_backoff_s: float = 5.0,
         stop_grace_s: float = 30.0,
@@ -67,6 +82,11 @@ class WorkerCoordinator:
         self.token = token
         self.node_id = node_id
         self.register_req = register_req
+        self.backend = backend
+        # The transformer backend generates one request at a time (no batching), so it
+        # tells the router to admit only one in-flight request to this worker. vLLM
+        # batches — leave None so the router keeps the fleet-default capacity.
+        self.report_max_concurrent: int | None = 1 if backend == BACKEND_TRANSFORMER else None
         self.max_restarts = max_restarts
         self.restart_backoff_s = restart_backoff_s
         self.stop_grace_s = stop_grace_s
@@ -81,9 +101,11 @@ class WorkerCoordinator:
         self.node_state: NodeState = NodeState.REGISTERING
         self.run_state: RunState | None = None
         self.interval: float = 10.0
-        self.spec: NodeSpec | None = None
-        self.vllm_port: int | None = None  # actual (preflight-selected) port; reported to manager
-        self.supervisor: VLLMProcess | None = None
+        # Spec + actual port are resolved before construction (the port is folded into
+        # node_id), so vLLM launches on this exact port and the id stays stable.
+        self.spec: NodeSpec | None = spec
+        self.vllm_port: int | None = vllm_port  # actual (preflight-selected) port; part of node_id
+        self.supervisor: _ServerProcess | None = None
         self.metrics: MetricsCollector | None = None
         self._restarts = 0
 
@@ -94,14 +116,9 @@ class WorkerCoordinator:
 
     def run(self) -> None:
         self._install_signals()
-        resp = self._register()
-        spec = resp.node_spec
-        if spec is None:
-            raise SystemExit(
-                "manager accepted registration but returned no vLLM config; "
-                "set model.name in the manager's manager.yaml — nothing to serve"
-            )
-        self._start_vllm(spec)
+        assert self.spec is not None  # resolved pre-construction via /spec
+        self._register()  # identity + port already chosen; response only carries cadence
+        self._start_vllm(self.spec)
         self._start_metrics()
         self._loop()
         # Loop returns on a graceful stop (drain + shut down) or on FAILED (already dead).
@@ -170,7 +187,7 @@ class WorkerCoordinator:
         port = self._select_port(self.spec)  # re-preflight: the port may have freed or moved
         if port is None:
             return  # FAILED set by _select_port
-        self.supervisor = VLLMProcess(self.spec, port=port)
+        self.supervisor = self._make_process(self.spec, port)
         self.supervisor.start()
 
     # --- steps ---------------------------------------------------------------
@@ -200,32 +217,44 @@ class WorkerCoordinator:
         except Exception as exc:  # noqa: BLE001 - best-effort; next tick retries
             log.warning("re-registration failed: %s", exc)
 
+    def _make_process(self, spec: NodeSpec, port: int) -> _ServerProcess:
+        """Build the supervised backend child for this worker's `--backend`."""
+        if self.backend == BACKEND_TRANSFORMER:
+            return HFProcess(spec, port=port)
+        return VLLMProcess(spec, port=port)
+
     def _start_vllm(self, spec: NodeSpec) -> None:
         self.spec = spec
-        port = self._select_port(spec)
-        if port is None:
-            return  # port selection failed -> node is FAILED, the loop reports it
+        port = self.vllm_port  # preflighted before construction (it is part of node_id)
+        if port is None:  # defensive; run_worker always selects a port first
+            log.error("no backend port selected -> FAILED")
+            self.node_state = NodeState.FAILED
+            return
         self.node_state = NodeState.INITIALIZING
-        self.supervisor = VLLMProcess(spec, port=port)
+        self.supervisor = self._make_process(spec, port)
         self.supervisor.start()
-        log.info("loading model %s on port %d (this can take minutes)", spec.model, port)
+        log.info(
+            "loading model %s on port %d via %s (this can take minutes)",
+            spec.model, port, self.backend,
+        )
 
     def _select_port(self, spec: NodeSpec) -> int | None:
-        """Preflight a free port at/after the preferred one; None (and FAILED) if none.
+        """Re-preflight a free port for a *restart*, preferring the one already folded
+        into our node_id so identity stays put. None (and FAILED) if none is free.
 
         Done before launch because vLLM binds only after the model loads — scanning
-        here costs a socket bind, not a model load. Sets `self.vllm_port` so the
-        heartbeat can report the actual port the router must target.
+        here costs a socket bind, not a model load. Updates `self.vllm_port` (the
+        heartbeat reports it) if a fallover was unavoidable.
         """
+        preferred = self.vllm_port if self.vllm_port is not None else spec.port
         try:
-            port = find_free_port(spec.host, spec.port)
+            port = find_free_port(spec.host, preferred)
         except PortUnavailable as exc:
-            log.error("cannot start vLLM: %s -> FAILED", exc)
+            log.error("cannot restart vLLM: %s -> FAILED", exc)
             self.node_state = NodeState.FAILED
-            self.vllm_port = None
             return None
-        if port != spec.port:
-            log.warning("preferred vLLM port %d is in use; falling over to %d", spec.port, port)
+        if port != preferred:
+            log.warning("preferred vLLM port %d is in use; falling over to %d", preferred, port)
         self.vllm_port = port
         return port
 
@@ -234,7 +263,8 @@ class WorkerCoordinator:
         if not self.metrics_enabled:
             return
         # vLLM exposes /metrics on 127.0.0.1:<port>; the scraper no-ops until it serves.
-        vllm_url = f"http://127.0.0.1:{self.spec.port}" if self.spec else None
+        # Use the actual negotiated port (may differ from spec.port on a fallover).
+        vllm_url = f"http://127.0.0.1:{self.vllm_port}" if self.vllm_port else None
         self.metrics = MetricsCollector(
             self.manager_url,
             self.token,
@@ -297,6 +327,7 @@ class WorkerCoordinator:
                     node_state=self.node_state,
                     run_state=self.run_state,
                     vllm_port=self.vllm_port,
+                    max_concurrent_requests=self.report_max_concurrent,
                 ),
                 self.token,
             )
@@ -317,15 +348,51 @@ class WorkerCoordinator:
         signal.signal(signal.SIGTERM, handler)
 
 
+def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
+    """Overlay the negotiable env/.env settings onto the manager's spec (env wins).
+
+    The model the manager hands out is negotiable per worker: `MODEL_NAME` and
+    `MAX_MODEL_LEN` override `model` / `max_model_len`, and `HF_HOME` (with `~`/`$VARS`
+    expanded) + `HF_TOKEN` (blank -> anonymous) are normalized in `os.environ` so the
+    spawned backend child inherits them. When the manager configured no model at all,
+    `MODEL_NAME` alone is enough to serve.
+    """
+    # HF cache/token: normalize in place so the backend child inherits them unchanged.
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        os.environ["HF_HOME"] = os.path.expanduser(os.path.expandvars(hf_home))
+    if not os.environ.get("HF_TOKEN", "").strip():
+        os.environ.pop("HF_TOKEN", None)  # empty token -> anonymous, not a blank credential
+
+    model = os.environ.get("MODEL_NAME") or (spec.model if spec else None)
+    if not model:
+        raise SystemExit(
+            "no model to serve: set MODEL_NAME in the environment/.env, or configure "
+            "model.name on the manager"
+        )
+    updates: dict = {"model": model}
+    max_len = os.environ.get("MAX_MODEL_LEN")
+    if max_len:
+        try:
+            updates["max_model_len"] = int(max_len)
+        except ValueError:
+            raise SystemExit(f"MAX_MODEL_LEN must be an integer, got {max_len!r}")
+    base = spec or NodeSpec(model=model)  # manager has no model -> defaults + env model
+    return base.model_copy(update=updates)
+
+
 def run_worker(
     manager_url: str | None,
     token: str | None,
     state_dir: Path | None = None,
     discover_timeout: float = discovery.DEFAULT_DISCOVER_TIMEOUT,
+    backend: str = BACKEND_VLLM,
 ) -> None:
-    """Resolve identity, find the manager, then hand off to the coordinator loop."""
-    node_id, incarnation, path = resolve_node_identity(state_dir)
-    log.info("node identity %s (incarnation %d) [%s]", node_id, incarnation, path)
+    """Find the manager, fetch + env-negotiate the spec, preflight a port, derive
+    identity, then hand off to the coordinator loop. The node_id is a hash of address +
+    the *actual* backend port, so the port must be chosen before we register."""
+    if backend not in BACKENDS:
+        raise SystemExit(f"unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}")
 
     if not manager_url:
         log.info("no manager URL provided; discovering via mDNS (up to %.0fs) ...", discover_timeout)
@@ -337,11 +404,35 @@ def run_worker(
             )
         log.info("discovered manager at %s", manager_url)
 
+    # 1) Fetch the fleet spec (for the preferred port + model), then overlay env overrides.
+    #    A manager without a model is fine as long as MODEL_NAME is set in the environment.
+    try:
+        spec = client.fetch_node_spec(manager_url, token)
+    except Exception as exc:  # noqa: BLE001 - surface any client/server error as a clean exit
+        raise SystemExit(f"could not fetch spec from manager {manager_url}: {exc}")
+    spec = _apply_env_overrides(spec)
+
+    # 2) Preflight the actual port, then derive identity from address:port.
+    address = discovery.get_lan_ip()
+    try:
+        port = find_free_port(spec.host, spec.port)
+    except PortUnavailable as exc:
+        raise SystemExit(f"cannot start backend: {exc}")
+    node_id, incarnation, path = resolve_worker_identity(address, port, state_dir)
+    log.info(
+        "worker identity %s (incarnation %d) at %s:%d, backend=%s, model=%s [%s]",
+        node_id, incarnation, address, port, backend, spec.model, path,
+    )
+
     register_req = RegisterRequest(
         node_id=node_id,
-        address=discovery.get_lan_ip(),
+        address=address,
+        vllm_port=port,
+        model=spec.model,  # effective model (after env negotiation) for the manager to display
         incarnation=incarnation,
         state=NodeState.REGISTERING,
         capabilities=NodeCapabilities(),
     )
-    WorkerCoordinator(manager_url, token, node_id, register_req).run()
+    WorkerCoordinator(
+        manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend
+    ).run()

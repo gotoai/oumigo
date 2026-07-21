@@ -44,7 +44,7 @@ class MetricMirror:
         self.overlap = timedelta(seconds=overlap_s)
         self._rows: dict[tuple[str, str, str], float] = {}
         self._max_ts: str = ""
-        self.node_info: dict[str, dict] = {}  # node_id -> {"seq", "name"} from /nodes
+        self.node_info: dict[str, dict] = {}  # node_id -> {"seq", "name"} from /workers
         self.last_ok: datetime | None = None
         self.last_error: str | None = None
 
@@ -82,19 +82,19 @@ class MetricMirror:
         log.debug("pulled %d points; buffer now %d rows", len(points), len(self._rows))
 
     async def _refresh_names(self, client: httpx.AsyncClient) -> None:
-        """Pull the manager's UUID -> Worker#N mapping from `/nodes`.
+        """Pull the manager's node_id -> Worker#N mapping from `/workers`.
 
         Best-effort: on failure keep the last-known names so the chart stays labeled.
         """
         try:
-            resp = await client.get(f"{self.control_url}/nodes", timeout=5.0)
+            resp = await client.get(f"{self.control_url}/workers", timeout=5.0)
             resp.raise_for_status()
-            nodes = resp.json().get("nodes", [])
+            workers = resp.json().get("workers", [])
         except (httpx.HTTPError, ValueError):
             return
         self.node_info = {
             n["node_id"]: {"seq": n.get("seq", 0), "name": n.get("name") or n["node_id"][:8]}
-            for n in nodes
+            for n in workers
             if "node_id" in n
         }
 

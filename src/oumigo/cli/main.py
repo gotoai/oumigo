@@ -56,24 +56,35 @@ def worker_run(
     env_file: Optional[Path] = typer.Option(
         Path(".env"),
         "--env-file",
-        help="Load KEY=VALUE vars from this file into the environment (inherited by "
-        "vLLM). Existing environment variables win. Skipped if the file is absent.",
+        help="Load KEY=VALUE vars from this file into the environment (inherited by the "
+        "backend). Existing environment variables win. Skipped if the file is absent.",
+    ),
+    backend: str = typer.Option(
+        "vllm",
+        "--backend",
+        help="Inference backend to supervise: 'vllm' (default) or 'transformer' "
+        "(HF-transformers server; max_concurrent_requests forced to 1).",
     ),
 ) -> None:
-    """Load the env file, resolve identity, find the manager, register, and supervise vLLM.
+    """Load the env file, resolve identity, find the manager, register, and supervise the backend.
 
-    The env file is applied before anything reads the environment, so vars like
-    HF_HOME / HF_TOKEN / VLLM_* reach the vLLM child process the coordinator spawns.
+    The env file is applied before anything reads the environment, so the negotiable
+    vars (MODEL_NAME / MAX_MODEL_LEN / HF_HOME / HF_TOKEN, plus VLLM_*) reach the
+    backend child process the coordinator spawns.
     """
     import logging
 
     from oumigo.common.env import load_env_file
     from oumigo.manager.auth import resolve_manager_token  # shared bearer token
-    from oumigo.worker.coordinator import run_worker
+    from oumigo.worker.coordinator import BACKENDS, run_worker
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+
+    if backend not in BACKENDS:
+        typer.echo(f"error: unknown --backend {backend!r}; choose {' or '.join(BACKENDS)}.", err=True)
+        raise typer.Exit(2)
 
     if env_file is not None:
         load_env_file(env_file)
@@ -91,6 +102,7 @@ def worker_run(
         token=token,
         state_dir=state_dir,
         discover_timeout=discover_timeout,
+        backend=backend,
     )
 
 
@@ -128,7 +140,7 @@ def _resolve_manager_runtime(
         "bind_port": port or int(control_plane.get("port", 7014)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
         "heartbeat_timeout": int(heartbeat_cfg.get("timeout_s", 30)),
-        "forget_after": int(heartbeat_cfg.get("forget_after_days", 14)) * 86400,
+        "forget_after": int(heartbeat_cfg.get("forget_after_seconds", 14 * 86400)),
     }
 
 
