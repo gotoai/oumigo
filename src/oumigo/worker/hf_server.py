@@ -258,28 +258,19 @@ def _next_piece(streamer) -> Any:
 
 # --- vLLM-style request metrics -------------------------------------------------
 
-# Upper bounds (le) for the e2e-latency histogram, mirroring vLLM's own buckets. The
-# metrics collector interpolates tiles from these edges (bucket-edge estimates, exactly
-# as with a real vLLM histogram), not exact sample quantiles.
-E2E_LATENCY_BUCKETS: tuple[float, ...] = (
-    0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0,
-    float("inf"),
-)
-
-
-def _fmt_bucket(edge: float) -> str:
-    """Render a bucket upper bound like vLLM does ('10' not '10.0', '0.3' as-is)."""
-    return str(int(edge)) if edge == int(edge) else str(edge)
-
 
 class _VLLMStats:
     """Accumulates real per-request stats, rendered as vLLM-style Prometheus text.
 
     Exposed at GET /metrics; the coordinator's `MetricsCollector` scrapes it exactly as
-    it would a real vLLM, aggregating the latency histogram into
-    `vllm:e2e_request_latency_seconds_*` and passing the token/finish-reason counters
-    through unchanged. Counters are lifetime-cumulative (reset on restart), like vLLM's.
-    `num_running` is a live gauge the coordinator reads for run-state (IDLE/EXECUTING).
+    it would a real vLLM. Unlike vLLM (which exports an e2e-latency *histogram* the
+    collector turns into bucket-edge estimates), this single-request-at-a-time backend
+    keeps the e2e latency as **exact** running aggregates — count, min, max, and a
+    streaming mean — and exports just those four (no percentile tiles: they'd be
+    meaningless from 4 numbers, and estimating them from too-coarse buckets produced
+    nonsense like mean > max). Token/finish-reason counters pass through unchanged and
+    are lifetime-cumulative (reset on restart). `num_running` is a live gauge the
+    coordinator reads for run-state (IDLE/EXECUTING).
     """
 
     _FINISH_REASONS = ("abort", "error", "length", "repetition", "stop")
@@ -289,9 +280,11 @@ class _VLLMStats:
         self.prompt_tokens_total = 0
         self.generation_tokens_total = 0
         self.success = {r: 0 for r in self._FINISH_REASONS}
-        self.latency_sum = 0.0
+        # Exact e2e-latency aggregates (seconds). mean is updated incrementally.
         self.latency_count = 0
-        self.bucket_cum = [0] * len(E2E_LATENCY_BUCKETS)  # cumulative counts, le-ordered
+        self.latency_min = 0.0
+        self.latency_max = 0.0
+        self.latency_mean = 0.0
         self.num_running = 0  # in-flight requests (this backend generates one at a time)
 
     def inc_running(self) -> None:
@@ -306,16 +299,21 @@ class _VLLMStats:
         self, latency_s: float, prompt_tokens: int, completion_tokens: int,
         finish_reason: str = "stop",
     ) -> None:
-        """Fold one finished request into the counters + latency histogram."""
+        """Fold one finished request into the counters + running latency aggregates."""
+        x = float(latency_s)
         with self._lock:
             self.prompt_tokens_total += int(prompt_tokens)
             self.generation_tokens_total += int(completion_tokens)
             self.success[finish_reason] = self.success.get(finish_reason, 0) + 1
-            self.latency_sum += float(latency_s)
-            self.latency_count += 1
-            for i, edge in enumerate(E2E_LATENCY_BUCKETS):
-                if latency_s <= edge:  # cumulative: falls in this and every larger bucket
-                    self.bucket_cum[i] += 1
+            n = self.latency_count
+            if n == 0:
+                self.latency_min = self.latency_max = self.latency_mean = x
+            else:
+                self.latency_min = min(self.latency_min, x)
+                self.latency_max = max(self.latency_max, x)
+                # streaming mean: new_mean = (x + mean*n) / (n + 1)
+                self.latency_mean = (x + self.latency_mean * n) / (n + 1)
+            self.latency_count = n + 1
 
     def render(self) -> str:
         """Prometheus exposition text for the vllm:* metrics."""
@@ -329,11 +327,14 @@ class _VLLMStats:
                 lines.append(
                     f'vllm:request_success_total{{finished_reason="{r}"}} {self.success[r]}'
                 )
-            for edge, cum in zip(E2E_LATENCY_BUCKETS, self.bucket_cum):
-                le = "+Inf" if edge == float("inf") else _fmt_bucket(edge)
-                lines.append(f'vllm:e2e_request_latency_seconds_bucket{{le="{le}"}} {cum}')
-            lines.append(f"vllm:e2e_request_latency_seconds_sum {self.latency_sum:.6f}")
-            lines.append(f"vllm:e2e_request_latency_seconds_count {self.latency_count}")
+            # Pre-aggregated e2e summary: count always; min/max/mean only once we have a
+            # sample (the collector passes these straight through — no histogram).
+            base = "vllm:e2e_request_latency_seconds"
+            lines.append(f"{base}_count {self.latency_count}")
+            if self.latency_count > 0:
+                lines.append(f"{base}_min {self.latency_min:.6f}")
+                lines.append(f"{base}_max {self.latency_max:.6f}")
+                lines.append(f"{base}_mean {self.latency_mean:.6f}")
         return "\n".join(lines) + "\n"
 
 

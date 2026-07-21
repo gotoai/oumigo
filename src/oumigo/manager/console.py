@@ -164,6 +164,7 @@ class ManagerConsole:
                 r["node_id"],
                 r.get("address") or "-",
                 str(r["port"]) if r.get("port") is not None else "-",
+                (r.get("capabilities") or {}).get("gpu") or "-",
                 r.get("backend") or "-",
                 r["state"],
                 r.get("model") or "-",
@@ -171,7 +172,7 @@ class ManagerConsole:
                 f"{now - r['last_seen']:.0f}s ago",
             ))
 
-        headers = ("WORKER", "HASH ID", "IP", "PORT", "BACKEND", "STATE", "MODEL_NAME", "START (UTC)", "LAST SEEN")
+        headers = ("WORKER", "HASH ID", "IP", "PORT", "GPU#0", "BACKEND", "STATE", "MODEL_NAME", "START (UTC)", "LAST SEEN")
         widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
         fmt = "  ".join(f"{{:<{w}}}" for w in widths)
         print("  " + fmt.format(*headers))

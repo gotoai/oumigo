@@ -276,6 +276,36 @@ class _GpuSampler:
         return _parse_smi_csv(proc.stdout)
 
 
+def probe_gpu0_name() -> str | None:
+    """One-shot model name of GPU 0 (e.g. 'Tesla P40', 'NVIDIA GeForce RTX 3080 Ti
+    Laptop GPU'), for the worker's reported capabilities. NVML first, else nvidia-smi;
+    None when neither is available. Neither path initializes a CUDA context (no VRAM
+    cost), so it's safe to call from the coordinator alongside the backend's own context.
+    """
+    try:
+        import pynvml  # type: ignore[import-untyped]  # optional, GPU-only dep, no stubs
+
+        pynvml.nvmlInit()
+        try:
+            name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
+            return name.decode() if isinstance(name, bytes) else name
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:  # noqa: BLE001 - NVML absent/unusable; try nvidia-smi
+        pass
+    if shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", "0"],
+                capture_output=True, text=True, timeout=3.0, check=True,
+            )
+            name = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
+            return name or None
+        except (OSError, subprocess.SubprocessError, IndexError):
+            pass
+    return None
+
+
 def _smi_float(token: str) -> float | None:
     """nvidia-smi emits 'N/A' / '[Not Supported]' for missing readings -> None."""
     try:
@@ -485,6 +515,14 @@ def _parse_prometheus(text: str, prefix: str = "vllm:") -> dict[str, float]:
                     "count"
                 ] = value
             continue
+        # Pre-aggregated summary stats (min/max/mean) a backend may export directly in
+        # place of buckets — e.g. the transformer backend keeps exact e2e aggregates.
+        # Only intercepted for the histogram families; other gauges pass through below.
+        stat = next((s for s in ("min", "max", "mean") if name.endswith("_" + s)), None)
+        if stat is not None and name[: -(len(stat) + 1)] in _HIST_AGGREGATE_METRICS:
+            base = name[: -(len(stat) + 1)]
+            hist.setdefault((base, suffix), {"buckets": {}, "sum": 0.0, "count": 0.0})[stat] = value
+            continue
 
         # Gauge or `…_total` counter -> pass through unchanged.
         key = f"{name}_{suffix}" if suffix else name
@@ -493,7 +531,16 @@ def _parse_prometheus(text: str, prefix: str = "vllm:") -> dict[str, float]:
     out = dict(scalars)
     for (base, suffix), h in hist.items():
         agg_base = f"{base}_{suffix}" if suffix else base
-        out.update(_histogram_aggregates(agg_base, h["buckets"], h["sum"], h["count"]))
+        if h["buckets"]:
+            # A real histogram (vLLM): count/mean/min/tiles/max from bucket edges.
+            out.update(_histogram_aggregates(agg_base, h["buckets"], h["sum"], h["count"]))
+        else:
+            # Pre-aggregated summary (transformer backend): exact count/min/max/mean,
+            # no percentile tiles to interpolate. Pass through what was supplied.
+            out[f"{agg_base}_count"] = h["count"]
+            for stat in ("min", "max", "mean"):
+                if stat in h:
+                    out[f"{agg_base}_{stat}"] = round(h[stat], 6)
     return out
 
 

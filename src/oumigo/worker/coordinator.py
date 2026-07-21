@@ -38,7 +38,7 @@ from oumigo.protocol.messages import (
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.worker import client
 from oumigo.worker.identity import resolve_worker_identity
-from oumigo.worker.metrics import MetricsCollector
+from oumigo.worker.metrics import MetricsCollector, probe_gpu0_name
 from oumigo.worker.supervisor import (
     HFProcess,
     PortUnavailable,
@@ -432,7 +432,7 @@ def run_worker(
         backend=backend,   # which inference backend this worker runs
         incarnation=incarnation,
         state=NodeState.REGISTERING,
-        capabilities=NodeCapabilities(),
+        capabilities=NodeCapabilities(gpu=probe_gpu0_name()),
     )
     WorkerCoordinator(
         manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend
