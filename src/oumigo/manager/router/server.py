@@ -44,7 +44,9 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
 
+from oumigo import __version__
 from oumigo.config.spec import NodeSpec
 from oumigo.manager.control.registry import NodeRecord, Registry
 from oumigo.protocol.states import NodeState
@@ -298,19 +300,43 @@ def create_router_app(
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
+        """proxy an OpenAI chat completion to a healthy worker vLLM"""
         return await _forward(request, "POST", "/v1/chat/completions")
 
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
+        """proxy an OpenAI text completion to a healthy worker vLLM"""
         return await _forward(request, "POST", "/v1/completions")
 
     @app.get("/v1/models")
     async def models(request: Request) -> Response:
+        """list the model(s) served by the fleet"""
         return await _forward(request, "GET", "/v1/models")
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        """report data-plane liveness and the healthy-worker count"""
         n = pool.healthy_count()
         return {"status": "ok" if n else "no_workers", "healthy_workers": n}
+
+    @app.get("/version")
+    async def version() -> dict:
+        """show the package version"""
+        return {"version": __version__}
+
+    @app.get("/list")
+    async def list_commands() -> dict:
+        """show the supported API commands"""
+        paths: dict[str, dict] = {}
+        for route in app.routes:
+            if not isinstance(route, APIRoute):
+                continue  # skip the auto docs/openapi routes
+            summary = (route.endpoint.__doc__ or "").strip().splitlines()[0] if route.endpoint.__doc__ else ""
+            for method in sorted(m for m in route.methods if m not in ("HEAD", "OPTIONS")):
+                paths.setdefault(route.path, {})[method.lower()] = {
+                    "summary": summary,
+                    "operationId": route.unique_id,
+                }
+        return {"paths": paths}
 
     return app
