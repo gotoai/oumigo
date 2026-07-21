@@ -2,8 +2,10 @@
 
 Used by `oumigo manager run` on a TTY: the server lives in its own process (fault
 isolation, no async-in-thread), and the console attaches to it as an HTTP client.
-The child is started in a new session so a terminal Ctrl-C reaches only the
-console, which owns the child's lifecycle.
+The child is started in a new session so a terminal Ctrl-C reaches only the console,
+which owns the child's lifecycle — and armed with `PR_SET_PDEATHSIG`, so a hard kill
+of the console still takes the server (and, transitively, its dashboard) down rather
+than orphaning it.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import time
 
 import httpx
 
+from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.manager.console import ManagerConsole
 
 
@@ -31,19 +34,22 @@ def run_with_child_server(
         env["OUMIGO_MANAGER_TOKEN"] = token  # pass secret via env, never argv
 
     cmd = [sys.executable, "-m", "oumigo.cli.main", "manager", "serve", *forward_args]
-    child = subprocess.Popen(cmd, env=env, start_new_session=True)
+    child = subprocess.Popen(  # noqa: S603 - fixed argv
+        cmd, env=env, start_new_session=True, preexec_fn=die_with_parent_preexec()
+    )
 
     base_url = f"http://127.0.0.1:{port}"
     if not _wait_healthy(child, base_url, startup_timeout):
         print("error: control-plane server did not start", file=sys.stderr)
-        _terminate(child)
+        terminate(child)
         raise SystemExit(1)
 
     console = ManagerConsole(base_url=base_url, server_pid=child.pid, verbose=verbose)
     try:
         console.run()
     finally:
-        _terminate(child)
+        # Stop the server child on any console exit; it in turn stops the dashboard.
+        terminate(child)
 
 
 def _wait_healthy(child: subprocess.Popen, base_url: str, timeout: float) -> bool:
@@ -57,12 +63,3 @@ def _wait_healthy(child: subprocess.Popen, base_url: str, timeout: float) -> boo
         except Exception:  # noqa: BLE001 - not up yet
             time.sleep(0.1)
     return False
-
-
-def _terminate(child: subprocess.Popen) -> None:
-    if child.poll() is None:
-        child.terminate()
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            child.kill()

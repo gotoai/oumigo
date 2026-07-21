@@ -429,6 +429,7 @@ def run_worker(
         address=address,
         vllm_port=port,
         model=spec.model,  # effective model (after env negotiation) for the manager to display
+        backend=backend,   # which inference backend this worker runs
         incarnation=incarnation,
         state=NodeState.REGISTERING,
         capabilities=NodeCapabilities(),

@@ -28,6 +28,7 @@ class NodeRecord:
     seq: int = 0  # 1-based order of first registration; drives the friendly name
     port: int | None = None  # worker's actual vLLM port (negotiated); None until reported
     model: str | None = None  # effective model the worker serves (env-negotiable); None until reported
+    backend: str | None = None  # inference backend in use ("vllm" | "transformer"); None until reported
     # Worker's negotiated in-flight cap; None until reported (router falls back to the
     # fleet default from node_spec.max_concurrent_requests).
     max_concurrent_requests: int | None = None
@@ -60,6 +61,7 @@ class Registry:
         capabilities: dict,
         port: int | None = None,
         model: str | None = None,
+        backend: str | None = None,
     ) -> NodeRecord:
         """Idempotent: keyed on node_id, so a re-register updates in place.
 
@@ -88,6 +90,8 @@ class Registry:
                 port=port if port is not None else (existing.port if existing else None),
                 # worker reports its effective model at registration; keep last if omitted
                 model=model if model is not None else (existing.model if existing else None),
+                # worker reports its backend at registration; keep last if omitted
+                backend=backend if backend is not None else (existing.backend if existing else None),
                 # keep negotiated in-flight cap across re-register
                 max_concurrent_requests=existing.max_concurrent_requests if existing else None,
             )

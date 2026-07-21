@@ -39,6 +39,7 @@ class RegisterRequest(BaseModel):
     address: str                       # LAN-reachable address the worker advertises
     vllm_port: int | None = None       # actual (preflight-selected) vLLM port; part of node_id
     model: str | None = None           # effective model the worker serves (env-negotiable)
+    backend: str | None = None         # inference backend in use ("vllm" | "transformer")
     incarnation: int = 0               # bumped each worker start; same identity
     state: NodeState = NodeState.REGISTERING
     capabilities: NodeCapabilities = Field(default_factory=NodeCapabilities)

@@ -28,6 +28,7 @@ from zeroconf.asyncio import AsyncZeroconf
 
 from oumigo import discovery
 from oumigo.common.logging import configure_logging, set_verbosity
+from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.config.spec import NodeSpec
 from oumigo.manager.control.registry import Registry
 from oumigo.manager.control.store import MetricStore
@@ -129,6 +130,7 @@ def create_app(
             capabilities=req.capabilities.model_dump(),
             port=req.vllm_port,
             model=req.model,
+            backend=req.backend,
         )
         log.info(
             "registered worker %s at %s:%s (incarnation=%d)",
@@ -284,8 +286,10 @@ def run_server(
             )
         )
     finally:
-        if dashboard is not None:
-            _terminate(dashboard)
+        # Clean up every child this process spawned. SIGINT/SIGTERM/normal exit reach
+        # here; a hard kill (SIGKILL) or crash does not — the child's PR_SET_PDEATHSIG
+        # (armed at spawn) covers that case instead.
+        terminate(dashboard)
 
 
 def _spawn_dashboard(
@@ -294,9 +298,10 @@ def _spawn_dashboard(
     """Start the reporting-plane dashboard as a child process, or None if it fails.
 
     Runs in a new session so a terminal Ctrl-C reaches only the manager, which owns
-    this child's lifecycle (terminated in `run_server`'s finally). A dashboard that
-    fails to launch must never take the control plane down — hence the best-effort
-    guard.
+    this child's lifecycle (terminated in `run_server`'s finally). `PR_SET_PDEATHSIG`
+    additionally makes the kernel SIGTERM it if the manager is hard-killed, so it can't
+    orphan. A dashboard that fails to launch must never take the control plane down —
+    hence the best-effort guard.
     """
     cmd = [
         sys.executable, "-m", "oumigo.manager.dashboard",
@@ -307,22 +312,14 @@ def _spawn_dashboard(
     if verbose:
         cmd.append("--verbose")
     try:
-        child = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603 - fixed argv
+        child = subprocess.Popen(  # noqa: S603 - fixed argv
+            cmd, start_new_session=True, preexec_fn=die_with_parent_preexec()
+        )
     except OSError as exc:
         log.warning("reporting-plane dashboard failed to start (%s); continuing without it", exc)
         return None
     log.info("reporting-plane dashboard on %s:%d (child pid %d)", host, port, child.pid)
     return child
-
-
-def _terminate(child: subprocess.Popen) -> None:
-    """Best-effort graceful stop of a child process, escalating to kill."""
-    if child.poll() is None:
-        child.terminate()
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            child.kill()
 
 
 async def _serve_both(
