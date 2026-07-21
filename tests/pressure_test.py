@@ -587,12 +587,17 @@ async def _run_client(
     duration: float | None,
     max_context_length: int,
     verbose: bool,
+    wait_between_seconds: float,
+    wait_between_random: bool,
 ) -> None:
     """One simulated client: a single multi-turn conversation.
 
     Runs a fixed `n_questions` turns, or — when `duration` is set — keeps asking
     until that many seconds elapse. It keeps the last `history` (user, assistant)
     pairs and prepends them to each new question, growing a realistic context.
+
+    Between two successive requests it waits `wait_between_seconds` (0 = no wait);
+    when `wait_between_random` is set, the wait is a uniform sample of [0, that].
     """
     convo: list[dict] = []  # trimmed to the last `history` (user, assistant) pairs
     url = f"{base_url}/v1/chat/completions"
@@ -602,6 +607,10 @@ async def _run_client(
         while (deadline is None and i < n_questions) or (
             deadline is not None and time.perf_counter() < deadline
         ):
+            if i > 0 and wait_between_seconds > 0:
+                delay = (random.uniform(0, wait_between_seconds)
+                         if wait_between_random else wait_between_seconds)
+                await asyncio.sleep(delay)
             question = random.choice(pool)
             hist = convo[-2 * history :] if history > 0 else []
             hist = _fit_history(hist, question, max_tokens, max_context_length)
@@ -733,6 +742,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                 cid, base_url, model, pool, args.questions, args.history,
                 args.max_tokens, headers, records, args.stream, args.duration,
                 args.max_context_length, args.verbose,
+                args.wait_between_seconds, args.wait_between_random,
             )
             for cid in range(args.clients)
         ]
@@ -768,6 +778,11 @@ def main() -> None:
                    help="print each request's final prompt (no history) and response (default: NO)")
     p.add_argument("--duration", type=float, default=None, metavar="SECONDS",
                    help="run each client for N seconds instead of a fixed --questions count")
+    p.add_argument("--wait_between_seconds", type=float, default=0.0, metavar="SECONDS",
+                   help="seconds a client waits between two successive requests (default: 0)")
+    p.add_argument("--wait_between_random", type=_bool, default=False, metavar="YES|NO",
+                   help="YES: wait a uniform-random time in [0, --wait_between_seconds] "
+                        "between requests; NO: wait exactly that many seconds (default: NO)")
     p.add_argument("--model", default=None,
                    help="model id (default: auto-detect from /v1/models)")
     p.add_argument("--max-tokens", type=int, default=4000,

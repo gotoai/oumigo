@@ -243,6 +243,52 @@ def test_sample_emits_worker_start_and_vllm_start_on_serving() -> None:
     assert M_VLLM_START not in after_clear  # vllm stamp gone until it serves again
 
 
+def test_request_rate_tracker_derives_per_minute_over_window() -> None:
+    from oumigo.worker.metrics import _RequestRateTracker
+
+    t = _RequestRateTracker()
+    # No history yet, and while the window is shorter than WINDOW_MIN_S (60s): a gap.
+    assert t.update(0, 100.0) is None
+    assert t.update(55, 111.0) is None  # only 55s of history so far
+    # At 60s the window qualifies: Δcount=120-100=20 over 60s -> 20/min.
+    assert t.update(60, 120.0) == 20.0
+    # At 120s the oldest retained reference is still t=0 (within the 180s max window):
+    # Δcount=240-100=140 over 120s -> 70/min.
+    assert t.update(120, 240.0) == 70.0
+
+
+def test_request_rate_tracker_caps_window_at_180s() -> None:
+    from oumigo.worker.metrics import _RequestRateTracker
+
+    t = _RequestRateTracker()
+    assert t.update(0, 0.0) is None
+    # The t=0 sample has aged past WINDOW_MAX_S, so the reference is the next-oldest
+    # retained sample (t=5), giving a ~180s window rather than 185s.
+    t.update(5, 10.0)
+    # 300 completions from t=5's count of 10 -> Δ=300 over (185-5)=180s -> 100/min.
+    assert t.update(185, 310.0) == 100.0
+
+
+def test_request_rate_tracker_skips_counter_reset() -> None:
+    from oumigo.worker.metrics import _RequestRateTracker
+
+    t = _RequestRateTracker()
+    t.update(0, 500.0)
+    # vLLM restarted: the cumulative counter dropped. A negative delta is a gap, not a
+    # bogus negative rate.
+    assert t.update(60, 3.0) is None
+
+
+def test_request_rate_tracker_gap_when_counter_absent() -> None:
+    from oumigo.worker.metrics import _RequestRateTracker
+
+    t = _RequestRateTracker()
+    t.update(0, 100.0)
+    assert t.update(60, None) is None  # vLLM down / scrape miss -> no update, no row
+    # A later present read still measures from the retained t=0 sample.
+    assert t.update(120, 220.0) == 60.0
+
+
 def test_collect_host_metrics_shape() -> None:
     # On the Linux CI host this reads real /proc; assert the always-on keys appear.
     from oumigo.worker.metrics import _CpuSampler, collect_host_metrics

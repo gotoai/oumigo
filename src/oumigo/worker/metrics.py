@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,6 +57,12 @@ M_MEM_USED_PCT = "worker:mem_used_pct"
 # per process start / restart; see docs/metrics.md.
 M_WORKER_START = "worker:start_timestamp"  # coordinator (worker) process start
 M_VLLM_START = "vllm:start_timestamp"       # moment the node last entered SERVING
+
+# Completion-rate gauge derived at sample time from the cumulative success counter.
+# `M_VLLM_SUCCESS_STOP` is the flattened key of vLLM's
+# `vllm:request_success_total{finished_reason="stop"}` series (see _parse_prometheus).
+M_VLLM_SUCCESS_STOP = "vllm:request_success_total_stop"
+M_VLLM_REQ_PER_MIN = "vllm:num_requests_per_minute"
 
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"  # UTC, grid-aligned
 
@@ -557,6 +564,46 @@ def collect_vllm_metrics(vllm_url: str | None, timeout: float = 2.0) -> dict[str
     return _parse_prometheus(resp.text)
 
 
+class _RequestRateTracker:
+    """Derives ``vllm:num_requests_per_minute`` from the cumulative success counter.
+
+    vLLM exposes only a lifetime-cumulative ``request_success_total`` counter, so a
+    *rate* has to come from two reads across time — the same shape as
+    ``worker:cpu_util_pct``. This keeps a short trail of ``(grid_epoch, count)``
+    samples and, each slot, measures the completion rate over the widest window that
+    history supports within ``[WINDOW_MIN_S, WINDOW_MAX_S]``: the oldest retained
+    sample is the reference, giving ``Δcount / Δt × 60`` requests per minute.
+
+    Returns ``None`` (a gap, so no row is emitted) until at least ``WINDOW_MIN_S`` of
+    history exists, whenever the source counter is absent (vLLM down / a scrape miss),
+    or when the counter went backwards — a vLLM restart reset it, and stale pre-restart
+    samples are skipped until they age out of the window and the rate resumes on its own.
+    """
+
+    WINDOW_MIN_S = 60   # shortest window we'll report a rate over (need this much history)
+    WINDOW_MAX_S = 180  # oldest reference we'll reach back to (caps the smoothing window)
+
+    def __init__(self) -> None:
+        self._samples: deque[tuple[int, float]] = deque()
+
+    def update(self, grid_epoch: int, cumulative: float | None) -> float | None:
+        """Fold in this slot's cumulative count; return req/min or None (a gap)."""
+        if cumulative is None:  # counter not present this slot — nothing to record
+            return None
+        cutoff = grid_epoch - self.WINDOW_MAX_S
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()  # keep only the trailing WINDOW_MAX_S of history
+        rate: float | None = None
+        if self._samples:
+            ref_epoch, ref_count = self._samples[0]  # oldest -> widest valid window
+            window = grid_epoch - ref_epoch
+            delta = cumulative - ref_count
+            if window >= self.WINDOW_MIN_S and delta >= 0:
+                rate = round(delta / window * 60.0, 2)
+        self._samples.append((grid_epoch, cumulative))
+        return rate
+
+
 # --- buffer ---------------------------------------------------------------------
 
 
@@ -666,6 +713,7 @@ class MetricsCollector:
         self._buffer = MetricsBuffer(capacity_s, evict_chunk_s)
         self._cpu = _CpuSampler()
         self._gpu = _GpuSampler()
+        self._req_rate = _RequestRateTracker()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         # Start stamps (float epoch). worker_start is fixed for this process; the
@@ -721,6 +769,10 @@ class MetricsCollector:
         metrics = collect_host_metrics(self._cpu)
         metrics.update(self._gpu.sample())                    # gpu:#N_* (empty if no GPU)
         metrics.update(collect_vllm_metrics(self.vllm_url))   # vllm:*   (empty until serving)
+        # Derived completion rate over a [60s, 180s] window (gap until enough history).
+        rpm = self._req_rate.update(grid_epoch, metrics.get(M_VLLM_SUCCESS_STOP))
+        if rpm is not None:
+            metrics[M_VLLM_REQ_PER_MIN] = rpm
         metrics[M_WORKER_START] = self._worker_start          # constant float epoch (UTC)
         vllm_start = self._vllm_start
         if vllm_start is not None:                            # only while SERVING

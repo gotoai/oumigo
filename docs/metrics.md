@@ -225,6 +225,7 @@ slots, and needs restart-safe delta handling).
 |---|---|
 | `vllm:num_requests_running` | requests currently in execution batches |
 | `vllm:num_requests_waiting` | requests queued awaiting scheduling |
+| `vllm:num_requests_per_minute` | **derived** completion rate — requests finished with `finished_reason=stop` per minute (see below) |
 | `vllm:kv_cache_usage_perc` | fraction of KV-cache blocks in use (0–1) |
 | `vllm:num_requests_waiting_by_reason` | waiting requests broken out by reason *(situational)* |
 | `vllm:engine_sleep_state` | engine awake/sleeping indicator *(situational)* — **excluded from the V1 set** (all `state=` splits: `_awake` / `_discard_all` / `_weights_offloaded`) |
@@ -240,6 +241,17 @@ slots, and needs restart-safe delta handling).
 | `vllm:num_preemptions_total` | cumulative scheduler preemptions |
 | `vllm:request_success_total` | finished requests, labeled by `finished_reason` |
 | `vllm:corrupted_requests_total` | corrupted requests *(situational)* |
+
+`vllm:num_requests_per_minute` is a **derived gauge**, not a raw vLLM series — the
+same shape as `worker:cpu_util_pct`, a rate the worker computes at sample time from a
+cumulative counter (vLLM exposes only the lifetime `request_success_total`, never a
+rate). Each grid slot the worker keeps a trailing window of the flattened
+`vllm:request_success_total_stop` counter and reports `Δcount / Δt × 60` over the
+widest window it has in **[60 s, 180 s]** (the oldest sample still inside 180 s is the
+reference). It stays a **gap** until 60 s of history exists, whenever the counter is
+absent (vLLM down / a scrape miss), and across a vLLM restart (the counter resets, so
+the negative delta is skipped until the pre-restart samples age out of the window).
+Only the `stop` outcome is counted — `length`/`abort` completions are excluded.
 
 **Cache effectiveness — Counters** *(situational)* (emitted `…_total`)
 
