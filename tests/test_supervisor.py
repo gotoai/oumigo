@@ -2,12 +2,75 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import sys
+import textwrap
+import time
 
 import pytest
 
 from oumigo.config.spec import NodeSpec
-from oumigo.worker.supervisor import PortUnavailable, build_argv, find_free_port
+from oumigo.worker.supervisor import (
+    PortUnavailable,
+    _ServerProcess,
+    build_argv,
+    find_free_port,
+)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def test_stop_reaps_whole_process_group(tmp_path) -> None:
+    """Layer 1: stop() SIGKILLs the backend's whole process group, reaping a child the
+    leader left behind — a SIGTERM-ignoring stand-in for an orphaned vLLM EngineCore."""
+    pidfile = tmp_path / "gc.pid"
+    leader = tmp_path / "leader.py"
+    leader.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing as mp, os, signal, time
+            def engine_core(path):
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)  # survive the group SIGTERM
+                with open(path, "w") as f:
+                    f.write(str(os.getpid()))
+                time.sleep(120)
+            if __name__ == "__main__":
+                mp.set_start_method("spawn")
+                mp.Process(target=engine_core, args=({str(pidfile)!r},)).start()
+                time.sleep(120)  # default SIGTERM disposition -> leader exits on SIGTERM
+            """
+        )
+    )
+
+    proc = _ServerProcess([sys.executable, str(leader)], port=0)
+    proc.start()
+    try:
+        for _ in range(200):  # wait for the grandchild to announce its pid
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            time.sleep(0.05)
+        gc_pid = int(pidfile.read_text())
+        assert _alive(gc_pid)  # the "EngineCore" is up and ignoring SIGTERM
+
+        proc.stop(grace_s=3.0)
+        for _ in range(40):  # give the final SIGKILL sweep a moment to land
+            if not _alive(gc_pid):
+                break
+            time.sleep(0.05)
+        assert not _alive(gc_pid), "orphaned group member should have been reaped by stop()"
+    finally:
+        if pidfile.exists() and pidfile.read_text().strip():
+            try:
+                os.kill(int(pidfile.read_text()), 9)  # SIGKILL any straggler if the test failed
+            except (ProcessLookupError, ValueError):
+                pass
 
 
 def test_build_argv_minimal() -> None:

@@ -150,7 +150,7 @@ def _resolve_manager_runtime(
         "bind_port": port or int(control_plane.get("port", 7014)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
         "heartbeat_timeout": int(heartbeat_cfg.get("timeout_s", 30)),
-        "forget_after": int(heartbeat_cfg.get("forget_after_seconds", 14 * 86400)),
+        "forget_after": int(heartbeat_cfg.get("forget_after_seconds", 3600)),  # 1 hour
     }
 
 

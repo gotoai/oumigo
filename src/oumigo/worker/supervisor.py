@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import errno
 import logging
+import os
+import signal
 import socket
 import subprocess
 import sys
 
 import httpx
 
+from oumigo.common.proc import die_with_parent_preexec
 from oumigo.config.spec import NodeSpec
 from oumigo.protocol.states import RunState
 
@@ -126,6 +129,7 @@ class _ServerProcess:
         self.port = port
         self.argv = argv
         self._proc: subprocess.Popen | None = None
+        self._pgid: int | None = None
         self._local = f"http://127.0.0.1:{self.port}"
 
     # --- lifecycle -----------------------------------------------------------
@@ -135,8 +139,21 @@ class _ServerProcess:
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError(f"{self.name} process already running")
         log.info("starting %s: %s", self.name, " ".join(self.argv))
-        # Inherit stdout/stderr so the backend's own logs stream to the coordinator.
-        self._proc = subprocess.Popen(self.argv)  # noqa: S603 - argv built from a typed spec
+        # Own session/process group (`start_new_session` -> setsid): the backend becomes
+        # a group leader, and the extra processes it forks via multiprocessing (vLLM's
+        # EngineCore + tensor-parallel workers) inherit this pgid. That lets `stop()` reap
+        # the *whole* tree by group, so a hard-killed API server can't orphan an EngineCore
+        # still holding VRAM. `die_with_parent_preexec` (PR_SET_PDEATHSIG) is the backstop:
+        # if the coordinator itself dies, the kernel SIGTERMs the backend. stdout/stderr are
+        # still inherited, so the backend's logs stream to the coordinator as before.
+        self._proc = subprocess.Popen(  # noqa: S603 - argv built from a typed spec
+            self.argv,
+            start_new_session=True,
+            preexec_fn=die_with_parent_preexec(),
+        )
+        # setsid makes the child its own group leader, so pgid == pid — capture it now
+        # (it stays valid for killpg even after the leader exits, while members remain).
+        self._pgid = self._proc.pid
 
     def poll(self) -> int | None:
         """Return the child's exit code, or None while it is still running."""
@@ -148,23 +165,43 @@ class _ServerProcess:
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def stop(self, grace_s: float = 30.0) -> int | None:
-        """Ask the backend to exit (SIGTERM), escalate to SIGKILL after `grace_s`.
+    def _killpg(self, sig: int) -> None:
+        """Send `sig` to the backend's whole process group (leader + EngineCore + workers).
 
-        Returns the exit code (or None if it was never started).
+        No-op if the group is already gone (`ProcessLookupError`) or the platform lacks
+        process groups (`AttributeError`, e.g. Windows) — there `stop` falls back to
+        single-process signals via the `_proc` handle.
+        """
+        if self._pgid is None:
+            return
+        try:
+            os.killpg(self._pgid, sig)
+        except (ProcessLookupError, AttributeError):
+            pass
+
+    def stop(self, grace_s: float = 30.0) -> int | None:
+        """Stop the backend and its whole process group cleanly, then sweep stragglers.
+
+        SIGTERM the group (the leader runs vLLM's graceful shutdown; EngineCore also gets
+        it), escalate to SIGKILL after `grace_s`, then a final group SIGKILL reaps any
+        member still alive even though the leader has already exited — so no EngineCore is
+        left orphaned holding VRAM. Returns the exit code (or None if never started).
         """
         if self._proc is None:
             return None
-        if self._proc.poll() is not None:
-            return self._proc.returncode
-        log.info("stopping %s (SIGTERM, grace=%.0fs)", self.name, grace_s)
-        self._proc.terminate()
-        try:
-            self._proc.wait(timeout=grace_s)
-        except subprocess.TimeoutExpired:
-            log.warning("%s did not exit within %.0fs; sending SIGKILL", self.name, grace_s)
-            self._proc.kill()
-            self._proc.wait()
+        if self._proc.poll() is None:
+            log.info("stopping %s group (SIGTERM, grace=%.0fs)", self.name, grace_s)
+            self._killpg(signal.SIGTERM)
+            try:
+                self._proc.wait(timeout=grace_s)
+            except subprocess.TimeoutExpired:
+                log.warning("%s did not exit within %.0fs; SIGKILL group", self.name, grace_s)
+                self._killpg(signal.SIGKILL)
+                self._proc.wait()
+        # Final sweep: the leader is gone, but a lingering EngineCore in the same group
+        # would otherwise survive (this is exactly what leaks VRAM). killpg by the leader's
+        # old pid still reaches it while any member remains; ESRCH if the group is empty.
+        self._killpg(signal.SIGKILL)
         return self._proc.returncode
 
     # --- observation ---------------------------------------------------------

@@ -7,6 +7,8 @@ takes precedence, and cloud environments use provisioning-time injection instead
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import socket
 import threading
@@ -64,7 +66,23 @@ def discover_manager(timeout: float = DEFAULT_DISCOVER_TIMEOUT) -> str | None:
 
     Waits up to `timeout` seconds for a manager to appear, returning as soon as one
     is found (so a manager that starts later is still picked up within the window).
+
+    Safe to call from within a running asyncio event loop (e.g. a Jupyter notebook):
+    python-zeroconf's *synchronous* API silently finds nothing when the calling thread
+    already runs a loop, so in that case the browse is delegated to a worker thread
+    (which has no running loop). Plain scripts / the CLI browse inline as before.
     """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _browse_for_manager(timeout)  # no running loop in this thread — safe inline
+    # A loop is running here; run the blocking sync browse off-thread so zeroconf works.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_browse_for_manager, timeout).result()
+
+
+def _browse_for_manager(timeout: float) -> str | None:
+    """Blocking mDNS browse for the manager. Must run on a thread with no running loop."""
     zc = Zeroconf()
     found: dict[str, str] = {}
     event = threading.Event()

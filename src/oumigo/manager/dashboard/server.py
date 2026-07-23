@@ -32,7 +32,14 @@ def create_dashboard_app(control_url: str, *, poll_interval_s: float = 5.0) -> F
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        async with httpx.AsyncClient() as client:
+        # No keep-alive reuse: the poll interval (~10s) outlives uvicorn's idle
+        # keep-alive timeout (~5s), so a pooled connection is reliably closed
+        # server-side by the next pull. Reusing it races the server's close and
+        # surfaces spurious `RemoteProtocolError: Server disconnected` warnings.
+        # A fresh connection per pull costs nothing at this cadence and removes it.
+        async with httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=0)
+        ) as client:
             await mirror.refresh(client)  # seed once so the first page isn't empty
             stop = asyncio.Event()
 

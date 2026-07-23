@@ -218,7 +218,7 @@ def run_server(
     provider_name: str,
     heartbeat_interval: int = 10,
     heartbeat_timeout: float = 30,
-    forget_after: float = 14 * 86400,
+    forget_after: float = 3600,  # 1 hour
     advertise: bool = True,
     verbose: bool = False,
     config_file: Path | None = None,
