@@ -106,6 +106,16 @@ def worker_run(
     )
 
 
+def _parse_yes_no(value: str) -> bool:
+    """Typer callback: parse a ``YES``/``NO`` option value into a bool (case-insensitive)."""
+    normalized = value.strip().upper()
+    if normalized in ("YES", "Y"):
+        return True
+    if normalized in ("NO", "N"):
+        return False
+    raise typer.BadParameter("expected YES or NO")
+
+
 def _resolve_manager_runtime(
     config_file: Optional[Path], token_file: Optional[Path], host: Optional[str], port: Optional[int]
 ) -> dict:
@@ -201,9 +211,20 @@ def manager_run(
     ),
     host: Optional[str] = typer.Option(None, "--host", help="Control-plane bind host (overrides config)."),
     port: Optional[int] = typer.Option(None, "--port", help="Control-plane bind port (overrides config)."),
-    no_mdns: bool = typer.Option(False, "--no-mdns", help="Do not advertise the manager over mDNS."),
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Stream server logs to the console."
+    no_mdns: str = typer.Option(
+        "NO",
+        "--no-mdns",
+        metavar="[YES|NO]",
+        callback=_parse_yes_no,
+        help="Do not advertise the manager over mDNS. [YES|NO], default NO.",
+    ),
+    verbose: str = typer.Option(
+        "NO",
+        "--verbose",
+        "-v",
+        metavar="[YES|NO]",
+        callback=_parse_yes_no,
+        help="Stream server logs to the console. [YES|NO], default NO.",
     ),
 ) -> None:
     """Run the manager.
