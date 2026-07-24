@@ -29,6 +29,10 @@ class OumigoResponse:
 
     Attributes:
         text: The assistant's final answer (accumulates as a stream is consumed).
+        reasoning: The model's reasoning/thinking (``reasoning_content``), concatenated
+            across the request's turns and kept out of ``text``. Populated only when the
+            worker's vLLM runs a ``--reasoning-parser``; ``""`` otherwise. Output-only —
+            for display/debugging, never fed back to the model (see the class notes).
         finish_reason: Why generation stopped — ``"stop"``, ``"length"``, or
             ``"max_iterations"`` when the tool loop hit its cap without a final answer.
         tool_calls_made: One ``{"name", "arguments", "result"}`` entry per tool the loop
@@ -36,16 +40,29 @@ class OumigoResponse:
         raw: The last raw completion payload from the data plane (escape hatch).
 
     A response is single-use for streaming: iterating drives the underlying request. Once
-    consumed, re-iterating simply re-yields the full ``text`` a single time.
+    consumed, re-iterating simply re-yields the full ``text`` a single time. Note that
+    ``reasoning`` is *never* yielded by iteration — only ``text`` deltas are — so it fills
+    in alongside and is read after consumption (``resp.reasoning``).
     """
 
     def __init__(self) -> None:
         self.text: str = ""
+        self.reasoning: str = ""
         self.finish_reason: str | None = None
         self.tool_calls_made: list[dict[str, Any]] = []
         self.raw: dict[str, Any] | None = None
         self._gen: Iterator[str] | None = None
         self._consumed: bool = False
+
+    def _note_reasoning(self, text: str) -> None:
+        """Append one turn's ``reasoning_content`` (internal; kept out of ``text``).
+
+        Turns are separated by a blank line so a multi-step (tool-loop) request reads as
+        distinct thoughts. Never resent to the model — see :meth:`OumigoChat._remember`.
+        """
+        if not text:
+            return
+        self.reasoning += ("\n\n" + text) if self.reasoning else text
 
     def __iter__(self) -> Iterator[str]:
         if self._consumed or self._gen is None:

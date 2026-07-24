@@ -125,6 +125,7 @@ class OumigoChat:
         resp.raw = data
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
+        resp._note_reasoning(msg.get("reasoning_content") or "")  # output-only; never echoed back
         assistant: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
         if msg.get("tool_calls"):
             assistant["tool_calls"] = msg["tool_calls"]
@@ -138,6 +139,7 @@ class OumigoChat:
     ) -> Iterator[str]:
         """A streaming model round-trip: yield content deltas, assemble the assistant msg."""
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls: dict[int, dict[str, Any]] = {}
         finish: str | None = None
 
@@ -147,12 +149,16 @@ class OumigoChat:
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
             delta = choice.get("delta") or {}
+            # Reasoning deltas are accumulated but never yielded — only answer text streams.
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
             if delta.get("content"):
                 content_parts.append(delta["content"])
                 yield delta["content"]
             for tcd in delta.get("tool_calls") or []:
                 _accumulate_tool_call(tool_calls, tcd)
 
+        resp._note_reasoning("".join(reasoning_parts))  # commit this turn's reasoning
         assistant: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts) or None}
         if tool_calls:
             assistant["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]

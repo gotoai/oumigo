@@ -43,9 +43,11 @@ def boom(x: int) -> str:
     raise ValueError("kaboom")
 
 
-def _completion(content=None, tool_calls=None, finish="stop"):
+def _completion(content=None, tool_calls=None, finish="stop", reasoning=None):
     """An OpenAI-style non-streaming completion body."""
     msg = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        msg["reasoning_content"] = reasoning
     if tool_calls:
         msg["tool_calls"] = tool_calls
         finish = "tool_calls"
@@ -297,6 +299,74 @@ def test_streaming_tool_loop_reassembles_calls(monkeypatch):
         {"name": "get_weather", "arguments": {"city": "Osaka"}, "result": "sunny in Osaka"}
     ]
     assert resp.finish_reason == "stop"
+
+
+# --------------------------------------------------------------------------- #
+# Reasoning (reasoning_content)
+# --------------------------------------------------------------------------- #
+
+
+def test_non_streaming_reasoning_is_captured_out_of_text(monkeypatch):
+    _install_post(monkeypatch, [
+        _completion(content="Today is July 24, 2026.", reasoning="User asked for the date."),
+    ])
+    chat = _agent().create_chat()
+
+    resp = chat.request("What's the date?")
+
+    assert resp.text == "Today is July 24, 2026."      # clean answer, no control tokens
+    assert resp.reasoning == "User asked for the date."  # thinking, kept separate
+    assert list(resp) == ["Today is July 24, 2026."]     # iteration yields only the answer
+
+
+def test_streaming_reasoning_is_not_yielded_but_accumulates(monkeypatch):
+    _install_stream(monkeypatch, [[
+        _sse({"choices": [{"delta": {"reasoning_content": "Let me"}}]}),
+        _sse({"choices": [{"delta": {"reasoning_content": " think."}}]}),
+        _sse({"choices": [{"delta": {"content": "42."}}]}),
+        _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        "data: [DONE]",
+    ]])
+    chat = _agent().create_chat()
+
+    resp = chat.request("hi", stream=True)
+    pieces = list(resp)
+
+    assert pieces == ["42."]              # reasoning deltas are never yielded
+    assert resp.text == "42."
+    assert resp.reasoning == "Let me think."
+
+
+def test_reasoning_accumulates_across_tool_loop_turns(monkeypatch):
+    """Reasoning from each turn (tool-call planning + final) is concatenated, turn-separated."""
+    _install_post(monkeypatch, [
+        _completion(tool_calls=[_tc("get_weather", {"city": "Tokyo"})], reasoning="I should check weather."),
+        _completion(content="It's sunny.", reasoning="Now I can answer."),
+    ])
+    chat = _agent(tools=[get_weather]).create_chat()
+
+    resp = chat.request("weather?")
+
+    assert resp.text == "It's sunny."
+    assert resp.reasoning == "I should check weather.\n\nNow I can answer."
+
+
+def test_reasoning_is_never_fed_back_to_the_model(monkeypatch):
+    """The stored/echoed assistant message carries content only — reasoning is output-only."""
+    sent = _install_post(monkeypatch, [
+        _completion(content="first", reasoning="secret thought"),
+        _completion(content="second"),
+    ])
+    chat = _agent().create_chat(max_history_turns=1)
+
+    chat.request("q1")
+    chat.request("q2")  # replays the first exchange
+
+    replayed_assistant = next(
+        m for m in sent[1]["messages"] if m["role"] == "assistant"
+    )
+    assert replayed_assistant == {"role": "assistant", "content": "first"}
+    assert "reasoning_content" not in replayed_assistant
 
 
 # --------------------------------------------------------------------------- #
