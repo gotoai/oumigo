@@ -351,6 +351,49 @@ def test_reasoning_accumulates_across_tool_loop_turns(monkeypatch):
     assert resp.reasoning == "I should check weather.\n\nNow I can answer."
 
 
+def test_stream_default_is_answer_only_like_plain_iteration(monkeypatch):
+    """resp.stream() with no args behaves exactly like `for piece in resp`."""
+    _install_stream(monkeypatch, [[
+        _sse({"choices": [{"delta": {"reasoning_content": "hmm"}}]}),
+        _sse({"choices": [{"delta": {"content": "Hi"}}]}),
+        _sse({"choices": [{"delta": {"content": " there"}}]}),
+        _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        "data: [DONE]",
+    ]])
+    chat = _agent().create_chat()
+
+    resp = chat.request("hi", stream=True)
+    pieces = list(resp.stream())  # no get_reasoning
+
+    assert pieces == ["Hi", " there"]     # plain strings, reasoning excluded
+    assert resp.text == "Hi there"
+    assert resp.reasoning == "hmm"
+
+
+def test_stream_with_reasoning_yields_pairs(monkeypatch):
+    """stream(get_reasoning=True) yields (text, reasoning) pairs, one side non-empty."""
+    _install_stream(monkeypatch, [[
+        _sse({"choices": [{"delta": {"reasoning_content": "Let me"}}]}),
+        _sse({"choices": [{"delta": {"reasoning_content": " think."}}]}),
+        _sse({"choices": [{"delta": {"content": "42"}}]}),
+        _sse({"choices": [{"delta": {"content": "."}}]}),
+        _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        "data: [DONE]",
+    ]])
+    chat = _agent().create_chat()
+
+    resp = chat.request("hi", stream=True)
+    pairs = list(resp.stream(get_reasoning=True))
+
+    # Reasoning arrives first (answer side ""), then the answer (reasoning side "").
+    assert pairs == [("", "Let me"), ("", " think."), ("42", ""), (".", "")]
+    answer = "".join(t for t, _ in pairs)
+    thinking = "".join(r for _, r in pairs)
+    assert answer == "42."
+    assert thinking == "Let me think."
+    assert resp.text == "42." and resp.reasoning == "Let me think."
+
+
 def test_reasoning_is_never_fed_back_to_the_model(monkeypatch):
     """The stored/echoed assistant message carries content only — reasoning is output-only."""
     sent = _install_post(monkeypatch, [

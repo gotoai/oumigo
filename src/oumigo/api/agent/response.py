@@ -10,18 +10,24 @@ iteration finishes for a streamed one.
     print(resp.text)
 
     resp = chat.request("hi", stream=True)    # stream: iterate for deltas
-    for piece in resp:
+    for piece in resp:                        # (or `resp.stream()` — identical)
         print(piece, end="")
     print(resp.text)                          # same full answer, after consumption
 
+To surface the model's thinking live, opt in with ``stream(get_reasoning=True)``::
+
+    for text, reasoning in resp.stream(get_reasoning=True):
+        ...                                   # reasoning deltas, then answer deltas
+
 The agent loop runs *inside* the response's generator, so intermediate tool-calling
-turns are consumed silently and only the final answer's text is yielded.
+turns are consumed silently and only the final answer's text is yielded (reasoning is
+kept on the separate ``reasoning`` channel, never mixed into ``text``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal, overload
 
 
 class OumigoResponse:
@@ -51,7 +57,7 @@ class OumigoResponse:
         self.finish_reason: str | None = None
         self.tool_calls_made: list[dict[str, Any]] = []
         self.raw: dict[str, Any] | None = None
-        self._gen: Iterator[str] | None = None
+        self._gen: Iterator[tuple[str, str]] | None = None
         self._consumed: bool = False
 
     def _note_reasoning(self, text: str) -> None:
@@ -65,15 +71,55 @@ class OumigoResponse:
         self.reasoning += ("\n\n" + text) if self.reasoning else text
 
     def __iter__(self) -> Iterator[str]:
+        """Yield the final answer's text deltas (str). Reasoning is never yielded here."""
         if self._consumed or self._gen is None:
             # Already drained (or nothing to drive): re-yield the full answer once, so a
             # non-streamed response is still iterable and a re-iterated stream is harmless.
             if self.text:
                 yield self.text
             return
-        for delta in self._gen:
-            self.text += delta
-            yield delta
+        for kind, piece in self._gen:
+            if kind == "answer":
+                yield piece
+        self._consumed = True
+
+    @overload
+    def stream(self, get_reasoning: Literal[False] = False) -> Iterator[str]: ...
+    @overload
+    def stream(self, get_reasoning: Literal[True]) -> Iterator[tuple[str, str]]: ...
+
+    def stream(self, get_reasoning: bool = False):
+        """Iterate a streamed response, optionally exposing reasoning alongside the answer.
+
+        Default (``get_reasoning=False``) is identical to ``for piece in resp`` — yields the
+        final answer's text deltas (``str``)::
+
+            for piece in resp.stream():
+                ...
+
+        With ``get_reasoning=True``, yields ``(text_delta, reasoning_delta)`` pairs, exactly
+        one non-empty per step (the other is ``""``, never ``None``, so ``if text:`` /
+        ``if reasoning:`` read cleanly)::
+
+            for text, reasoning in resp.stream(get_reasoning=True):
+                if reasoning:
+                    ...  # live "thinking" (reasoning_content)
+                if text:
+                    ...  # the answer
+
+        Either mode drives the same one-shot request, so pick one call; ``text`` and
+        ``reasoning`` accumulate as it runs. Once consumed, re-calling yields the accumulated
+        answer (or ``(text, reasoning)`` pair) a single time.
+        """
+        if not get_reasoning:
+            yield from self.__iter__()  # answer-only str deltas — same path as `for piece in resp`
+            return
+        if self._consumed or self._gen is None:
+            if self.text or self.reasoning:
+                yield self.text, self.reasoning
+            return
+        for kind, piece in self._gen:
+            yield (piece, "") if kind == "answer" else ("", piece)
         self._consumed = True
 
     def consume(self) -> OumigoResponse:

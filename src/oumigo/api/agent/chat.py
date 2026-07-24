@@ -90,12 +90,15 @@ class OumigoChat:
         user_contents: str,
         messages: list[dict[str, Any]],
         stream: bool,
-    ) -> Iterator[str]:
-        """Drive the tool loop, yielding the final answer's text deltas.
+    ) -> Iterator[tuple[str, str]]:
+        """Drive the tool loop, yielding tagged ``(kind, delta)`` events.
 
-        Runs up to ``max_iterations`` model round-trips. Each turn: get the assistant
-        message; if it requests tools, execute them, append their results, and loop; else
-        it's the final answer and we stop. On completion, record the turn in history.
+        ``kind`` is ``"answer"`` (final-answer text) or ``"reasoning"`` (reasoning_content);
+        :class:`OumigoResponse` reshapes these for ``__iter__`` (answer only) and
+        :meth:`OumigoResponse.stream` (both). Runs up to ``max_iterations`` model round-trips.
+        Each turn: get the assistant message; if it requests tools, execute them, append their
+        results, and loop; else it's the final answer and we stop. On completion, record it in
+        history.
         """
         reason = "max_iterations"
         for _ in range(self._agent.max_iterations):
@@ -115,8 +118,8 @@ class OumigoChat:
 
     def _complete_turn(
         self, resp: OumigoResponse, messages: list[dict[str, Any]], stream: bool
-    ) -> Iterator[str]:
-        """One model round-trip. Yields content deltas; returns ``(assistant_msg, finish)``."""
+    ) -> Iterator[tuple[str, str]]:
+        """One model round-trip. Yields ``(kind, delta)`` events; returns ``(assistant, finish)``."""
         if stream:
             assistant, finish = yield from self._stream_turn(resp, messages)
             return assistant, finish
@@ -125,19 +128,23 @@ class OumigoChat:
         resp.raw = data
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
-        resp._note_reasoning(msg.get("reasoning_content") or "")  # output-only; never echoed back
+        reasoning = msg.get("reasoning_content") or ""
+        resp._note_reasoning(reasoning)  # output-only; never echoed back
+        if reasoning:
+            yield "reasoning", reasoning
         assistant: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
         if msg.get("tool_calls"):
             assistant["tool_calls"] = msg["tool_calls"]
         content = msg.get("content")
         if content:
-            yield content
+            resp.text += content
+            yield "answer", content
         return assistant, choice.get("finish_reason")
 
     def _stream_turn(
         self, resp: OumigoResponse, messages: list[dict[str, Any]]
-    ) -> Iterator[str]:
-        """A streaming model round-trip: yield content deltas, assemble the assistant msg."""
+    ) -> Iterator[tuple[str, str]]:
+        """A streaming model round-trip: yield ``(kind, delta)`` events, assemble the assistant msg."""
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: dict[int, dict[str, Any]] = {}
@@ -149,16 +156,17 @@ class OumigoChat:
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
             delta = choice.get("delta") or {}
-            # Reasoning deltas are accumulated but never yielded — only answer text streams.
             if delta.get("reasoning_content"):
                 reasoning_parts.append(delta["reasoning_content"])
+                yield "reasoning", delta["reasoning_content"]
             if delta.get("content"):
                 content_parts.append(delta["content"])
-                yield delta["content"]
+                resp.text += delta["content"]
+                yield "answer", delta["content"]
             for tcd in delta.get("tool_calls") or []:
                 _accumulate_tool_call(tool_calls, tcd)
 
-        resp._note_reasoning("".join(reasoning_parts))  # commit this turn's reasoning
+        resp._note_reasoning("".join(reasoning_parts))  # commit this turn's reasoning (turn-separated)
         assistant: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts) or None}
         if tool_calls:
             assistant["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
