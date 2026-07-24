@@ -47,6 +47,7 @@ class OumigoAgent:
         self,
         system: str | None = None,
         max_history_turns: int = 3,
+        history: list[dict[str, Any]] | None = None,
     ) -> OumigoChat:
         """Start a conversation.
 
@@ -54,12 +55,19 @@ class OumigoAgent:
             system: System-role content, prepended to every request in this chat.
             max_history_turns: How many prior (user, assistant) exchanges to carry into
                 each request. ``0`` disables memory. Default 3.
+            history: Prior conversation to seed (for a stateless server that rehydrates a
+                chat per request from a trusted store). Only ``user``/``assistant`` turns
+                are accepted — a ``system``/``tool`` role is rejected — so a store/client
+                blob can't inject a fake system prompt or tool result. Read the updated
+                conversation back via :attr:`OumigoChat.history` to persist it.
 
         Returns:
             A stateful :class:`~oumigo.api.agent.chat.OumigoChat`. Not thread-safe: one
             session, one chat.
         """
-        return OumigoChat(self, system=system, max_history_turns=max_history_turns)
+        return OumigoChat(
+            self, system=system, max_history_turns=max_history_turns, history=history
+        )
 
 
 def _index_tools(tools: Sequence[Tool | Callable[..., Any]]) -> dict[str, Tool]:

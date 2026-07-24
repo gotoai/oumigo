@@ -48,13 +48,26 @@ class OumigoChat:
         *,
         system: str | None = None,
         max_history_turns: int = 3,
+        history: list[dict[str, Any]] | None = None,
     ) -> None:
         self._agent = agent
         self._system = system
         self._max_history_turns = max(0, int(max_history_turns))
-        self._history: list[dict[str, Any]] = []
+        # `history` is the rehydration trust boundary: only user/assistant turns are accepted
+        # (see _normalize_history), so a store/blob can't inject a system prompt or tool result.
+        self._history: list[dict[str, Any]] = _normalize_history(history)
+        self._trim_history()
         self._url = f"{agent.data_url}/v1/chat/completions"
         self._headers = {"Authorization": f"Bearer {agent.token}"} if agent.token else {}
+
+    @property
+    def history(self) -> list[dict[str, str]]:
+        """A copy of the carried conversation — the ``{"role","content"}`` user/assistant
+        turns (most recent ``max_history_turns`` exchanges). Persist this per session and
+        pass it back to :meth:`OumigoAgent.create_chat` to rehydrate the chat on a later,
+        stateless request. Never includes the system prompt, tool calls/results, or reasoning.
+        """
+        return [dict(m) for m in self._history]
 
     # -- public ------------------------------------------------------------- #
 
@@ -219,8 +232,14 @@ class OumigoChat:
             return
         self._history.append({"role": "user", "content": user_contents})
         self._history.append({"role": "assistant", "content": answer})
+        self._trim_history()
+
+    def _trim_history(self) -> None:
+        """Keep only the most recent ``max_history_turns`` (user, assistant) exchanges."""
         keep = 2 * self._max_history_turns
-        if len(self._history) > keep:
+        if keep == 0:
+            self._history = []
+        elif len(self._history) > keep:
             self._history = self._history[-keep:]
 
     def _payload(self, messages: list[dict[str, Any]], stream: bool) -> dict[str, Any]:
@@ -269,6 +288,32 @@ class OumigoChat:
 # --------------------------------------------------------------------------- #
 # Module helpers
 # --------------------------------------------------------------------------- #
+
+
+def _normalize_history(history: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Validate + clean externally supplied history — the rehydration trust boundary.
+
+    Only ``user``/``assistant`` turns with string content are accepted, and each is rebuilt
+    as a fresh ``{"role", "content"}`` dict. A ``system`` or ``tool`` role is **rejected**,
+    and any smuggled extra keys (``tool_calls``, ``reasoning_content``, ...) are **dropped**,
+    so rehydrating from a store or client blob can never inject a fake system prompt, a forged
+    tool result, or spoofed tool calls. Raises ``ValueError`` on an untrusted/malformed entry.
+    """
+    clean: list[dict[str, Any]] = []
+    for m in history or []:
+        if not isinstance(m, dict):
+            raise ValueError(f"history entries must be dicts, got {type(m).__name__}")
+        role = m.get("role")
+        content = m.get("content")
+        if role not in ("user", "assistant"):
+            raise ValueError(
+                f"history role must be 'user' or 'assistant', got {role!r} — system/tool "
+                f"roles are server-owned and not accepted from stored/client history"
+            )
+        if not isinstance(content, str):
+            raise ValueError(f"history {role} content must be a str, got {type(content).__name__}")
+        clean.append({"role": role, "content": content})
+    return clean
 
 
 def _accumulate_tool_call(acc: dict[int, dict[str, Any]], delta: dict[str, Any]) -> None:
