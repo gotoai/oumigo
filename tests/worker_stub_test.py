@@ -58,8 +58,8 @@ from oumigo.protocol.messages import (
     RegisterResponse,
 )
 from oumigo.protocol.states import NodeState, RunState
-from oumigo.worker.metrics import M_VLLM_START, M_WORKER_START, grid_timestamp
-from oumigo.worker.supervisor import PortUnavailable, find_free_port  # reuse the worker's logic
+from oumigo.service.worker.metrics import M_VLLM_START, M_WORKER_START, grid_timestamp
+from oumigo.service.worker.supervisor import PortUnavailable, find_free_port  # reuse the worker's logic
 
 log = logging.getLogger("oumigo.worker_stub")
 

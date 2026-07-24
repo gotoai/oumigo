@@ -48,10 +48,10 @@ from fastapi.routing import APIRoute
 
 from oumigo import __version__
 from oumigo.config.spec import NodeSpec
-from oumigo.manager.control.registry import NodeRecord, Registry
+from oumigo.service.manager.control.registry import NodeRecord, Registry
 from oumigo.protocol.states import NodeState
 
-log = logging.getLogger("oumigo.manager.router")
+log = logging.getLogger("oumigo.service.manager.router")
 
 # Hop-by-hop / length headers we must not blindly copy across the proxy boundary.
 _DROP_REQUEST = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "upgrade"}

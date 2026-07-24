@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-log = logging.getLogger("oumigo.manager.dashboard")
+log = logging.getLogger("oumigo.service.manager.dashboard")
 
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 

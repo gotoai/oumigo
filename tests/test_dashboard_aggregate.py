@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from oumigo.manager.dashboard.aggregate import _trailing_moving_average, gpu_util_series
+from oumigo.service.manager.dashboard.aggregate import _trailing_moving_average, gpu_util_series
 
 
 def _row(node_id: str, metric: str, ts: str, value: float) -> dict:

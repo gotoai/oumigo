@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from oumigo.manager.control.store import MetricStore
+from oumigo.service.manager.control.store import MetricStore
 from oumigo.protocol.messages import MetricPoint
 
 

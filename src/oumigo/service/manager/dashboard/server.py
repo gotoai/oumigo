@@ -19,11 +19,11 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from oumigo.manager.dashboard.aggregate import gpu_util_series
-from oumigo.manager.dashboard.source import MetricMirror
-from oumigo.manager.dashboard.web import INDEX_HTML
+from oumigo.service.manager.dashboard.aggregate import gpu_util_series
+from oumigo.service.manager.dashboard.source import MetricMirror
+from oumigo.service.manager.dashboard.web import INDEX_HTML
 
-log = logging.getLogger("oumigo.manager.dashboard")
+log = logging.getLogger("oumigo.service.manager.dashboard")
 
 
 def create_dashboard_app(control_url: str, *, poll_interval_s: float = 5.0) -> FastAPI:

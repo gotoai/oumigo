@@ -41,9 +41,9 @@ from datetime import datetime, timezone
 import httpx
 
 from oumigo.protocol.messages import MetricPoint, MetricsReport
-from oumigo.worker import client
+from oumigo.service.worker import client
 
-log = logging.getLogger("oumigo.worker.metrics")
+log = logging.getLogger("oumigo.service.worker.metrics")
 
 # --- metric names (worker: domain — see docs/metrics.md naming protocol) --------
 

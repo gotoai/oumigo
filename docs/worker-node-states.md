@@ -1,8 +1,8 @@
 # Worker Node States — Lifecycle & Run-State Design
 
 > Status: implemented (worker side). The state machine, vLLM supervision, and the
-> protocol/manager wiring described here are built (`oumigo.worker.coordinator`,
-> `oumigo.worker.supervisor`). Not yet wired: the manager-side *trigger* for STOP
+> protocol/manager wiring described here are built (`oumigo.service.worker.coordinator`,
+> `oumigo.service.worker.supervisor`). Not yet wired: the manager-side *trigger* for STOP
 > (the pull channel exists on the heartbeat ack, but nothing sets it yet) and
 > vLLM-sourced load telemetry (run-state is derived best-effort from vLLM
 > `/metrics`; richer metrics are a later phase).

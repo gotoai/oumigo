@@ -34,7 +34,7 @@ worker = [
     # rides on it. See INSTALL.md for the GPU-box flow.
     "vllm>=0.5",
 
-    # --backend=transformer: HF-Transformers serving (oumigo.worker.hf_server). vLLM
+    # --backend=transformer: HF-Transformers serving (oumigo.service.worker.hf_server). vLLM
     # itself requires transformers v5, so these coexist with vLLM in one venv.
     "transformers>=5.10.1",  # Gemma 4 needs transformers v5
     "accelerate",            # device_map / sharded model loading

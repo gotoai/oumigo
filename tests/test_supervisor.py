@@ -11,7 +11,7 @@ import time
 import pytest
 
 from oumigo.config.spec import NodeSpec
-from oumigo.worker.supervisor import (
+from oumigo.service.worker.supervisor import (
     PortUnavailable,
     _ServerProcess,
     build_argv,
@@ -106,7 +106,7 @@ def test_build_argv_full() -> None:
 
 
 def test_build_node_spec_from_manager_config() -> None:
-    from oumigo.manager.settings import build_node_spec
+    from oumigo.service.manager.settings import build_node_spec
 
     assert build_node_spec({}) is None
     assert build_node_spec({"model": {"name": None}}) is None

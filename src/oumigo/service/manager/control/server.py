@@ -30,10 +30,10 @@ from oumigo import discovery
 from oumigo.common.logging import configure_logging, set_verbosity
 from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.config.spec import NodeSpec
-from oumigo.manager.control.registry import Registry
-from oumigo.manager.control.store import MetricStore
-from oumigo.manager.router.server import create_router_app
-from oumigo.manager.settings import (
+from oumigo.service.manager.control.registry import Registry
+from oumigo.service.manager.control.store import MetricStore
+from oumigo.service.manager.router.server import create_router_app
+from oumigo.service.manager.settings import (
     build_node_spec,
     get_dashboard,
     get_data_plane,
@@ -47,7 +47,7 @@ from oumigo.protocol.messages import (
     RegisterResponse,
 )
 
-log = logging.getLogger("oumigo.manager")
+log = logging.getLogger("oumigo.service.manager")
 
 
 def create_app(
@@ -304,7 +304,7 @@ def _spawn_dashboard(
     hence the best-effort guard.
     """
     cmd = [
-        sys.executable, "-m", "oumigo.manager.dashboard",
+        sys.executable, "-m", "oumigo.service.manager.dashboard",
         "--host", host,
         "--port", str(port),
         "--control-url", f"http://127.0.0.1:{control_port}",

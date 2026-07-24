@@ -12,11 +12,11 @@ health-aware router, with a pluggable cloud-provisioning layer.
 
 Two roles:
 
-- **Worker** (`oumigo.worker`): a long-lived *coordinator* supervises a vLLM server
+- **Worker** (`oumigo.service.worker`): a long-lived *coordinator* supervises a vLLM server
   as a child process, monitors health, executes start/stop/restart from the manager,
   and owns the node state machine + restart-with-give-up policy. Workers self-register
   with the manager and heartbeat.
-- **Manager** (`oumigo.manager`): coordinates the fleet, split into sub-layers:
+- **Manager** (`oumigo.service.manager`): coordinates the fleet, split into sub-layers:
   - **control plane** (`manager.control`): tracks worker registrations and state,
     drives worker lifecycle, reconciles desired vs. actual. Low-frequency,
     correctness-critical.

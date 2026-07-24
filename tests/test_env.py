@@ -51,7 +51,7 @@ def test_missing_file_is_noop(tmp_path):
 def test_worker_run_loads_env_before_starting(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
-    import oumigo.worker.coordinator as coordinator
+    import oumigo.service.worker.coordinator as coordinator
     from oumigo.cli.main import app
 
     monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)

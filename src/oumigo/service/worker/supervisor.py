@@ -3,7 +3,7 @@
 Both backends are supervised identically: build an argv from a NodeSpec, spawn it,
 poll /health, read a coarse run-state off /metrics, and shut down cleanly. They
 differ only in the argv (`build_argv` for `vllm serve`, `build_hf_argv` for the
-in-repo `oumigo.worker.hf_server`); the HF server deliberately mimics vLLM's HTTP
+in-repo `oumigo.service.worker.hf_server`); the HF server deliberately mimics vLLM's HTTP
 surface (/health, /v1/*, vLLM-style /metrics) so `_ServerProcess` observes both the
 same way. `build_argv`/`build_hf_argv` are pure functions so "given this spec,
 produce exactly this argv" is unit-testable without spawning anything — and this
@@ -27,7 +27,7 @@ from oumigo.common.proc import die_with_parent_preexec
 from oumigo.config.spec import NodeSpec
 from oumigo.protocol.states import RunState
 
-log = logging.getLogger("oumigo.worker.vllm")
+log = logging.getLogger("oumigo.service.worker.vllm")
 
 
 class PortUnavailable(RuntimeError):
@@ -91,7 +91,7 @@ def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
 def build_hf_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     """Translate a NodeSpec into an argv for the in-repo HF-transformers server. Pure.
 
-    Launches ``python -m oumigo.worker.hf_server`` — a small OpenAI-compatible server
+    Launches ``python -m oumigo.service.worker.hf_server`` — a small OpenAI-compatible server
     that generates with `transformers` and exposes the same HTTP surface as vLLM, so
     the coordinator supervises, routes to, and scrapes it identically. HF cache/token
     come from the inherited environment (HF_HOME / HF_TOKEN), not argv.
@@ -99,7 +99,7 @@ def build_hf_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     argv = [
         sys.executable,
         "-m",
-        "oumigo.worker.hf_server",
+        "oumigo.service.worker.hf_server",
         "--model",
         spec.model,
         "--host",
@@ -245,7 +245,7 @@ class VLLMProcess(_ServerProcess):
 
 
 class HFProcess(_ServerProcess):
-    """Supervises a single `oumigo.worker.hf_server` (HF-transformers) child process."""
+    """Supervises a single `oumigo.service.worker.hf_server` (HF-transformers) child process."""
 
     name = "HF-transformers"
 

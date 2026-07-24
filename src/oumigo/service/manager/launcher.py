@@ -18,7 +18,7 @@ import time
 import httpx
 
 from oumigo.common.proc import die_with_parent_preexec, terminate
-from oumigo.manager.console import ManagerConsole
+from oumigo.service.manager.console import ManagerConsole
 
 
 def run_with_child_server(

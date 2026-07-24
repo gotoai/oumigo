@@ -75,8 +75,8 @@ def worker_run(
     import logging
 
     from oumigo.common.env import load_env_file
-    from oumigo.manager.auth import resolve_manager_token  # shared bearer token
-    from oumigo.worker.coordinator import BACKENDS, run_worker
+    from oumigo.service.manager.auth import resolve_manager_token  # shared bearer token
+    from oumigo.service.worker.coordinator import BACKENDS, run_worker
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -121,8 +121,8 @@ def _resolve_manager_runtime(
 ) -> dict:
     """Resolve config file, token, provider, and bind host/port for the manager."""
     from oumigo.config import resolve_config_file
-    from oumigo.manager.auth import resolve_manager_token
-    from oumigo.manager.settings import build_node_spec, get_provider_name, load_manager_yaml
+    from oumigo.service.manager.auth import resolve_manager_token
+    from oumigo.service.manager.settings import build_node_spec, get_provider_name, load_manager_yaml
     from oumigo.providers import create_provider
 
     config_file = resolve_config_file(config_file)
@@ -175,8 +175,8 @@ def manager_serve(
 
     This is what systemd should run, and what `manager run` spawns on a TTY.
     """
-    from oumigo.manager.auth import NO_TOKEN_WARNING
-    from oumigo.manager.control.server import run_server
+    from oumigo.service.manager.auth import NO_TOKEN_WARNING
+    from oumigo.service.manager.control.server import run_server
 
     rt = _resolve_manager_runtime(config_file, token_file, host, port)
     if rt["token"] is None:
@@ -234,13 +234,13 @@ def manager_run(
     systemd): run the server directly. Serves the control plane and the data-plane
     router (client inference calls forwarded to healthy worker vLLMs) together.
     """
-    from oumigo.manager.auth import NO_TOKEN_WARNING
+    from oumigo.service.manager.auth import NO_TOKEN_WARNING
 
     rt = _resolve_manager_runtime(config_file, token_file, host, port)
 
     if not sys.stdin.isatty():
         # Headless: run the server directly in this process.
-        from oumigo.manager.control.server import run_server
+        from oumigo.service.manager.control.server import run_server
 
         if rt["token"] is None:
             typer.echo(NO_TOKEN_WARNING, err=True)
@@ -260,7 +260,7 @@ def manager_run(
         return
 
     # TTY: spawn the server as a child and attach the console over HTTP.
-    from oumigo.manager.launcher import run_with_child_server
+    from oumigo.service.manager.launcher import run_with_child_server
 
     forward = ["--host", rt["bind_host"], "--port", str(rt["bind_port"])]
     if rt["config_file"] is not None:

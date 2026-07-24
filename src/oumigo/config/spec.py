@@ -17,7 +17,7 @@ class NodeSpec(BaseModel):
     """Concrete description of a single vLLM replica / worker node.
 
     Fields map directly onto `vllm serve` arguments (see
-    `oumigo.worker.supervisor.build_argv`). Local-only concerns (HF/vLLM cache
+    `oumigo.service.worker.supervisor.build_argv`). Local-only concerns (HF/vLLM cache
     dirs) are NOT here — those come from the worker's own environment.
     """
 

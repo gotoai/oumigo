@@ -36,10 +36,10 @@ from oumigo.protocol.messages import (
     WorkerCommand,
 )
 from oumigo.protocol.states import NodeState, RunState
-from oumigo.worker import client
-from oumigo.worker.identity import resolve_worker_identity
-from oumigo.worker.metrics import MetricsCollector, probe_gpu0_name
-from oumigo.worker.supervisor import (
+from oumigo.service.worker import client
+from oumigo.service.worker.identity import resolve_worker_identity
+from oumigo.service.worker.metrics import MetricsCollector, probe_gpu0_name
+from oumigo.service.worker.supervisor import (
     HFProcess,
     PortUnavailable,
     VLLMProcess,
@@ -47,7 +47,7 @@ from oumigo.worker.supervisor import (
     find_free_port,
 )
 
-log = logging.getLogger("oumigo.worker")
+log = logging.getLogger("oumigo.service.worker")
 
 # Worker backends: which inference server the coordinator supervises.
 BACKEND_VLLM = "vllm"

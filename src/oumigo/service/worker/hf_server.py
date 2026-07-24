@@ -1,8 +1,8 @@
 """OpenAI-compatible inference server backed by Hugging Face Transformers.
 
-Run as ``python -m oumigo.worker.hf_server --model <id> --host <h> --port <p>`` — the
+Run as ``python -m oumigo.service.worker.hf_server --model <id> --host <h> --port <p>`` — the
 coordinator spawns exactly this when a worker is started with ``--backend=transformer``
-(see `oumigo.worker.supervisor.HFProcess`). It deliberately mirrors vLLM's HTTP
+(see `oumigo.service.worker.supervisor.HFProcess`). It deliberately mirrors vLLM's HTTP
 surface so the rest of the system can't tell the difference:
 
   * ``GET  /health``               — 200 only once the model is loaded (see below)
@@ -39,7 +39,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-log = logging.getLogger("oumigo.worker.hf_server")
+log = logging.getLogger("oumigo.service.worker.hf_server")
 
 DEFAULT_MODEL = "google/gemma-4-E2B-it"  # small, open, ships a chat template
 _STREAM_DONE = object()  # sentinel: the streamer iterator is exhausted
@@ -497,7 +497,7 @@ class HFServer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="oumigo.worker.hf_server",
+        prog="oumigo.service.worker.hf_server",
         description="OpenAI-compatible HF-transformers inference server (spawned by the worker).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

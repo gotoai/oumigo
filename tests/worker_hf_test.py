@@ -86,8 +86,8 @@ from oumigo.discovery import (  # same mDNS discovery the real worker uses
     get_lan_ip,
 )
 from oumigo.protocol.states import NodeState, RunState
-from oumigo.worker.metrics import MetricsCollector  # real host+GPU sampling/reporting
-from oumigo.worker.supervisor import PortUnavailable, find_free_port  # reuse worker port logic
+from oumigo.service.worker.metrics import MetricsCollector  # real host+GPU sampling/reporting
+from oumigo.service.worker.supervisor import PortUnavailable, find_free_port  # reuse worker port logic
 
 log = logging.getLogger("oumigo.worker_hf")
 

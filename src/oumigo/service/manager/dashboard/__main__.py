@@ -1,4 +1,4 @@
-"""Run the reporting-plane dashboard: ``python -m oumigo.manager.dashboard``.
+"""Run the reporting-plane dashboard: ``python -m oumigo.service.manager.dashboard``.
 
 Normally the manager spawns this automatically (see ``control.server.run_server``);
 this entrypoint is what it spawns, and is also usable standalone for development.
@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import argparse
 
-from oumigo.manager.dashboard.server import run_dashboard
+from oumigo.service.manager.dashboard.server import run_dashboard
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m oumigo.manager.dashboard",
+        prog="python -m oumigo.service.manager.dashboard",
         description="oumigo reporting-plane dashboard (V1.0).",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Web bind host.")  # noqa: S104

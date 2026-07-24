@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from oumigo.protocol.messages import MetricsReport
-from oumigo.worker.metrics import (
+from oumigo.service.worker.metrics import (
     M_CPU_UTIL,
     M_MEM_TOTAL,
     M_MEM_USED,
@@ -220,7 +220,7 @@ def test_collect_vllm_metrics_no_url_is_empty() -> None:
 def test_sample_emits_worker_start_and_vllm_start_on_serving() -> None:
     import time
 
-    from oumigo.worker.metrics import M_VLLM_START, M_WORKER_START, MetricsCollector
+    from oumigo.service.worker.metrics import M_VLLM_START, M_WORKER_START, MetricsCollector
 
     c = MetricsCollector(
         "http://m", None, "node-x", vllm_url=None, worker_start=1_784_520_000.0
@@ -244,7 +244,7 @@ def test_sample_emits_worker_start_and_vllm_start_on_serving() -> None:
 
 
 def test_request_rate_tracker_derives_per_minute_over_window() -> None:
-    from oumigo.worker.metrics import _RequestRateTracker
+    from oumigo.service.worker.metrics import _RequestRateTracker
 
     t = _RequestRateTracker()
     # No history yet, and while the window is shorter than WINDOW_MIN_S (60s): a gap.
@@ -258,7 +258,7 @@ def test_request_rate_tracker_derives_per_minute_over_window() -> None:
 
 
 def test_request_rate_tracker_caps_window_at_180s() -> None:
-    from oumigo.worker.metrics import _RequestRateTracker
+    from oumigo.service.worker.metrics import _RequestRateTracker
 
     t = _RequestRateTracker()
     assert t.update(0, 0.0) is None
@@ -270,7 +270,7 @@ def test_request_rate_tracker_caps_window_at_180s() -> None:
 
 
 def test_request_rate_tracker_skips_counter_reset() -> None:
-    from oumigo.worker.metrics import _RequestRateTracker
+    from oumigo.service.worker.metrics import _RequestRateTracker
 
     t = _RequestRateTracker()
     t.update(0, 500.0)
@@ -280,7 +280,7 @@ def test_request_rate_tracker_skips_counter_reset() -> None:
 
 
 def test_request_rate_tracker_gap_when_counter_absent() -> None:
-    from oumigo.worker.metrics import _RequestRateTracker
+    from oumigo.service.worker.metrics import _RequestRateTracker
 
     t = _RequestRateTracker()
     t.update(0, 100.0)
@@ -291,7 +291,7 @@ def test_request_rate_tracker_gap_when_counter_absent() -> None:
 
 def test_collect_host_metrics_shape() -> None:
     # On the Linux CI host this reads real /proc; assert the always-on keys appear.
-    from oumigo.worker.metrics import _CpuSampler, collect_host_metrics
+    from oumigo.service.worker.metrics import _CpuSampler, collect_host_metrics
 
     cpu = _CpuSampler()
     cpu.prime()

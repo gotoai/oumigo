@@ -12,7 +12,7 @@ import types
 import pytest
 import yaml
 
-from oumigo import api
+from oumigo.api import api
 from oumigo.api import OumigoWorker, oumigo_get_or_create_manager
 
 

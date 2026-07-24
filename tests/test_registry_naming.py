@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from oumigo.manager.control.registry import Registry
+from oumigo.service.manager.control.registry import Registry
 
 
 def _register(reg: Registry, node_id: str):

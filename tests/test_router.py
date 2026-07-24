@@ -12,8 +12,8 @@ import pytest
 from starlette.testclient import TestClient
 
 from oumigo.config.spec import NodeSpec
-from oumigo.manager.control.registry import Registry
-from oumigo.manager.router.server import NoWorkersAvailable, WorkerPool, create_router_app
+from oumigo.service.manager.control.registry import Registry
+from oumigo.service.manager.router.server import NoWorkersAvailable, WorkerPool, create_router_app
 from oumigo.protocol.states import NodeState, RunState
 
 
