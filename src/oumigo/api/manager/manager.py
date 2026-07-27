@@ -150,14 +150,17 @@ class OumigoManager:
         max_tokens: int | None = None,
         top_p: float | None = None,
         stop: str | list[str] | None = None,
+        profile: Any = None,
     ) -> Any:
         """Create an agent that runs chats/tools against this manager's data plane.
 
         ``tools`` is a sequence of :class:`oumigo.api.agent.Tool` (or plain functions, which
         are wrapped via the strict ``@tool`` validator). Sampling defaults given here apply
         to every chat the agent spawns. ``max_iterations`` caps the model round-trips per
-        request (the runaway tool-loop guard). Returns an ``OumigoAgent``; call
-        ``.create_chat(...)`` on it to start a conversation.
+        request (the runaway tool-loop guard). ``profile`` is an optional
+        :class:`oumigo.guard.GuardProfile` — the guardrail bundle every chat inherits; ``None``
+        (or an empty profile) leaves the request path untouched. Returns an ``OumigoAgent``;
+        call ``.create_chat(...)`` on it to start a conversation.
         """
         from oumigo.api.agent.agent import OumigoAgent  # local import: optional inference layer
 
@@ -175,6 +178,7 @@ class OumigoManager:
             tools=tools or [],
             max_iterations=max_iterations,
             sampling=sampling,
+            profile=profile,
         )
 
     def __enter__(self) -> OumigoManager:

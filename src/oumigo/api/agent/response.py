@@ -40,9 +40,13 @@ class OumigoResponse:
             worker's vLLM runs a ``--reasoning-parser``; ``""`` otherwise. Output-only —
             for display/debugging, never fed back to the model (see the class notes).
         finish_reason: Why generation stopped — ``"stop"``, ``"length"``, or
-            ``"max_iterations"`` when the tool loop hit its cap without a final answer.
+            ``"max_iterations"`` when the tool loop hit its cap without a final answer;
+            ``"blocked"`` / ``"stopped"`` when a guardrail ended the turn / aborted the request.
         tool_calls_made: One ``{"name", "arguments", "result"}`` entry per tool the loop
             executed, in order — for observability.
+        guard_events: One entry per guardrail ``FLAG`` raised during the request
+            (``{"point", "decision", "reason"}``), in order — for audit. Empty when no
+            guard flagged (including when no profile is active).
         raw: The last raw completion payload from the data plane (escape hatch).
 
     A response is single-use for streaming: iterating drives the underlying request. Once
@@ -56,6 +60,7 @@ class OumigoResponse:
         self.reasoning: str = ""
         self.finish_reason: str | None = None
         self.tool_calls_made: list[dict[str, Any]] = []
+        self.guard_events: list[dict[str, Any]] = []
         self.raw: dict[str, Any] | None = None
         self._gen: Iterator[tuple[str, str]] | None = None
         self._consumed: bool = False

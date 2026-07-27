@@ -21,8 +21,13 @@ from oumigo.api.agent import (
 from oumigo.api.api import oumigo_create_worker, oumigo_get_or_create_manager
 from oumigo.api.manager.manager import OumigoManager
 from oumigo.api.worker.worker import OumigoWorker
+from oumigo.guard import Guard, GuardContext, GuardProfile, InterceptPoint, Verdict
 
 __all__ = [
+    "Guard",
+    "GuardContext",
+    "GuardProfile",
+    "InterceptPoint",
     "OumigoAgent",
     "OumigoChat",
     "OumigoManager",
@@ -30,6 +35,7 @@ __all__ = [
     "OumigoWorker",
     "Tool",
     "ToolDefinitionError",
+    "Verdict",
     "oumigo_create_worker",
     "oumigo_get_or_create_manager",
     "tool",

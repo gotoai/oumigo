@@ -1,12 +1,14 @@
 """The Agent tier — a capability bundle that spawns conversations.
 
-An :class:`OumigoAgent` groups the tools and sampling defaults shared by every chat it
-creates, bound to one manager's data plane (``data_url`` + token). It is the entry point
-of the inference surface: build one with ``manager.create_agent(...)``, then call
-:meth:`OumigoAgent.create_chat` to start a stateful :class:`~oumigo.api.agent.chat.OumigoChat`.
+An :class:`OumigoAgent` groups the tools, sampling defaults, and optional guardrail profile
+shared by every chat it creates, bound to one manager's data plane (``data_url`` + token). It
+is the entry point of the inference surface: build one with ``manager.create_agent(...)``,
+then call :meth:`OumigoAgent.create_chat` to start a stateful
+:class:`~oumigo.api.agent.chat.OumigoChat`.
 
-Later versions attach the guardrail profile here too (see the module docstring of
-``oumigo.api.agent.chat`` for where the request path is intercepted).
+The ``profile`` (a :class:`oumigo.guard.GuardProfile`) is the guardrail bundle every chat
+inherits; the request path is intercepted inside ``oumigo.api.agent.chat`` (see its module
+docstring). A ``None``/empty profile is a strict no-op.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import Any
 
 from oumigo.api.agent.chat import OumigoChat
 from oumigo.api.agent.tool import Tool
+from oumigo.guard import GuardProfile
 
 # Default cap on model round-trips within one request() (runaway tool-loop guard).
 DEFAULT_MAX_ITERATIONS = 5
@@ -36,12 +39,14 @@ class OumigoAgent:
         tools: Sequence[Tool | Callable[..., Any]] | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         sampling: dict[str, Any] | None = None,
+        profile: GuardProfile | None = None,
     ) -> None:
         self.data_url = data_url.rstrip("/")
         self.token = token
         self.max_iterations = max(1, int(max_iterations))
         self.sampling = dict(sampling or {})
         self.tools: dict[str, Tool] = _index_tools(tools or [])
+        self.profile = profile
 
     def create_chat(
         self,
@@ -62,8 +67,8 @@ class OumigoAgent:
                 conversation back via :attr:`OumigoChat.history` to persist it.
 
         Returns:
-            A stateful :class:`~oumigo.api.agent.chat.OumigoChat`. Not thread-safe: one
-            session, one chat.
+            A stateful :class:`~oumigo.api.agent.chat.OumigoChat`, inheriting this agent's
+            guardrail ``profile``. Not thread-safe: one session, one chat.
         """
         return OumigoChat(
             self, system=system, max_history_turns=max_history_turns, history=history

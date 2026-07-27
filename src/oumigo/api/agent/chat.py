@@ -10,21 +10,30 @@ manager's data plane (``data_url``), which the router proxies to a SERVING worke
 the model asks to call a tool, the loop here executes the matching Python callback, feeds
 the result back, and continues — until the model returns prose or the iteration cap is hit.
 
-Every model call funnels through the single private seam :meth:`OumigoChat._payload`; the
-guardrail interceptor chain (a later version) slots in there without touching this public
-API.
+**Guardrails.** When the agent carries a non-empty :class:`oumigo.guard.GuardProfile`, the
+loop consults it at the five intercept points — ``USER_INPUT`` (in :meth:`request`/:meth:`_run`),
+``ASSEMBLED_PROMPT`` (every round-trip, in :meth:`_complete_turn`), ``TOOL_CALL`` / ``TOOL_RESULT``
+(around :meth:`_execute_tool`), and ``ASSISTANT_TURN`` / ``FINAL_ANSWER`` (model output). A
+``TRANSFORM`` rewrites the content in flight; ``SKIP`` on a tool call feeds its reason back to
+the model; ``BLOCK`` ends the turn (``finish_reason="blocked"``) and ``STOP`` aborts the request
+(``finish_reason="stopped"``), surfacing the verdict's reason as the answer text. Output guards
+(``ASSISTANT_TURN`` / ``FINAL_ANSWER``) force a streamed turn to **buffer** (collect, evaluate,
+then release) instead of passing deltas through live. An empty/absent profile is a strict no-op:
+every guard branch is gated on :attr:`_guarding`, so the request path is byte-for-byte the
+original one.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from oumigo.api.agent.response import OumigoResponse
+from oumigo.guard import GuardContext, InterceptPoint, OUTPUT_POINTS, Verdict
 
 if TYPE_CHECKING:  # avoid a runtime import cycle: agent.py imports this module
     from oumigo.api.agent.agent import OumigoAgent
@@ -37,6 +46,9 @@ _MODEL_PLACEHOLDER = "oumigo"
 
 # No total read timeout — a long generation must not be cut off; cap only the connect.
 _TIMEOUT = httpx.Timeout(None, connect=10.0)
+
+# Surfaced as the answer when a guard blocks/stops without giving a reason.
+_DEFAULT_BLOCK_TEXT = "This request was blocked by a guardrail policy."
 
 
 class OumigoChat:
@@ -59,6 +71,18 @@ class OumigoChat:
         self._trim_history()
         self._url = f"{agent.data_url}/v1/chat/completions"
         self._headers = {"Authorization": f"Bearer {agent.token}"} if agent.token else {}
+        # Guardrail fast path: everything below is skipped unless a non-empty profile is set,
+        # keeping the unguarded request path identical to the original.
+        profile = agent.profile
+        self._profile = profile
+        self._guarding = profile is not None and not profile.is_empty
+        # A streamed turn must buffer (not pass deltas through live) only when an output guard
+        # is registered — otherwise streaming keeps its original low-latency behavior.
+        self._buffer_output = (
+            self._guarding
+            and profile is not None
+            and bool(profile.active_points() & OUTPUT_POINTS)
+        )
 
     @property
     def history(self) -> list[dict[str, str]]:
@@ -111,31 +135,76 @@ class OumigoChat:
         :meth:`OumigoResponse.stream` (both). Runs up to ``max_iterations`` model round-trips.
         Each turn: get the assistant message; if it requests tools, execute them, append their
         results, and loop; else it's the final answer and we stop. On completion, record it in
-        history.
+        history. When a profile is active, the guard chain is consulted at each intercept point
+        and a halting verdict ends the loop early with ``finish_reason`` ``"blocked"``/``"stopped"``.
         """
+        # POINT 1 — user input: transform/flag, or block/stop before any model call.
+        contents, verdict, flags = self._guard(InterceptPoint.USER_INPUT, user_contents)
+        self._record_flags(resp, InterceptPoint.USER_INPUT, flags)
+        if verdict.halts:
+            yield from self._halt(resp, verdict)
+            resp.finish_reason = "stopped" if verdict.stops else "blocked"
+            self._remember(user_contents, resp.text)
+            return
+        if contents != user_contents:  # a transform rewrote the user's message in flight
+            user_contents = contents if isinstance(contents, str) else user_contents
+            messages[-1] = {"role": "user", "content": user_contents}
+
         reason = "max_iterations"
         for _ in range(self._agent.max_iterations):
-            assistant, finish = yield from self._complete_turn(resp, messages, stream)
+            assistant, finish, answer = yield from self._complete_turn(resp, messages, stream)
+            if assistant is None:  # POINT 2 (assembled prompt) halted the turn
+                reason = finish or "blocked"
+                break
             messages.append(assistant)
             tool_calls = assistant.get("tool_calls") or []
+
+            if self._buffer_output:
+                # Output guards ran nothing inline; evaluate and release this turn now.
+                halt_reason = yield from self._guard_output(
+                    resp, messages, answer, bool(tool_calls)
+                )
+                if halt_reason:
+                    reason = halt_reason
+                    break
+
             if not tool_calls:
                 reason = finish or "stop"
                 break
+
+            halted = False
             for tc in tool_calls:
-                result = self._execute_tool(resp, tc)
+                result, tverdict = self._execute_tool(resp, tc)
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.get("id"), "content": result}
                 )
+                if tverdict is not None and (tverdict.blocks or tverdict.stops):
+                    reason = "stopped" if tverdict.stops else "blocked"
+                    halted = True
+                    break
+            if halted:
+                break
         resp.finish_reason = reason
         self._remember(user_contents, resp.text)
 
     def _complete_turn(
         self, resp: OumigoResponse, messages: list[dict[str, Any]], stream: bool
-    ) -> Iterator[tuple[str, str]]:
-        """One model round-trip. Yields ``(kind, delta)`` events; returns ``(assistant, finish)``."""
+    ) -> Generator[tuple[str, str], None, tuple[dict[str, Any] | None, str | None, str]]:
+        """One model round-trip. Yields ``(kind, delta)`` events; returns ``(assistant, finish, answer)``.
+
+        ``assistant`` is ``None`` when POINT 2 (assembled prompt) halted before the call.
+        ``answer`` is this turn's prose; in ``_buffer_output`` mode it is *not* yet committed
+        to ``resp.text`` or yielded — :meth:`_run` does that after the output guard runs.
+        """
+        # POINT 2 — assembled prompt: screen (and possibly rewrite) the outgoing messages.
+        pverdict = self._guard_prompt(resp, messages)
+        if pverdict.halts:
+            yield from self._halt(resp, pverdict)
+            return None, ("stopped" if pverdict.stops else "blocked"), ""
+
         if stream:
-            assistant, finish = yield from self._stream_turn(resp, messages)
-            return assistant, finish
+            assistant, finish, answer = yield from self._stream_turn(resp, messages)
+            return assistant, finish, answer
 
         data = self._post_json(messages)
         resp.raw = data
@@ -145,19 +214,24 @@ class OumigoChat:
         resp._note_reasoning(reasoning)  # output-only; never echoed back
         if reasoning:
             yield "reasoning", reasoning
-        assistant: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
+        assistant = {"role": "assistant", "content": msg.get("content")}
         if msg.get("tool_calls"):
             assistant["tool_calls"] = msg["tool_calls"]
-        content = msg.get("content")
-        if content:
+        content = msg.get("content") or ""
+        if content and not self._buffer_output:
             resp.text += content
             yield "answer", content
-        return assistant, choice.get("finish_reason")
+        return assistant, choice.get("finish_reason"), content
 
     def _stream_turn(
         self, resp: OumigoResponse, messages: list[dict[str, Any]]
-    ) -> Iterator[tuple[str, str]]:
-        """A streaming model round-trip: yield ``(kind, delta)`` events, assemble the assistant msg."""
+    ) -> Generator[tuple[str, str], None, tuple[dict[str, Any], str | None, str]]:
+        """A streaming round-trip: yield ``(kind, delta)`` events, assemble ``(assistant, finish, answer)``.
+
+        In ``_buffer_output`` mode the answer deltas are accumulated but withheld (neither
+        committed to ``resp.text`` nor yielded) so the output guard can screen the full turn
+        first; reasoning still streams live. Otherwise deltas pass through as before.
+        """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: dict[int, dict[str, Any]] = {}
@@ -174,23 +248,30 @@ class OumigoChat:
                 yield "reasoning", delta["reasoning_content"]
             if delta.get("content"):
                 content_parts.append(delta["content"])
-                resp.text += delta["content"]
-                yield "answer", delta["content"]
+                if not self._buffer_output:
+                    resp.text += delta["content"]
+                    yield "answer", delta["content"]
             for tcd in delta.get("tool_calls") or []:
                 _accumulate_tool_call(tool_calls, tcd)
 
         resp._note_reasoning("".join(reasoning_parts))  # commit this turn's reasoning (turn-separated)
-        assistant: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts) or None}
+        answer = "".join(content_parts)
+        assistant: dict[str, Any] = {"role": "assistant", "content": answer or None}
         if tool_calls:
             assistant["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-        return assistant, finish
+        return assistant, finish, answer
 
-    def _execute_tool(self, resp: OumigoResponse, tc: dict[str, Any]) -> str:
-        """Run one requested tool, returning a string result to feed back to the model.
+    def _execute_tool(
+        self, resp: OumigoResponse, tc: dict[str, Any]
+    ) -> tuple[str, Verdict | None]:
+        """Run one requested tool, returning ``(result, halt_verdict)``.
 
-        Never raises: an unknown tool, unparseable arguments, or an exception in the tool
-        body all become an ``"Error: ..."`` string so the model can recover and the loop
-        continues.
+        ``result`` is the string fed back to the model; ``halt_verdict`` is the ``BLOCK``/
+        ``STOP`` that ended the call, or ``None``. Never raises: an unknown tool, unparseable
+        arguments, or an exception in the tool body all become an ``"Error: ..."`` string so
+        the model can recover and the loop continues. When guards are active, the tool's
+        arguments are screened before execution (``TOOL_CALL``) and its result after
+        (``TOOL_RESULT``).
         """
         fn = tc.get("function") or {}
         name = fn.get("name", "")
@@ -198,6 +279,7 @@ class OumigoChat:
         tool = self._agent.tools.get(name)
 
         args: Any = raw_args
+        halt: Verdict | None = None
         if tool is None:
             result = f"Error: unknown tool {name!r}"
         else:
@@ -206,15 +288,126 @@ class OumigoChat:
             except ValueError as exc:
                 result = f"Error: could not parse arguments ({exc})"
             else:
-                try:
-                    out = tool.invoke(**args)
-                    result = out if isinstance(out, str) else json.dumps(out, default=str)
-                except Exception as exc:  # noqa: BLE001 - surface to the model, don't crash
-                    log.warning("tool %s raised: %s", name, exc)
-                    result = f"Error: {type(exc).__name__}: {exc}"
+                args, result, halt = self._invoke_guarded(resp, tool, name, args)
 
         resp.tool_calls_made.append({"name": name, "arguments": args, "result": result})
-        return result
+        return result, halt
+
+    def _invoke_guarded(
+        self, resp: OumigoResponse, tool: Any, name: str, args: dict[str, Any]
+    ) -> tuple[dict[str, Any], str, Verdict | None]:
+        """Guard (POINT 3 pre), invoke, then guard (POINT 3 post) one tool call.
+
+        Returns ``(args, result, halt_verdict)``. A ``SKIP`` short-circuits execution and feeds
+        the reason back as the result (loop continues); ``BLOCK``/``STOP`` do the same but also
+        end the turn/request. With no active guards this is a plain invoke — behavior unchanged.
+        """
+        # POINT 3 pre — tool call arguments.
+        g_args, verdict, flags = self._guard(InterceptPoint.TOOL_CALL, args, tool_name=name)
+        self._record_flags(resp, InterceptPoint.TOOL_CALL, flags)
+        if verdict.halts:
+            reason = verdict.reason or f"Tool {name!r} was blocked by a guardrail."
+            return args, reason, (None if verdict.skips else verdict)
+        if isinstance(g_args, dict):
+            args = g_args
+
+        try:
+            out = tool.invoke(**args)
+            result = out if isinstance(out, str) else json.dumps(out, default=str)
+        except Exception as exc:  # noqa: BLE001 - surface to the model, don't crash
+            log.warning("tool %s raised: %s", name, exc)
+            return args, f"Error: {type(exc).__name__}: {exc}", None
+
+        # POINT 3 post — tool result.
+        g_result, rverdict, rflags = self._guard(InterceptPoint.TOOL_RESULT, result, tool_name=name)
+        self._record_flags(resp, InterceptPoint.TOOL_RESULT, rflags)
+        if rverdict.halts:
+            reason = rverdict.reason or f"The result of tool {name!r} was withheld by a guardrail."
+            return args, reason, (None if rverdict.skips else rverdict)
+        if isinstance(g_result, str):
+            result = g_result
+        return args, result, None
+
+    # -- guard chain -------------------------------------------------------- #
+
+    def _guard(
+        self,
+        point: InterceptPoint,
+        content: Any,
+        *,
+        tool_name: str | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> tuple[Any, Verdict, list[Verdict]]:
+        """Evaluate the chain at ``point``; returns ``(content_after_transforms, verdict, flags)``.
+
+        Strict no-op when no profile is active — the ``ALLOW`` fast path keeps the unguarded
+        request identical to the original.
+        """
+        if self._profile is None or self._profile.is_empty:
+            return content, Verdict.allow(), []
+        ctx = GuardContext(
+            content=content, tool_name=tool_name, messages=messages, system=self._system
+        )
+        outcome = self._profile.evaluate(point, ctx)
+        return outcome.content, outcome.verdict, outcome.flags
+
+    def _guard_prompt(self, resp: OumigoResponse, messages: list[dict[str, Any]]) -> Verdict:
+        """POINT 2 — screen the outgoing ``messages``, rewriting them in place on a transform."""
+        if not self._guarding:
+            return Verdict.allow()
+        new_messages, verdict, flags = self._guard(
+            InterceptPoint.ASSEMBLED_PROMPT, messages, messages=messages
+        )
+        self._record_flags(resp, InterceptPoint.ASSEMBLED_PROMPT, flags)
+        if isinstance(new_messages, list) and new_messages is not messages:
+            messages[:] = new_messages  # in-place so _payload sees the rewrite
+        return verdict
+
+    def _guard_output(
+        self,
+        resp: OumigoResponse,
+        messages: list[dict[str, Any]],
+        answer: str,
+        has_tool_calls: bool,
+    ) -> Generator[tuple[str, str], None, str]:
+        """Screen a buffered turn's output, then release it. Returns a halt reason or ``""``.
+
+        Called only in ``_buffer_output`` mode. Evaluates ``ASSISTANT_TURN`` on an intermediate
+        (tool-calling) turn and ``FINAL_ANSWER`` on the final answer, commits the resolved text
+        to ``resp.text`` and yields it, and keeps the recorded assistant message in sync.
+        """
+        point = InterceptPoint.ASSISTANT_TURN if has_tool_calls else InterceptPoint.FINAL_ANSWER
+        text, verdict, flags = self._guard(point, answer, messages=messages)
+        self._record_flags(resp, point, flags)
+        if verdict.halts:
+            yield from self._halt(resp, verdict)
+            messages[-1] = {**messages[-1], "content": resp.text}
+            return "stopped" if verdict.stops else "blocked"
+        if not isinstance(text, str):
+            text = answer
+        if text:
+            resp.text += text
+            yield "answer", text
+        if text != answer:  # a transform rewrote the turn; keep history/model view consistent
+            messages[-1] = {**messages[-1], "content": text}
+        return ""
+
+    def _halt(self, resp: OumigoResponse, verdict: Verdict) -> Iterator[tuple[str, str]]:
+        """Surface a blocking/stopping verdict as the answer text (one ``"answer"`` event)."""
+        text = verdict.reason or _DEFAULT_BLOCK_TEXT
+        resp.text += text
+        log.info("guard %s: %s", verdict.decision.value, text)
+        yield "answer", text
+
+    def _record_flags(
+        self, resp: OumigoResponse, point: InterceptPoint, flags: list[Verdict]
+    ) -> None:
+        """Record ``FLAG`` verdicts for audit (logged, and kept on the response)."""
+        for f in flags:
+            log.info("guard FLAG at %s: %s", point.value, f.reason)
+            resp.guard_events.append(
+                {"point": point.value, "decision": f.decision.value, "reason": f.reason}
+            )
 
     # -- history & payload (the guardrail seam) ----------------------------- #
 
@@ -243,7 +436,12 @@ class OumigoChat:
             self._history = self._history[-keep:]
 
     def _payload(self, messages: list[dict[str, Any]], stream: bool) -> dict[str, Any]:
-        """Build the request body — the single seam every model call passes through."""
+        """Build the request body — the seam every model call passes through.
+
+        Guardrails do not intercept here: the ``messages`` reaching this method have already
+        been screened at the intercept points (``ASSEMBLED_PROMPT`` in :meth:`_complete_turn`
+        rewrites them in place before the call). This stays a pure body builder.
+        """
         body: dict[str, Any] = {
             "model": _MODEL_PLACEHOLDER,
             "messages": messages,
