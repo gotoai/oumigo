@@ -5,13 +5,25 @@ build-backend = "hatchling.build"
 [project]
 name = "oumigo"
 dynamic = ["version"]
-description = "Vertical-integration toolkit for running and managing vLLM replica fleets."
+description = "Vertical-integration toolkit for running and managing GPU fleets with vLLM and Transformer backends."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "GOTOAI" }]
 keywords = ["vllm", "llm", "inference", "cluster", "serving"]
 license = "MIT"
 license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",       # TODO: 3-Alpha / 4-Beta / 5-Production-Stable
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",    
+    # NOTE: do NOT add a "License :: ..." classifier — the SPDX `license = "MIT"`
+    # field above supersedes it and the two together will conflict.
+]
 dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",
@@ -22,6 +34,13 @@ dependencies = [
     "pyyaml>=6",         # config files
     "zeroconf>=0.130",   # LAN discovery (mDNS / DNS-SD)
 ]
+
+[project.urls]
+# TODO: edit URLs. These render as links on the PyPI project page.
+Homepage = "https://github.com/gotoai/oumigo"
+Repository = "https://github.com/gotoai/oumigo"
+Issues = "https://github.com/gotoai/oumigo/issues"
+# Documentation = "https://github.com/gotoai/oumigo#readme"   
 
 [project.optional-dependencies]
 worker = [
