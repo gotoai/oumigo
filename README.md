@@ -23,6 +23,8 @@ Key functions provided by an Oumigo fleet (as of v0.2.0):
 
 ## Architecture
 
+![Oumigo architecture: M agent applications talk to one manager (data plane, control plane, dashboard, provisioning) that coordinates N GPU workers.](https://raw.githubusercontent.com/gotoai/oumigo/main/docs/images/Oumigo_Architecture.png)
+
 Two roles:
 
 - **Manager** (`oumigo.service.manager`): coordinates the fleet, split into sub-layers:
