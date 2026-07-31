@@ -28,19 +28,20 @@ Key functions provided by an Oumigo fleet (as of v0.2.0):
 Two roles:
 
 - **Manager** (`oumigo.service.manager`): coordinates the fleet, split into sub-layers:
-  - **control plane** (`manager.control`): tracks worker registrations and state,
-    drives worker lifecycle, reconciles desired vs. actual. Low-frequency,
-    correctness-critical.
   - **data plane / router** (`manager.router`): forwards client inference calls to
     healthy workers — on the hot path of every request. Exposes an **OpenAI-compatible**
     HTTP surface (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, including SSE
     streaming), so any OpenAI-API client can talk to the fleet through a single endpoint.
+  - **control plane** (`manager.control`): tracks worker registrations and state,
+    drives worker lifecycle, reconciles desired vs. actual. Low-frequency,
+    correctness-critical.
+  - **dashboard** (`manager.dashboard`): performance & diagnostics — later.
   - **provisioning** (`oumigo.providers`): how workers come into existence — a
     minimal, lifecycle-shaped `Provider` protocol used by the control plane. Ships
     with `StaticProvider` (LAN: workers are hand-started and self-register, no
-    provisioning); cloud backends (e.g. ConoHa, OpenStack-based) are future
+    provisioning); cloud backends (e.g. OpenStack-based) are future
     implementations of the same protocol.
-  - **dashboard** (`manager.dashboard`): performance & diagnostics — later.
+
   
 - **Worker** (`oumigo.service.worker`): a long-lived *coordinator* supervises a LLM server
   as a child process, monitors health, executes start/stop/restart from the manager,
