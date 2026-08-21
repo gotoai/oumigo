@@ -67,3 +67,23 @@ def test_worker_run_loads_env_before_starting(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert called  # run_worker was reached
     assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "0"  # .env applied to environ
+
+
+def test_flashinfer_sampler_defaults_to_off(monkeypatch):
+    from oumigo.config.spec import NodeSpec
+    from oumigo.service.worker.coordinator import _apply_env_overrides
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    _apply_env_overrides(NodeSpec(model="m"))
+    assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "0"  # backend child inherits the default
+
+
+def test_flashinfer_sampler_env_wins_over_default(monkeypatch):
+    from oumigo.config.spec import NodeSpec
+    from oumigo.service.worker.coordinator import _apply_env_overrides
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    _apply_env_overrides(NodeSpec(model="m"))
+    assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "1"  # explicit opt-in preserved

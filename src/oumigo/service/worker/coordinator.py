@@ -356,7 +356,15 @@ def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
     expanded) + `HF_TOKEN` (blank -> anonymous) are normalized in `os.environ` so the
     spawned backend child inherits them. When the manager configured no model at all,
     `MODEL_NAME` alone is enough to serve.
+
+    Also defaults `VLLM_USE_FLASHINFER_SAMPLER=0` (see below) — the environment/.env
+    still wins, so a node with a working FlashInfer build can set it back to 1.
     """
+    # FlashInfer's sampler is JIT-compiled against the box's CUDA toolkit and fails to
+    # build on common minor-skewed installs, taking the whole backend down. vLLM's native
+    # top-k/top-p sampler is the safe default; opt back in explicitly per node.
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
     # HF cache/token: normalize in place so the backend child inherits them unchanged.
     hf_home = os.environ.get("HF_HOME")
     if hf_home:

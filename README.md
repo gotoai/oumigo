@@ -1,6 +1,6 @@
 # oumigo
 
-Oumigo is a vertical-integration toolkit for running and managing **GPU fleets**.
+OumiGo is a vertical-integration toolkit for running and managing **GPU fleets**.
 A GPU fleet is a group of computer instances, running locally or on a cloud environment,
 made up of a manager node and one or more GPU worker nodes coordinated
 by the manager.
@@ -9,7 +9,7 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an Oumigo fleet (as of v0.2.0):
+Key functions provided by an OumiGo fleet (as of v0.2.0):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
@@ -23,7 +23,7 @@ Key functions provided by an Oumigo fleet (as of v0.2.0):
 
 ## Architecture
 
-![Oumigo architecture: M agent applications talk to one manager (data plane, control plane, dashboard, provisioning) that coordinates N GPU workers.](https://raw.githubusercontent.com/gotoai/oumigo/main/docs/images/Oumigo_Architecture.png)
+![OumiGo architecture: M agent applications talk to one manager (data plane, control plane, dashboard, provisioning) that coordinates N GPU workers.](https://raw.githubusercontent.com/gotoai/oumigo/main/docs/images/OumiGo_Architecture.png)
 
 Two roles:
 
@@ -78,7 +78,7 @@ for any OpenAI-API SDK or tool (e.g. the `openai` Python client).
 
 ## Installation
 
-Oumigo is published on [PyPI](https://pypi.org/project/oumigo/). Install the extra that
+OumiGo is published on [PyPI](https://pypi.org/project/oumigo/). Install the extra that
 matches the node's role:
 
 ```bash
