@@ -55,7 +55,11 @@ worker = [
 
     # --backend=transformer: HF-Transformers serving (oumigo.service.worker.hf_server). vLLM
     # itself requires transformers v5, so these coexist with vLLM in one venv.
-    "transformers>=5.10.1",  # Gemma 4 needs transformers v5
+    # Gemma 4 needs transformers v5. Upper bound is real, not caution: transformers
+    # 5.15 turned Gemma 4's `head_dim` into a per-layer attribute (dropping the flat
+    # `global_head_dim`), so reading it globally raises AmbiguousGlobalPerLayerAttributeError
+    # and vLLM <=0.27.1 dies at engine-config time. Lift once vLLM reads per_layer_config.
+    "transformers>=5.10.1,<5.15",
     "accelerate",            # device_map / sharded model loading
     "bitsandbytes",          # 4-bit (nf4) quantization on CUDA
     "pillow",                # multimodal processor dependency (also a vLLM dep)

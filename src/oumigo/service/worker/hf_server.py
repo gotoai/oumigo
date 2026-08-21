@@ -392,8 +392,12 @@ def _text_chunk(cid: str, created: int, model: str, *, text: str, finish: str | 
 class HFServer:
     """Owns the loaded engine + request stats and builds the FastAPI app."""
 
-    def __init__(self, engine: HFEngine) -> None:
+    def __init__(self, engine: HFEngine, served_model_name: str | None = None) -> None:
         self.engine = engine
+        # When the weights are loaded from a directory, `model_id` is that path. Clients
+        # (and the manager's router) address the fleet's canonical name instead, so
+        # advertise that when the worker was told one.
+        self.served_model_name = served_model_name or engine.model_id
         self.stats = _VLLMStats()
 
     def build_app(self) -> FastAPI:
@@ -405,7 +409,7 @@ class HFServer:
 
         @app.get("/v1/models")
         async def models() -> dict:
-            return {"object": "list", "data": [{"id": self.engine.model_id, "object": "model"}]}
+            return {"object": "list", "data": [{"id": self.served_model_name, "object": "model"}]}
 
         @app.get("/metrics")
         async def metrics() -> Response:  # vLLM-style exposition, scraped by the collector
@@ -423,7 +427,7 @@ class HFServer:
 
     async def _handle(self, request: Request, *, chat: bool) -> Response:
         body = await request.json()
-        model = body.get("model") or self.engine.model_id
+        model = body.get("model") or self.served_model_name
 
         if body.get("stream"):
             include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
@@ -503,6 +507,10 @@ def main() -> None:
     )
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME") or DEFAULT_MODEL,
                         help="HF model id/path to serve (env: MODEL_NAME).")
+    parser.add_argument("--served-model-name", default=None,
+                        help="Name to advertise on /v1/models and echo in responses. "
+                             "Defaults to --model; set when loading from a directory so "
+                             "clients keep addressing the model by its canonical id.")
     parser.add_argument("--host", default="0.0.0.0", help="Address to bind.")
     parser.add_argument("--port", type=int, default=7001, help="Port to bind.")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
@@ -532,7 +540,7 @@ def main() -> None:
     # failure exits non-zero, which the coordinator treats as a crash (restart policy).
     engine.load()
 
-    server = HFServer(engine)
+    server = HFServer(engine, served_model_name=args.served_model_name)
     uvicorn.run(server.build_app(), host=args.host, port=args.port,
                 log_config=None, access_log=False, log_level="info" if args.verbose else "warning")
 

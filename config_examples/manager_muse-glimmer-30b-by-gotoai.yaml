@@ -43,21 +43,38 @@ replicas: 1
 
 
 model:
-  name: google/gemma-4-12B-it-qat-w4a16-ct  # REQUIRED, e.g. google/gemma-4-12B-it
+  name: GotoAI-Inc/Muse-Glimmer-30B-W4A16  # int4 W4A16 build of meta-models/Muse-Glimmer-30B
   # Where the weights come from. Unset / null / `none` -> download `name` from the
   # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
   # (each worker checks its own disk; a node without the files can opt out with
   # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
-  storage_location: none            # e.g. file:///srv/models/gemma-4-12b
+  storage_location: none            # e.g. file:///srv/models/Muse-Glimmer-30B-W4A16
   port: 7001                         # vLLM server port on each worker (data plane routes here)
-  dtype: auto                        # auto | bfloat16 | float16
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.80
-  max_model_len: 65536  # 64k        # null = model default
+  # ~22.5 GB of weights: 13.4 GB of int4 LM linears + 5.4 GB of bf16 embeddings and
+  # lm_head + 3.7 GB of bf16 vision tower (vLLM builds that tower unquantized). The
+  # fraction must cover weights AND KV cache: 0.90 of a 32/48 GB card is comfortable,
+  # but on a 24 GB card 0.90 leaves only ~21.6 GB and the model will not load — use
+  # --language-model-only below (drops the vision tower) or a bigger GPU.
+  gpu_memory_utilization: 0.90
+  # KV cache is unusually cheap here: 2 KV heads and a 2048 sliding window on 39 of 52
+  # layers put a 32k sequence at ~0.5 GB, so long contexts cost little. Model max is 128k.
+  max_model_len: 65536  # 64k        # null = model default (131072)
   max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
   extra_args: #[]
+    # Requires vLLM >= 0.28 (Muse Glimmer landed after the 0.27.1 release) and
+    # transformers >= 5.15. Both parsers below ship with vLLM under these exact names.
     - --enable-auto-tool-choice
     - --tool-call-parser
-    - gemma4
+    - muse_glimmer                   # the model frames tool calls in ATEM markup; without
+                                     # this parser named/required tool_choice returns null
     - --reasoning-parser
-    - gemma4
+    - muse_glimmer                   # splits thinking into `reasoning_content`
+    # Text-only serving: skips the vision tower and frees ~3.7 GB (image/video inputs
+    # stop working). Confirm in the worker log that the tower is not built.
+    #- --language-model-only
+    # Speculative decoding with the vendor's DFlash drafter. Add only after the base
+    # config is proven working — it is a second model to load and schedule.
+    #- --speculative-config
+    #- '{"method": "dflash", "model": "meta-models/Muse-Glimmer-30B-assistant", "num_speculative_tokens": 16}'

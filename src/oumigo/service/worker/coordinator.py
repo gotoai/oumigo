@@ -351,11 +351,16 @@ class WorkerCoordinator:
 def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
     """Overlay the negotiable env/.env settings onto the manager's spec (env wins).
 
-    The model the manager hands out is negotiable per worker: `MODEL_NAME` and
-    `MAX_MODEL_LEN` override `model` / `max_model_len`, and `HF_HOME` (with `~`/`$VARS`
-    expanded) + `HF_TOKEN` (blank -> anonymous) are normalized in `os.environ` so the
-    spawned backend child inherits them. When the manager configured no model at all,
-    `MODEL_NAME` alone is enough to serve.
+    The model the manager hands out is negotiable per worker: `MODEL_NAME`,
+    `MAX_MODEL_LEN` and `MODEL_STORAGE_LOCATION` override `model` / `max_model_len` /
+    `storage_location`, and `HF_HOME` (with `~`/`$VARS` expanded) + `HF_TOKEN` (blank ->
+    anonymous) are normalized in `os.environ` so the spawned backend child inherits them.
+    When the manager configured no model at all, `MODEL_NAME` alone is enough to serve.
+
+    `storage_location` is negotiable for a reason: whether a node has the weights on
+    disk is a property of *that node*, not of the fleet. A worker can point at its own
+    copy, or set `MODEL_STORAGE_LOCATION=none` to ignore a fleet-wide location it does
+    not have and fall back to the Hub.
 
     Also defaults `VLLM_USE_FLASHINFER_SAMPLER=0` (see below) — the environment/.env
     still wins, so a node with a working FlashInfer build can set it back to 1.
@@ -385,8 +390,46 @@ def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
             updates["max_model_len"] = int(max_len)
         except ValueError:
             raise SystemExit(f"MAX_MODEL_LEN must be an integer, got {max_len!r}")
+    storage = os.environ.get("MODEL_STORAGE_LOCATION")
+    if storage is not None:
+        # Validated (and "none" -> None) by NodeSpec. Re-validating through the model
+        # keeps env and config on one code path; a pydantic traceback would be a poor
+        # way to report a typo in a .env file, so surface it as a clean exit.
+        try:
+            updates["storage_location"] = NodeSpec(
+                model=model, storage_location=storage
+            ).storage_location
+        except ValueError as exc:
+            raise SystemExit(f"MODEL_STORAGE_LOCATION={storage!r} is invalid: {exc}")
+
     base = spec or NodeSpec(model=model)  # manager has no model -> defaults + env model
-    return base.model_copy(update=updates)
+    resolved = base.model_copy(update=updates)
+    _check_local_weights(resolved)
+    return resolved
+
+
+def _check_local_weights(spec: NodeSpec) -> None:
+    """Fail fast when `storage_location` does not name a usable model directory.
+
+    Only the worker can check this: the path lives on *its* filesystem, so the manager
+    cannot validate it at config time. Catching it here costs a stat; missing it costs a
+    backend spawn that dies minutes later with a stack trace from inside the loader.
+    """
+    path = spec.local_path
+    if path is None:
+        return
+    if not path.exists():
+        raise SystemExit(
+            f"storage_location {spec.storage_location} does not exist on this worker "
+            f"({path}). Copy the model there, point MODEL_STORAGE_LOCATION at the right "
+            f"directory, or set MODEL_STORAGE_LOCATION=none to download from the Hub.")
+    if not path.is_dir():
+        raise SystemExit(f"storage_location {spec.storage_location} is not a directory ({path})")
+    if not (path / "config.json").is_file():
+        raise SystemExit(
+            f"storage_location {path} has no config.json — it does not look like a model "
+            f"directory. Point it at the folder holding config.json and the weights.")
+    log.info("serving %s from local weights at %s", spec.model, path)
 
 
 def run_worker(

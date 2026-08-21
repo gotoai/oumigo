@@ -44,6 +44,11 @@ replicas: 1
 
 model:
   name: Qwen/Qwen3.5-9B              # vendor repo — mandatory. Fits only via --quantization below.
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/qwen3.5-9b
   port: 7001                         # vLLM server port on each worker (data plane routes here)
   dtype: auto                        # auto | bfloat16 | float16  (auto -> bfloat16 per config.json)
   tensor_parallel_size: 1

@@ -64,11 +64,14 @@ def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
 
     ``port`` overrides ``spec.port`` — the coordinator may pick a different free port
     when the preferred one is taken on the host. Defaults to ``spec.port``.
+
+    The positional argument is ``spec.model_ref``: the local directory when the spec
+    carries a ``storage_location``, otherwise the Hub id.
     """
     argv = [
         "vllm",
         "serve",
-        spec.model,
+        spec.model_ref,
         "--host",
         spec.host,
         "--port",
@@ -84,6 +87,12 @@ def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
         argv += ["--max-model-len", str(spec.max_model_len)]
     if spec.download_dir:
         argv += ["--download-dir", spec.download_dir]
+    # Serving from a directory would otherwise make the path the model's id, but the
+    # router rewrites every client request's `model` to `spec.model` — so without this
+    # each routed request would 404 at vLLM. Placed before extra_args so an operator can
+    # still override it verbatim.
+    if spec.local_path is not None:
+        argv += ["--served-model-name", spec.model]
     argv += list(spec.extra_args)
     return argv
 
@@ -101,7 +110,7 @@ def build_hf_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
         "-m",
         "oumigo.service.worker.hf_server",
         "--model",
-        spec.model,
+        spec.model_ref,
         "--host",
         spec.host,
         "--port",
@@ -111,6 +120,8 @@ def build_hf_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     ]
     if spec.max_model_len is not None:
         argv += ["--max-model-len", str(spec.max_model_len)]
+    if spec.local_path is not None:
+        argv += ["--served-model-name", spec.model]  # same reason as build_argv
     argv += list(spec.extra_args)
     return argv
 

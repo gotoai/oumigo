@@ -9,12 +9,15 @@ import textwrap
 import time
 
 import pytest
+from pathlib import Path
+from pydantic import ValidationError
 
 from oumigo.config.spec import NodeSpec
 from oumigo.service.worker.supervisor import (
     PortUnavailable,
     _ServerProcess,
     build_argv,
+    build_hf_argv,
     find_free_port,
 )
 
@@ -158,3 +161,76 @@ def test_find_free_port_raises_when_exhausted() -> None:
             find_free_port("127.0.0.1", port, max_tries=1)  # only the occupied port
     finally:
         occ.close()
+
+
+# --- storage_location: local weights instead of a Hub download ---------------------
+
+
+def test_storage_location_none_spellings_mean_the_hub() -> None:
+    for value in (None, "", "  ", "none", "None", "NONE", "null"):
+        spec = NodeSpec(model="acme/tiny", storage_location=value)
+        assert spec.storage_location is None
+        assert spec.local_path is None
+        assert spec.model_ref == "acme/tiny"          # falls back to the Hub id
+
+
+def test_storage_location_file_uri_resolves_to_a_path() -> None:
+    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
+    assert spec.local_path == Path("/srv/models/tiny")
+    assert spec.model_ref == "/srv/models/tiny"       # what the backend is pointed at
+    assert spec.model == "acme/tiny"                  # canonical name is untouched
+
+
+def test_storage_location_accepts_localhost_and_percent_escapes() -> None:
+    assert NodeSpec(model="m", storage_location="file://localhost/srv/m").local_path == Path("/srv/m")
+    assert NodeSpec(model="m", storage_location="file:///srv/my%20models").local_path == Path("/srv/my models")
+
+
+def test_storage_location_rejects_unsupported_schemes() -> None:
+    for bad in ("s3://bucket/model", "http://host/model", "/srv/models/tiny", "~/models"):
+        with pytest.raises(ValidationError):
+            NodeSpec(model="m", storage_location=bad)
+
+
+def test_storage_location_rejects_remote_host_and_relative_path() -> None:
+    with pytest.raises(ValidationError):
+        NodeSpec(model="m", storage_location="file://nas.local/srv/models")
+    with pytest.raises(ValidationError):
+        NodeSpec(model="m", storage_location="file://relative/path")
+
+
+def test_build_argv_serves_local_weights_under_the_fleet_name() -> None:
+    """The router rewrites every request's `model` to spec.model, so a directory-served
+    backend must still answer to that name."""
+    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
+    argv = build_argv(spec)
+    assert argv[:3] == ["vllm", "serve", "/srv/models/tiny"]
+    assert argv[argv.index("--served-model-name") + 1] == "acme/tiny"
+
+
+def test_build_argv_omits_served_model_name_without_storage_location() -> None:
+    assert "--served-model-name" not in build_argv(NodeSpec(model="acme/tiny"))
+
+
+def test_build_argv_extra_args_still_come_last() -> None:
+    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/m",
+                    extra_args=["--enforce-eager"])
+    assert build_argv(spec)[-1] == "--enforce-eager"
+
+
+def test_build_hf_argv_uses_local_weights_too() -> None:
+    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
+    argv = build_hf_argv(spec)
+    assert argv[argv.index("--model") + 1] == "/srv/models/tiny"
+    assert argv[argv.index("--served-model-name") + 1] == "acme/tiny"
+
+
+def test_build_node_spec_reads_storage_location() -> None:
+    from oumigo.service.manager.settings import build_node_spec
+
+    spec = build_node_spec({"model": {"name": "acme/tiny",
+                                      "storage_location": "file:///srv/models/tiny"}})
+    assert spec is not None and spec.model_ref == "/srv/models/tiny"
+    # the documented "off" value round-trips to None rather than erroring
+    off = build_node_spec({"model": {"name": "acme/tiny", "storage_location": "none"}})
+    assert off is not None and off.storage_location is None

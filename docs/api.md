@@ -335,6 +335,28 @@ Behavior of the inference layer depends on how each worker's vLLM was launched. 
 flags through the `model.extra_args` list in `manager.yaml`; they are appended verbatim to
 `vllm serve`.
 
+**Local weights** — by default `model.name` is downloaded from the Hugging Face Hub. To
+serve weights already on disk (a checkpoint you quantized yourself, an air-gapped node, a
+shared NFS mount), set `model.storage_location` to a `file://` URI:
+
+```yaml
+model:
+  name: acme/gemma-4-12B-W4A16          # canonical name clients keep using
+  storage_location: file:///srv/models/gemma-4-12B-W4A16
+```
+
+`name` stays the model's identity — the router rewrites every request's `model` to it, and
+the worker passes `--served-model-name` so the backend answers to it despite being loaded
+from a path. Unset, `null` and the literal `none` all mean "use the Hub"; only `file://`
+is supported so far, and any other scheme is rejected at config load.
+
+The path is checked on the **worker**, not the manager — it is that node's filesystem, so
+the manager cannot validate it. A worker exits at startup with a clear message if the
+directory is missing or holds no `config.json`. Nodes differ: a worker can override the
+fleet value with `MODEL_STORAGE_LOCATION=file:///its/own/path` in its `.env`, or opt out
+of a fleet-wide location entirely with `MODEL_STORAGE_LOCATION=none` and fall back to the
+Hub.
+
 **Tool calling** requires vLLM to be started with an auto tool-choice parser, or any
 request carrying `tools` fails with HTTP 400:
 

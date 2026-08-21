@@ -10,7 +10,10 @@ gets the same spec.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class NodeSpec(BaseModel):
@@ -21,7 +24,17 @@ class NodeSpec(BaseModel):
     dirs) are NOT here — those come from the worker's own environment.
     """
 
-    model: str = Field(..., description="Model id/path passed to `vllm serve`.")
+    model: str = Field(
+        ...,
+        description="Canonical model id (e.g. `google/gemma-4-12B-it`). Also the name "
+                    "clients address: the router rewrites every request's `model` to it.",
+    )
+    storage_location: str | None = Field(
+        default=None,
+        description="Where the weights actually live, as a URI. Only `file://` is "
+                    "supported: `file:///srv/models/gemma-4-12B-it`. None (or the string "
+                    "`none`) means download `model` from the Hugging Face Hub.",
+    )
     host: str = Field(default="0.0.0.0", description="Host the vLLM server binds.")
     port: int = Field(default=7001, description="Port the vLLM server binds.")
 
@@ -50,6 +63,56 @@ class NodeSpec(BaseModel):
     extra_args: list[str] = Field(
         default_factory=list, description="Verbatim extra `vllm serve` flags (escape hatch)."
     )
+
+
+    @field_validator("storage_location", mode="before")
+    @classmethod
+    def _normalize_storage_location(cls, value: object) -> str | None:
+        """Accept YAML's several spellings of "unset", and reject unsupported schemes.
+
+        `null`, an empty string and the literal word `none` (any case) all mean "use the
+        Hugging Face Hub", so a config can disable a location without deleting the key.
+        Anything else must be a `file://` URI — remote protocols are not implemented, and
+        silently treating `s3://...` as a relative path would be far worse than refusing.
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.lower() in ("none", "null"):
+            return None
+
+        parsed = urlparse(text)
+        if parsed.scheme != "file":
+            supported = "file:///absolute/path"
+            hint = (f" Did you mean file://{text}?" if not parsed.scheme
+                    else f" {parsed.scheme}:// is not supported yet.")
+            raise ValueError(f"storage_location must be a {supported} URI.{hint}")
+        if parsed.netloc not in ("", "localhost"):
+            raise ValueError(
+                f"storage_location {text!r} names a remote host ({parsed.netloc!r}); "
+                f"only local paths are supported (file:///path or file://localhost/path)")
+        if not parsed.path.startswith("/"):
+            raise ValueError(
+                f"storage_location {text!r} is not absolute; use file:///absolute/path")
+        return text
+
+    @property
+    def local_path(self) -> Path | None:
+        """`storage_location` as a filesystem path, or None when serving from the Hub."""
+        if self.storage_location is None:
+            return None
+        return Path(unquote(urlparse(self.storage_location).path))
+
+    @property
+    def model_ref(self) -> str:
+        """What the backend is actually pointed at: a local directory, or the Hub id.
+
+        Kept distinct from `model`, which stays the canonical *name* — the router
+        rewrites client requests to it, so a backend serving from disk must still
+        answer to it (see `--served-model-name` in the worker's argv builders).
+        """
+        path = self.local_path
+        return str(path) if path is not None else self.model
 
 
 class ClusterSpec(BaseModel):

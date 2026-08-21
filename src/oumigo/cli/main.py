@@ -69,8 +69,8 @@ def worker_run(
     """Load the env file, resolve identity, find the manager, register, and supervise the backend.
 
     The env file is applied before anything reads the environment, so the negotiable
-    vars (MODEL_NAME / MAX_MODEL_LEN / HF_HOME / HF_TOKEN, plus VLLM_*) reach the
-    backend child process the coordinator spawns.
+    vars (MODEL_NAME / MAX_MODEL_LEN / MODEL_STORAGE_LOCATION / HF_HOME / HF_TOKEN, plus
+    VLLM_*) reach the backend child process the coordinator spawns.
     """
     import logging
 
