@@ -1,7 +1,7 @@
 """The intercept points a guard chain runs at — the vocabulary a ``Guard`` selects on.
 
 A guardrail chain observes a request at five conceptual points, each a distinct method of
-:class:`~oumigo.api.agent.chat.OumigoChat`. The tool point has a *pre* and a *post* moment
+:class:`~oumigo.api.agent.chat.OumiGoChat`. The tool point has a *pre* and a *post* moment
 (``TOOL_CALL`` / ``TOOL_RESULT``), so five points, six members:
 
 1. ``USER_INPUT``       — the caller's message, before the turn starts (``request``).

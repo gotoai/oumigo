@@ -8,18 +8,18 @@
 The API has two layers:
 
 1. **Fleet control** — spawn or attach a manager and workers from Python:
-   `oumigo_get_or_create_manager`, `oumigo_create_worker`, and the `OumigoManager` /
-   `OumigoWorker` handles.
+   `oumigo_get_or_create_manager`, `oumigo_create_worker`, and the `OumiGoManager` /
+   `OumiGoWorker` handles.
 2. **Inference** — run chats and tools against the fleet's OpenAI-compatible data plane:
-   `OumigoManager.create_agent(...)` → `OumigoAgent` → `OumigoChat` → `OumigoResponse`,
+   `OumiGoManager.create_agent(...)` → `OumiGoAgent` → `OumiGoChat` → `OumiGoResponse`,
    plus the `@tool` decorator.
 
 ```python
 from oumigo import (
     oumigo_get_or_create_manager, oumigo_create_worker,   # fleet control
-    OumigoManager, OumigoWorker,                          # handles
+    OumiGoManager, OumiGoWorker,                          # handles
     tool, Tool, ToolDefinitionError,                      # tools
-    OumigoAgent, OumigoChat, OumigoResponse,              # inference
+    OumiGoAgent, OumiGoChat, OumiGoResponse,              # inference
 )
 ```
 
@@ -60,7 +60,7 @@ for piece in chat.request("And tomorrow?", stream=True):
 
 ## Fleet control
 
-### `oumigo_get_or_create_manager(...) -> OumigoManager`
+### `oumigo_get_or_create_manager(...) -> OumiGoManager`
 
 Return a manager handle, **reusing** a live manager discovered on the LAN (mDNS) or
 **spawning** one as a child of this process (armed with `PR_SET_PDEATHSIG`, so it exits
@@ -72,7 +72,7 @@ oumigo_get_or_create_manager(
     data_host=..., data_port=..., control_host=..., control_port=...,
     provider=..., model=...,
     *, discover_timeout=3.0, startup_timeout=20.0,
-) -> OumigoManager
+) -> OumiGoManager
 ```
 
 Settings resolve **explicit arg > `config_file` (YAML) > built-in default**. A missing or
@@ -83,7 +83,7 @@ unparseable `config_file` is ignored (a warning is logged).
 > your config is used, stop any other manager first, or edit the config of the manager
 > that is actually running.
 
-### `oumigo_create_worker(...) -> OumigoWorker`
+### `oumigo_create_worker(...) -> OumiGoWorker`
 
 Spawn a worker child on this host and block until its vLLM/HF replica is `SERVING`
 (includes the model load/download — potentially many minutes).
@@ -94,7 +94,7 @@ oumigo_create_worker(
     hf_token=None, model_name=None,
     *, manager=None, backend="vllm", manager_url=None,
     discover_timeout=10.0, serving_timeout=None, poll_interval=2.0,
-) -> OumigoWorker
+) -> OumiGoWorker
 ```
 
 The manager is resolved as: `manager` handle > `manager_url` > the last manager created in
@@ -102,7 +102,7 @@ this process > mDNS. `serving_timeout=None` waits **indefinitely** (you own the 
 decision); the wait still ends early on a definitive failure (child exits or node reaches
 `FAILED`).
 
-### `OumigoManager`
+### `OumiGoManager`
 
 A handle to a running manager (spawned or discovered). Context manager; `stop()` is a
 no-op for a discovered (`owned=False`) manager.
@@ -115,10 +115,10 @@ no-op for a discovered (`owned=False`) manager.
 | `is_healthy(timeout_s=2.0) -> bool` | `True` once `/healthz` answers 200. |
 | `workers(timeout_s=5.0) -> list[dict]` | Current worker registry records. |
 | `metrics(*, since=None, prefixes=None, timeout_s=5.0) -> list[dict]` | Latest slot per node, or raw historical points when `since` is set. |
-| `create_agent(...) -> OumigoAgent` | Mint an inference agent (see below). |
+| `create_agent(...) -> OumiGoAgent` | Mint an inference agent (see below). |
 | `stop()` | Terminate the spawned control-plane child (owned only). |
 
-### `OumigoWorker`
+### `OumiGoWorker`
 
 A handle to a worker child this process spawned. Context manager.
 
@@ -134,14 +134,14 @@ A handle to a worker child this process spawned. Context manager.
 
 ## Inference
 
-### `OumigoManager.create_agent(...) -> OumigoAgent`
+### `OumiGoManager.create_agent(...) -> OumiGoAgent`
 
 ```python
 manager.create_agent(
     tools=None,
     *, max_iterations=5,
     temperature=None, max_tokens=None, top_p=None, stop=None,
-) -> OumigoAgent
+) -> OumiGoAgent
 ```
 
 An **agent** is a capability bundle bound to the manager's data plane: the tools and
@@ -156,10 +156,10 @@ sampling defaults shared by every chat it spawns.
 The system prompt and tools are **server-owned** — they come from your code here, never
 from a client. (See [Security & the trust boundary](#security--the-trust-boundary).)
 
-### `OumigoAgent.create_chat(...) -> OumigoChat`
+### `OumiGoAgent.create_chat(...) -> OumiGoChat`
 
 ```python
-agent.create_chat(system=None, max_history_turns=3, history=None) -> OumigoChat
+agent.create_chat(system=None, max_history_turns=3, history=None) -> OumiGoChat
 ```
 
 Start a **stateful** conversation.
@@ -171,13 +171,13 @@ Start a **stateful** conversation.
   [Stateless servers](#stateless-servers-history-rehydration)). Only `user`/`assistant`
   turns are accepted.
 
-> `OumigoChat` is **not thread-safe** — use one chat per session.
+> `OumiGoChat` is **not thread-safe** — use one chat per session.
 
-### `OumigoChat`
+### `OumiGoChat`
 
 | Member | Description |
 |---|---|
-| `request(contents: str, stream=False) -> OumigoResponse` | Run one user turn to completion (executes the tool loop). |
+| `request(contents: str, stream=False) -> OumiGoResponse` | Run one user turn to completion (executes the tool loop). |
 | `history -> list[dict]` | A copy of the carried `{"role","content"}` turns — persist this to rehydrate later. Never includes system/tool/reasoning. |
 
 `request()` assembles `[system?] + recent history + {"role":"user","content":contents}`,
@@ -186,7 +186,7 @@ execute the matching Python callbacks, feed their results back, and repeat — u
 model returns prose or `max_iterations` is reached. The `(user, final-answer)` exchange is
 appended to `history`.
 
-### `OumigoResponse`
+### `OumiGoResponse`
 
 The result of one `request()` — the same type whether or not you streamed.
 
@@ -280,7 +280,7 @@ so the model can recover — `request()` never crashes on a tool failure.
 
 ## Stateless servers (history rehydration)
 
-The XBCOM app (and any web service) is stateless per request, while `OumigoChat` is
+The XBCOM app (and any web service) is stateless per request, while `OumiGoChat` is
 stateful. The rule: **store the history (data), not the Chat (object).** Persist a
 session's `chat.history` in your own store (dict / Redis / DB), and rehydrate a fresh,
 ephemeral chat per request:
@@ -298,7 +298,7 @@ def handle(session_id: str, user_msg: str) -> str:
 ```
 
 This is stateless-scalable (any process can serve any session), restart-safe, and
-sidesteps `OumigoChat`'s single-thread constraint (each request gets its own chat).
+sidesteps `OumiGoChat`'s single-thread constraint (each request gets its own chat).
 
 > `max_history_turns` currently bounds **both** what the model sees and what `chat.history`
 > retains (the most recent N exchanges). Set it to how much context you want to keep.
@@ -389,6 +389,6 @@ the thinking; without it, `resp.reasoning` is `""`.
 ## Notes & limits
 
 - The inference layer is synchronous/blocking; streaming is a synchronous generator.
-- Every model call funnels through one internal seam (`OumigoChat._payload`), reserved for
+- Every model call funnels through one internal seam (`OumiGoChat._payload`), reserved for
   a future guardrail interceptor chain — not yet wired.
 - Sampling defaults currently cover `temperature` / `max_tokens` / `top_p` / `stop`.

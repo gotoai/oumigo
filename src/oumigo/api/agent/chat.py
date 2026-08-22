@@ -1,9 +1,9 @@
 """The Chat tier — a stateful conversation that runs one turn (and its tool loop) at a time.
 
-An :class:`OumigoChat` is spawned by :meth:`oumigo.api.agent.agent.OumigoAgent.create_chat`.
+An :class:`OumiGoChat` is spawned by :meth:`oumigo.api.agent.agent.OumiGoAgent.create_chat`.
 It accumulates history and is *not* thread-safe: use one chat per session.
-:meth:`OumigoChat.request` runs **one user turn to completion**, returning an
-:class:`~oumigo.api.agent.response.OumigoResponse`.
+:meth:`OumiGoChat.request` runs **one user turn to completion**, returning an
+:class:`~oumigo.api.agent.response.OumiGoResponse`.
 
 Everything ultimately becomes an OpenAI-style ``POST /v1/chat/completions`` against the
 manager's data plane (``data_url``), which the router proxies to a SERVING worker. When
@@ -32,11 +32,11 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from oumigo.api.agent.response import OumigoResponse
+from oumigo.api.agent.response import OumiGoResponse
 from oumigo.guard import GuardContext, InterceptPoint, OUTPUT_POINTS, Verdict
 
 if TYPE_CHECKING:  # avoid a runtime import cycle: agent.py imports this module
-    from oumigo.api.agent.agent import OumigoAgent
+    from oumigo.api.agent.agent import OumiGoAgent
 
 log = logging.getLogger("oumigo.api.agent.chat")
 
@@ -51,12 +51,12 @@ _TIMEOUT = httpx.Timeout(None, connect=10.0)
 _DEFAULT_BLOCK_TEXT = "This request was blocked by a guardrail policy."
 
 
-class OumigoChat:
+class OumiGoChat:
     """A stateful conversation. Accumulates history across calls; single-threaded."""
 
     def __init__(
         self,
-        agent: OumigoAgent,
+        agent: OumiGoAgent,
         *,
         system: str | None = None,
         max_history_turns: int = 3,
@@ -88,14 +88,14 @@ class OumigoChat:
     def history(self) -> list[dict[str, str]]:
         """A copy of the carried conversation — the ``{"role","content"}`` user/assistant
         turns (most recent ``max_history_turns`` exchanges). Persist this per session and
-        pass it back to :meth:`OumigoAgent.create_chat` to rehydrate the chat on a later,
+        pass it back to :meth:`OumiGoAgent.create_chat` to rehydrate the chat on a later,
         stateless request. Never includes the system prompt, tool calls/results, or reasoning.
         """
         return [dict(m) for m in self._history]
 
     # -- public ------------------------------------------------------------- #
 
-    def request(self, contents: str, stream: bool = False) -> OumigoResponse:
+    def request(self, contents: str, stream: bool = False) -> OumiGoResponse:
         """Run one user turn to completion.
 
         Assembles ``[system?] + recent history + {"role": "user", "content": contents}``,
@@ -113,7 +113,7 @@ class OumigoChat:
             raise TypeError(f"contents must be a str, got {type(contents).__name__}")
 
         messages = self._build_messages(contents)
-        resp = OumigoResponse()
+        resp = OumiGoResponse()
         resp._gen = self._run(resp, contents, messages, stream)
         if not stream:
             resp.consume()
@@ -123,7 +123,7 @@ class OumigoChat:
 
     def _run(
         self,
-        resp: OumigoResponse,
+        resp: OumiGoResponse,
         user_contents: str,
         messages: list[dict[str, Any]],
         stream: bool,
@@ -131,8 +131,8 @@ class OumigoChat:
         """Drive the tool loop, yielding tagged ``(kind, delta)`` events.
 
         ``kind`` is ``"answer"`` (final-answer text) or ``"reasoning"`` (reasoning_content);
-        :class:`OumigoResponse` reshapes these for ``__iter__`` (answer only) and
-        :meth:`OumigoResponse.stream` (both). Runs up to ``max_iterations`` model round-trips.
+        :class:`OumiGoResponse` reshapes these for ``__iter__`` (answer only) and
+        :meth:`OumiGoResponse.stream` (both). Runs up to ``max_iterations`` model round-trips.
         Each turn: get the assistant message; if it requests tools, execute them, append their
         results, and loop; else it's the final answer and we stop. On completion, record it in
         history. When a profile is active, the guard chain is consulted at each intercept point
@@ -188,7 +188,7 @@ class OumigoChat:
         self._remember(user_contents, resp.text)
 
     def _complete_turn(
-        self, resp: OumigoResponse, messages: list[dict[str, Any]], stream: bool
+        self, resp: OumiGoResponse, messages: list[dict[str, Any]], stream: bool
     ) -> Generator[tuple[str, str], None, tuple[dict[str, Any] | None, str | None, str]]:
         """One model round-trip. Yields ``(kind, delta)`` events; returns ``(assistant, finish, answer)``.
 
@@ -224,7 +224,7 @@ class OumigoChat:
         return assistant, choice.get("finish_reason"), content
 
     def _stream_turn(
-        self, resp: OumigoResponse, messages: list[dict[str, Any]]
+        self, resp: OumiGoResponse, messages: list[dict[str, Any]]
     ) -> Generator[tuple[str, str], None, tuple[dict[str, Any], str | None, str]]:
         """A streaming round-trip: yield ``(kind, delta)`` events, assemble ``(assistant, finish, answer)``.
 
@@ -262,7 +262,7 @@ class OumigoChat:
         return assistant, finish, answer
 
     def _execute_tool(
-        self, resp: OumigoResponse, tc: dict[str, Any]
+        self, resp: OumiGoResponse, tc: dict[str, Any]
     ) -> tuple[str, Verdict | None]:
         """Run one requested tool, returning ``(result, halt_verdict)``.
 
@@ -294,7 +294,7 @@ class OumigoChat:
         return result, halt
 
     def _invoke_guarded(
-        self, resp: OumigoResponse, tool: Any, name: str, args: dict[str, Any]
+        self, resp: OumiGoResponse, tool: Any, name: str, args: dict[str, Any]
     ) -> tuple[dict[str, Any], str, Verdict | None]:
         """Guard (POINT 3 pre), invoke, then guard (POINT 3 post) one tool call.
 
@@ -351,7 +351,7 @@ class OumigoChat:
         outcome = self._profile.evaluate(point, ctx)
         return outcome.content, outcome.verdict, outcome.flags
 
-    def _guard_prompt(self, resp: OumigoResponse, messages: list[dict[str, Any]]) -> Verdict:
+    def _guard_prompt(self, resp: OumiGoResponse, messages: list[dict[str, Any]]) -> Verdict:
         """POINT 2 — screen the outgoing ``messages``, rewriting them in place on a transform."""
         if not self._guarding:
             return Verdict.allow()
@@ -365,7 +365,7 @@ class OumigoChat:
 
     def _guard_output(
         self,
-        resp: OumigoResponse,
+        resp: OumiGoResponse,
         messages: list[dict[str, Any]],
         answer: str,
         has_tool_calls: bool,
@@ -392,7 +392,7 @@ class OumigoChat:
             messages[-1] = {**messages[-1], "content": text}
         return ""
 
-    def _halt(self, resp: OumigoResponse, verdict: Verdict) -> Iterator[tuple[str, str]]:
+    def _halt(self, resp: OumiGoResponse, verdict: Verdict) -> Iterator[tuple[str, str]]:
         """Surface a blocking/stopping verdict as the answer text (one ``"answer"`` event)."""
         text = verdict.reason or _DEFAULT_BLOCK_TEXT
         resp.text += text
@@ -400,7 +400,7 @@ class OumigoChat:
         yield "answer", text
 
     def _record_flags(
-        self, resp: OumigoResponse, point: InterceptPoint, flags: list[Verdict]
+        self, resp: OumiGoResponse, point: InterceptPoint, flags: list[Verdict]
     ) -> None:
         """Record ``FLAG`` verdicts for audit (logged, and kept on the response)."""
         for f in flags:

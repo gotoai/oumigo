@@ -1,6 +1,6 @@
-"""The result of one :meth:`OumigoChat.request` — one type, streamed or not.
+"""The result of one :meth:`OumiGoChat.request` — one type, streamed or not.
 
-Response *parity*: ``request()`` hands back an ``OumigoResponse`` regardless of the
+Response *parity*: ``request()`` hands back an ``OumiGoResponse`` regardless of the
 ``stream`` flag, so callers never branch on it. Iterating the response yields the final
 answer as **parsed text deltas** (``str``) — never raw SSE lines — and ``.text`` holds
 the full answer: complete immediately for a non-streamed call, and complete once
@@ -30,7 +30,7 @@ from collections.abc import Iterator
 from typing import Any, Literal, overload
 
 
-class OumigoResponse:
+class OumiGoResponse:
     """One request's result. Iterate for text deltas; read ``.text`` for the whole answer.
 
     Attributes:
@@ -69,7 +69,7 @@ class OumigoResponse:
         """Append one turn's ``reasoning_content`` (internal; kept out of ``text``).
 
         Turns are separated by a blank line so a multi-step (tool-loop) request reads as
-        distinct thoughts. Never resent to the model — see :meth:`OumigoChat._remember`.
+        distinct thoughts. Never resent to the model — see :meth:`OumiGoChat._remember`.
         """
         if not text:
             return
@@ -127,7 +127,7 @@ class OumigoResponse:
             yield (piece, "") if kind == "answer" else ("", piece)
         self._consumed = True
 
-    def consume(self) -> OumigoResponse:
+    def consume(self) -> OumiGoResponse:
         """Drive the request to completion (used internally for non-streaming calls)."""
         for _ in self:
             pass
@@ -139,6 +139,6 @@ class OumigoResponse:
     def __repr__(self) -> str:
         preview = self.text if len(self.text) <= 60 else self.text[:57] + "..."
         return (
-            f"OumigoResponse(finish_reason={self.finish_reason!r}, "
+            f"OumiGoResponse(finish_reason={self.finish_reason!r}, "
             f"tools={len(self.tool_calls_made)}, text={preview!r})"
         )

@@ -7,7 +7,7 @@ guards live outside oumigo and plug in via :class:`Guard`.
 
 Placed here — a sibling of :mod:`oumigo.protocol` — so the client agent layer and the
 server/router can share one set of guardrail types without an ``api`` ↔ ``service`` import
-cycle. V1 wires this into the agent tier (``OumigoChat``); the router may reuse the same types
+cycle. V1 wires this into the agent tier (``OumiGoChat``); the router may reuse the same types
 later.
 """
 

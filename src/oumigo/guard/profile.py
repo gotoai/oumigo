@@ -19,7 +19,7 @@ from oumigo.guard.points import InterceptPoint
 
 
 class GuardProfile:
-    """A named set of guards. Pass to :meth:`OumigoManager.create_agent`."""
+    """A named set of guards. Pass to :meth:`OumiGoManager.create_agent`."""
 
     def __init__(self, guards: Iterable[GuardLike] = (), *, name: str = "default") -> None:
         self.name = name

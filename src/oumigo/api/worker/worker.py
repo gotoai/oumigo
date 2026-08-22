@@ -24,7 +24,7 @@ _WORKER_STOP_GRACE_S = 35.0
 
 
 @dataclass
-class OumigoWorker:
+class OumiGoWorker:
     """A worker child this process spawned, supervising one vLLM/HF replica."""
 
     manager_url: str
@@ -66,7 +66,7 @@ class OumigoWorker:
         terminate(self._child, grace_s=_WORKER_STOP_GRACE_S)
         self._child = None
 
-    def __enter__(self) -> OumigoWorker:
+    def __enter__(self) -> OumiGoWorker:
         return self
 
     def __exit__(self, *_exc: object) -> None:

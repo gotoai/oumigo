@@ -13,7 +13,7 @@ same machinery the CLI drives:
 * **block until ready**, observing readiness over HTTP (`/healthz` for the
   manager, `/workers` state for a worker) rather than by parsing child logs.
 
-Two handles are returned — `OumigoManager` and `OumigoWorker`. Both are context
+Two handles are returned — `OumiGoManager` and `OumiGoWorker`. Both are context
 managers and both register an ``atexit`` stop as a belt-and-suspenders companion
 to the kernel-backed death signal.
 """
@@ -34,8 +34,8 @@ import httpx
 import yaml
 
 from oumigo import discovery
-from oumigo.api.manager.manager import OumigoManager
-from oumigo.api.worker.worker import _WORKER_STOP_GRACE_S, OumigoWorker
+from oumigo.api.manager.manager import OumiGoManager
+from oumigo.api.worker.worker import _WORKER_STOP_GRACE_S, OumiGoWorker
 from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.protocol.states import NodeState
 
@@ -68,7 +68,7 @@ _UNSET: Any = object()
 # falls back to it, so code that just called `oumigo_get_or_create_manager` can call
 # `oumigo_create_worker()` with no args and reuse that manager rather than re-running
 # mDNS (which is fragile inside a notebook and ambiguous when several managers exist).
-_last_manager: OumigoManager | None = None
+_last_manager: OumiGoManager | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +88,7 @@ def oumigo_get_or_create_manager(
     *,
     discover_timeout: float = 3.0,
     startup_timeout: float = 20.0,
-) -> OumigoManager:
+) -> OumiGoManager:
     """Return a manager, reusing a live LAN one or spawning a die-with-parent child.
 
     Settings resolve as **explicit call argument > config_file (YAML) > built-in
@@ -127,7 +127,7 @@ def oumigo_get_or_create_manager(
     if found:
         log.info("found a live manager on the LAN at %s; reusing it", found)
         host = found.split("://", 1)[-1].split(":", 1)[0]
-        _last_manager = OumigoManager(
+        _last_manager = OumiGoManager(
             control_url=found.rstrip("/"),
             data_url=f"http://{host}:{data_port}",
             token=bearer_token,
@@ -161,7 +161,7 @@ def oumigo_get_or_create_manager(
     # Probe over loopback even when bound to 0.0.0.0 — this process is co-located.
     probe_host = "127.0.0.1" if control_host in ("0.0.0.0", "") else control_host
     control_url = f"http://{probe_host}:{control_port}"
-    manager = OumigoManager(
+    manager = OumiGoManager(
         control_url=control_url,
         data_url=f"http://{probe_host}:{data_port}",
         token=bearer_token,
@@ -190,13 +190,13 @@ def oumigo_create_worker(
     hf_token: str | None = None,
     model_name: str | None = None,
     *,
-    manager: OumigoManager | None = None,
+    manager: OumiGoManager | None = None,
     backend: str = "vllm",
     manager_url: str | None = None,
     discover_timeout: float = 10.0,
     serving_timeout: float | None = None,
     poll_interval: float = 2.0,
-) -> OumigoWorker:
+) -> OumiGoWorker:
     """Spawn a worker child and block until its replica is SERVING.
 
     Always spawns a fresh worker on this host (create semantics). The child is armed
@@ -350,7 +350,7 @@ def _spawn_child(argv: list[str], env: dict[str, str]) -> subprocess.Popen:
 
 
 def _wait_manager_healthy(
-    child: subprocess.Popen, manager: OumigoManager, timeout: float
+    child: subprocess.Popen, manager: OumiGoManager, timeout: float
 ) -> bool:
     """Poll the control plane until healthy, failing fast if the child exits first."""
     deadline = time.time() + timeout
@@ -389,7 +389,7 @@ def _wait_worker_serving(
     poll_interval: float,
     backend: str,
     model_name: str | None,
-) -> OumigoWorker:
+) -> OumiGoWorker:
     """Block until *our* fresh worker on this host reports SERVING.
 
     "Ours" is a worker at ``address`` that is either brand-new (node_id not in the
@@ -420,7 +420,7 @@ def _wait_worker_serving(
             # NodeState.*.value (not an uppercase literal), so the match can't silently fail.
             state = str(rec.get("state") or "").lower()
             if state == NodeState.SERVING.value:
-                return OumigoWorker(
+                return OumiGoWorker(
                     manager_url=manager_url,
                     address=address,
                     port=int(rec.get("port") or 0),

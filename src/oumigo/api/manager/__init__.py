@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from oumigo.api.manager.manager import OumigoManager
+from oumigo.api.manager.manager import OumiGoManager
 
-__all__ = ["OumigoManager"]
+__all__ = ["OumiGoManager"]

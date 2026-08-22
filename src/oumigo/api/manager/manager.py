@@ -24,7 +24,7 @@ def _auth(token: str | None) -> dict[str, str]:
 
 
 @dataclass
-class OumigoManager:
+class OumiGoManager:
     """A running manager — either one this process spawned, or one found on the LAN.
 
     ``owned`` is True only when this process spawned the child; ``stop()`` is a no-op
@@ -159,10 +159,10 @@ class OumigoManager:
         to every chat the agent spawns. ``max_iterations`` caps the model round-trips per
         request (the runaway tool-loop guard). ``profile`` is an optional
         :class:`oumigo.guard.GuardProfile` — the guardrail bundle every chat inherits; ``None``
-        (or an empty profile) leaves the request path untouched. Returns an ``OumigoAgent``;
+        (or an empty profile) leaves the request path untouched. Returns an ``OumiGoAgent``;
         call ``.create_chat(...)`` on it to start a conversation.
         """
-        from oumigo.api.agent.agent import OumigoAgent  # local import: optional inference layer
+        from oumigo.api.agent.agent import OumiGoAgent  # local import: optional inference layer
 
         sampling = {
             k: v
@@ -172,7 +172,7 @@ class OumigoManager:
             )
             if v is not None
         }
-        return OumigoAgent(
+        return OumiGoAgent(
             data_url=self.data_url,
             token=self.token,
             tools=tools or [],
@@ -181,7 +181,7 @@ class OumigoManager:
             profile=profile,
         )
 
-    def __enter__(self) -> OumigoManager:
+    def __enter__(self) -> OumiGoManager:
         return self
 
     def __exit__(self, *_exc: object) -> None:

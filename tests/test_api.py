@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from oumigo.api import api
-from oumigo.api import OumigoWorker, oumigo_get_or_create_manager
+from oumigo.api import OumiGoWorker, oumigo_get_or_create_manager
 
 
 def test_get_manager_reuses_discovered_lan_manager(monkeypatch):
@@ -115,14 +115,14 @@ def _stub_worker_spawn(monkeypatch, captured):
         api, "_spawn_child",
         lambda argv, env: captured.update(argv=argv, env=env) or types.SimpleNamespace(poll=lambda: None),
     )
-    sentinel = OumigoWorker(manager_url="x", address="10.0.0.9", port=7001, model="m")
+    sentinel = OumiGoWorker(manager_url="x", address="10.0.0.9", port=7001, model="m")
     monkeypatch.setattr(api, "_wait_worker_serving", lambda *_a, **_k: sentinel)
     return sentinel
 
 
 def test_create_worker_reuses_last_manager(monkeypatch):
     """A bare oumigo_create_worker() reuses the manager this process created (no mDNS)."""
-    mgr = api.OumigoManager(
+    mgr = api.OumiGoManager(
         control_url="http://10.0.0.1:7014", data_url="http://10.0.0.1:7012", token="tok"
     )
     monkeypatch.setattr(api, "_last_manager", mgr)
@@ -140,7 +140,7 @@ def test_create_worker_reuses_last_manager(monkeypatch):
 
 def test_create_worker_accepts_manager_handle(monkeypatch):
     """An explicit manager= handle supplies the URL and token; no mDNS is attempted."""
-    mgr = api.OumigoManager(
+    mgr = api.OumiGoManager(
         control_url="http://10.0.0.2:7014", data_url="http://10.0.0.2:7012", token="h-tok"
     )
     monkeypatch.setattr(api, "_last_manager", None)
@@ -172,7 +172,7 @@ class _JsonResp:
 
 def test_metrics_latest_enriches_with_worker_name(monkeypatch):
     """metrics() returns the latest slot per node, labeled with the Worker#N name."""
-    mgr = api.OumigoManager(control_url="http://m", data_url="http://m")
+    mgr = api.OumiGoManager(control_url="http://m", data_url="http://m")
 
     def fake_get(url, **kwargs):
         if url.endswith("/metrics/latest"):
@@ -199,7 +199,7 @@ def test_metrics_latest_enriches_with_worker_name(monkeypatch):
 
 def test_metrics_latest_filters_by_prefix(monkeypatch):
     """prefixes= filters the per-node metric dict client-side for the latest snapshot."""
-    mgr = api.OumigoManager(control_url="http://m", data_url="http://m")
+    mgr = api.OumiGoManager(control_url="http://m", data_url="http://m")
 
     def fake_get(url, **kwargs):
         if url.endswith("/metrics/latest"):
@@ -217,7 +217,7 @@ def test_metrics_latest_filters_by_prefix(monkeypatch):
 
 def test_metrics_since_returns_raw_points(monkeypatch):
     """metrics(since=...) hits /metrics/since with after+prefix and returns raw points."""
-    mgr = api.OumigoManager(control_url="http://m", data_url="http://m")
+    mgr = api.OumiGoManager(control_url="http://m", data_url="http://m")
     seen: dict = {}
 
     def fake_get(url, **kwargs):
@@ -288,8 +288,8 @@ def test_wait_worker_serving_finite_timeout_raises_and_tears_down(monkeypatch):
 
 
 def test_worker_record_matches_on_address_and_port(monkeypatch):
-    """OumigoWorker.state() picks the record for this worker's address:port."""
-    worker = OumigoWorker(
+    """OumiGoWorker.state() picks the record for this worker's address:port."""
+    worker = OumiGoWorker(
         manager_url="http://m", address="10.0.0.9", port=7001, model="m"
     )
 

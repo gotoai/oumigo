@@ -14,7 +14,7 @@ import pytest
 
 from oumigo.api import api
 from oumigo.api.agent import chat as chat_mod
-from oumigo.api.agent.agent import OumigoAgent
+from oumigo.api.agent.agent import OumiGoAgent
 from oumigo.api.agent.tool import tool
 
 
@@ -114,7 +114,7 @@ def _install_stream(monkeypatch, line_batches):
 
 
 def _agent(**kw):
-    return OumigoAgent(data_url="http://d:7012", token=None, **kw)
+    return OumiGoAgent(data_url="http://d:7012", token=None, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -534,12 +534,12 @@ def test_contents_must_be_str(monkeypatch):
 
 
 def test_manager_create_agent_threads_data_url_and_token():
-    mgr = api.OumigoManager(
+    mgr = api.OumiGoManager(
         control_url="http://m:7014", data_url="http://m:7012", token="secret"
     )
     agent = mgr.create_agent(tools=[get_weather], temperature=0.2, max_tokens=128)
 
-    assert isinstance(agent, OumigoAgent)
+    assert isinstance(agent, OumiGoAgent)
     assert agent.data_url == "http://m:7012"
     assert agent.token == "secret"
     assert agent.sampling == {"temperature": 0.2, "max_tokens": 128}
@@ -548,7 +548,7 @@ def test_manager_create_agent_threads_data_url_and_token():
 
 def test_sampling_defaults_reach_the_payload(monkeypatch):
     sent = _install_post(monkeypatch, [_completion(content="ok")])
-    agent = OumigoAgent(data_url="http://d:7012", sampling={"temperature": 0.7})
+    agent = OumiGoAgent(data_url="http://d:7012", sampling={"temperature": 0.7})
 
     agent.create_chat().request("hi")
 

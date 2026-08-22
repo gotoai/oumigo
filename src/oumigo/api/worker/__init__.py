@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from oumigo.api.worker.worker import OumigoWorker
+from oumigo.api.worker.worker import OumiGoWorker
 
-__all__ = ["OumigoWorker"]
+__all__ = ["OumiGoWorker"]

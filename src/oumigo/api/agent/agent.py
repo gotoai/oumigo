@@ -1,10 +1,10 @@
 """The Agent tier — a capability bundle that spawns conversations.
 
-An :class:`OumigoAgent` groups the tools, sampling defaults, and optional guardrail profile
+An :class:`OumiGoAgent` groups the tools, sampling defaults, and optional guardrail profile
 shared by every chat it creates, bound to one manager's data plane (``data_url`` + token). It
 is the entry point of the inference surface: build one with ``manager.create_agent(...)``,
-then call :meth:`OumigoAgent.create_chat` to start a stateful
-:class:`~oumigo.api.agent.chat.OumigoChat`.
+then call :meth:`OumiGoAgent.create_chat` to start a stateful
+:class:`~oumigo.api.agent.chat.OumiGoChat`.
 
 The ``profile`` (a :class:`oumigo.guard.GuardProfile`) is the guardrail bundle every chat
 inherits; the request path is intercepted inside ``oumigo.api.agent.chat`` (see its module
@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from oumigo.api.agent.chat import OumigoChat
+from oumigo.api.agent.chat import OumiGoChat
 from oumigo.api.agent.tool import Tool
 from oumigo.guard import GuardProfile
 
@@ -24,10 +24,10 @@ from oumigo.guard import GuardProfile
 DEFAULT_MAX_ITERATIONS = 5
 
 
-class OumigoAgent:
+class OumiGoAgent:
     """A capability bundle (tools + sampling defaults) bound to one manager's data plane.
 
-    Build via :meth:`oumigo.api.OumigoManager.create_agent`. Each :meth:`create_chat`
+    Build via :meth:`oumigo.api.OumiGoManager.create_agent`. Each :meth:`create_chat`
     spawns a fresh conversation that shares this agent's tools and settings.
     """
 
@@ -53,7 +53,7 @@ class OumigoAgent:
         system: str | None = None,
         max_history_turns: int = 3,
         history: list[dict[str, Any]] | None = None,
-    ) -> OumigoChat:
+    ) -> OumiGoChat:
         """Start a conversation.
 
         Args:
@@ -64,13 +64,13 @@ class OumigoAgent:
                 chat per request from a trusted store). Only ``user``/``assistant`` turns
                 are accepted — a ``system``/``tool`` role is rejected — so a store/client
                 blob can't inject a fake system prompt or tool result. Read the updated
-                conversation back via :attr:`OumigoChat.history` to persist it.
+                conversation back via :attr:`OumiGoChat.history` to persist it.
 
         Returns:
-            A stateful :class:`~oumigo.api.agent.chat.OumigoChat`, inheriting this agent's
+            A stateful :class:`~oumigo.api.agent.chat.OumiGoChat`, inheriting this agent's
             guardrail ``profile``. Not thread-safe: one session, one chat.
         """
-        return OumigoChat(
+        return OumiGoChat(
             self, system=system, max_history_turns=max_history_turns, history=history
         )
 

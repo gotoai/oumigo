@@ -1,4 +1,4 @@
-"""Unit tests for the guardrail waist (oumigo.guard) and its wiring into OumigoChat.
+"""Unit tests for the guardrail waist (oumigo.guard) and its wiring into OumiGoChat.
 
 The pure-type layer (Verdict/GuardChain/GuardProfile) is exercised directly; the chat
 integration reuses the httpx-seam fakes from test_chat so guards are checked end-to-end
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 
 
-from oumigo.api.agent.agent import OumigoAgent
+from oumigo.api.agent.agent import OumiGoAgent
 from oumigo.api.agent.tool import tool
 from oumigo.guard import (
     GuardChain,
@@ -54,7 +54,7 @@ def _profile(fn, points=None, name="test"):
 
 
 def _agent(profile=None, **kw):
-    return OumigoAgent(data_url="http://d:7012", token=None, profile=profile, **kw)
+    return OumiGoAgent(data_url="http://d:7012", token=None, profile=profile, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -338,7 +338,7 @@ def test_stop_aborts_with_stopped_reason(monkeypatch):
 def test_manager_create_agent_threads_profile():
     from oumigo.api import api
 
-    mgr = api.OumigoManager(control_url="http://m:7014", data_url="http://m:7012")
+    mgr = api.OumiGoManager(control_url="http://m:7014", data_url="http://m:7012")
     prof = GuardProfile([FnGuard(lambda p, c: Verdict.allow())], name="p")
     agent = mgr.create_agent(profile=prof)
     assert agent.profile is prof
