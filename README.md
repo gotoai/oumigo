@@ -1,4 +1,4 @@
-# oumigo
+# OumiGo
 
 OumiGo is a vertical-integration toolkit for running and managing **GPU fleets**.
 A GPU fleet is a group of computer instances, running locally or on a cloud environment,
