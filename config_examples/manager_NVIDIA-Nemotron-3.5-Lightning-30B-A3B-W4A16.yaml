@@ -1,0 +1,86 @@
+# oumigo manager configuration (v1).
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_file  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+# The manager reads `manager.yaml` (this file) and `model.yaml` (the single model)
+# from that directory by convention.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Authentication (v1: shared bearer token) ---
+auth:
+  # Path to a file whose contents are the shared bearer token workers must present.
+  # Precedence: $OUMIGO_MANAGER_TOKEN (env / .env) overrides this file.
+  # If neither is set, worker authentication is DISABLED (v1) and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Provisioning backend: how worker nodes come into existence ---
+# LAN    : workers are hand-started and self-register (no manager provisioning).
+# conoha : (future) manager provisions ConoHa VPS instances via the cloud API.
+provider: LAN
+
+# --- Desired scale ---
+# Only meaningful when the manager PROVISIONS workers (cloud / LAN). With static or
+# hand-started LAN workers, the replica count is simply however many workers register.
+replicas: 1
+
+
+model:
+  name: GotoAI-Inc/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W4A16  # int4 W4A16 build of
+                                     # nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W4A16
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
+  tensor_parallel_size: 1
+  # 20.49 GB of weights: 15.61 GB int4 routed experts (128 per MoE layer x 23 layers)
+  # + 0.79 GB int4 Mamba/attention/shared-expert + 2.67 GB bf16 MTP head + 1.41 GB bf16
+  # embeddings and lm_head (untied) + 0.02 GB bf16 routers. ~3B of ~30B params active.
+  gpu_memory_utilization: 0.90
+  # A 52-block hybrid: 23 Mamba-2, 23 MoE, only 6 attention. Just those 6 carry a KV
+  # cache -> ~6 KB/token, so 128k is ~0.8 GB and the full 262144 only ~1.6 GB. The Mamba
+  # blocks hold a fixed recurrent state instead: ~48 MB per CONCURRENT SEQUENCE at the
+  # default fp32 SSM cache, independent of length — that is what concurrency costs here.
+  max_model_len: 131072  # 128k      # null = model default (262144; fine on 32 GB+)
+  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  extra_args: #[]
+    # Runs on released vLLM >= 0.25.1, where NemotronHForCausalLM and the nemotron_v3
+    # reasoning parser are both present.
+    - --mamba-backend
+    - flashinfer
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_coder                    # Nemotron 3.5 emits the same XML tool framing as
+                                     # Qwen3-Coder; vLLM has no `nemotron` tool parser
+    - --reasoning-parser
+    - nemotron_v3
+    # Halves the Mamba state cache if memory is tight. The base model card pairs it with
+    # stochastic rounding to limit the precision loss.
+    #- --mamba-ssm-cache-dtype
+    #- float16
+    #- --enable-mamba-cache-stochastic-rounding
+    #- --mamba-cache-philox-rounds
+    #- "5"
+    # Speculative decoding off the MTP head already in this checkpoint.
+    #- --speculative-config
+    #- '{"method": "mtp", "num_speculative_tokens": 1}'

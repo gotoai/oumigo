@@ -1,0 +1,88 @@
+# oumigo manager configuration (v1).
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_file  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+# The manager reads `manager.yaml` (this file) and `model.yaml` (the single model)
+# from that directory by convention.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Authentication (v1: shared bearer token) ---
+auth:
+  # Path to a file whose contents are the shared bearer token workers must present.
+  # Precedence: $OUMIGO_MANAGER_TOKEN (env / .env) overrides this file.
+  # If neither is set, worker authentication is DISABLED (v1) and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Provisioning backend: how worker nodes come into existence ---
+# LAN    : workers are hand-started and self-register (no manager provisioning).
+# conoha : (future) manager provisions ConoHa VPS instances via the cloud API.
+provider: LAN
+
+# --- Desired scale ---
+# Only meaningful when the manager PROVISIONS workers (cloud / LAN). With static or
+# hand-started LAN workers, the replica count is simply however many workers register.
+replicas: 1
+
+
+# ############################################################################
+# NON-COMMERCIAL MODEL. The EXAONE AI Model License Agreement 1.2 - NC permits
+# use solely for research and educational purposes. Commercial use of the model,
+# of derivatives, OR OF THEIR OUTPUTS is prohibited without a separate written
+# licence from LG Management Development Institute, as is using them to develop
+# or improve competing models. Do not point a production deployment at this.
+# ############################################################################
+model:
+  name: GotoAI-Inc/EXAONE-4.5-33B-W4A16  # int4 W4A16 build of LGAI-EXAONE/EXAONE-4.5-33B
+                                     # (the licence requires the "EXAONE" name prefix)
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/EXAONE-4.5-33B-W4A16
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
+  tensor_parallel_size: 1
+  # 22.75 GB of weights: 15.96 GB int4 MLP and attention linears + 2.57 GB bf16 vision
+  # tower + 3.15 GB bf16 embed_tokens and lm_head (untied) + 1.07 GB bf16 MTP head.
+  # The weights alone exceed 0.90 of a 24 GB card — this needs 32 GB minimum.
+  gpu_memory_utilization: 0.90
+  # 48 sliding layers (window 4096) are bounded at ~0.8 GB per sequence; the 16 full
+  # layers cost ~64 KB/token. 64k ~= 4.9 GB, 128k ~= 9.2 GB, and the full 262144 ~= 17.6
+  # GB — which needs a 48 GB card. 0.90 of 32 GB holds roughly 64k-80k.
+  max_model_len: 65536  # 64k        # null = model default (262144)
+  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  extra_args: #[]
+    # vLLM ships no `exaone` parser. The base model card specifies these BORROWED ones:
+    # EXAONE frames thinking with <think> tags, so the qwen3 reasoning parser applies.
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - hermes
+    - --reasoning-parser
+    - qwen3                          # <think> ... </think> -> reasoning_content
+    - --limit-mm-per-prompt
+    - '{"image": 64}'
+    # Thinking is ON by default in this chat template; disable it per request with
+    # chat_template_kwargs {"enable_thinking": false}.
+    # Speculative decoding off the MTP head already in this checkpoint. The base model
+    # card uses 3 draft tokens.
+    #- --speculative-config
+    #- '{"method": "mtp", "num_speculative_tokens": 3}'
+    #- --language-model-only          # drops the vision tower, frees ~2.57 GB

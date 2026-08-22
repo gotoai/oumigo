@@ -1,0 +1,80 @@
+# oumigo manager configuration (v1).
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_file  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+# The manager reads `manager.yaml` (this file) and `model.yaml` (the single model)
+# from that directory by convention.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Authentication (v1: shared bearer token) ---
+auth:
+  # Path to a file whose contents are the shared bearer token workers must present.
+  # Precedence: $OUMIGO_MANAGER_TOKEN (env / .env) overrides this file.
+  # If neither is set, worker authentication is DISABLED (v1) and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Provisioning backend: how worker nodes come into existence ---
+# LAN    : workers are hand-started and self-register (no manager provisioning).
+# conoha : (future) manager provisions ConoHa VPS instances via the cloud API.
+provider: LAN
+
+# --- Desired scale ---
+# Only meaningful when the manager PROVISIONS workers (cloud / LAN). With static or
+# hand-started LAN workers, the replica count is simply however many workers register.
+replicas: 1
+
+
+model:
+  name: GotoAI-Inc/gemma-4-26B-A4B-it-W4A16  # int4 W4A16 build of google/gemma-4-26B-A4B-it
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/gemma-4-26B-A4B-it-W4A16
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
+  tensor_parallel_size: 1
+  # 15.65 GB of weights: 12.13 GB int4 experts (128 per layer x 30 layers) + 0.87 GB
+  # int4 attention and shared-MLP + 1.48 GB bf16 embed_tokens (tied) + 1.15 GB bf16
+  # vision tower + 0.02 GB bf16 routers. Only ~3.8B of 25.2B parameters are active per
+  # token, so throughput is far better than the footprint suggests.
+  gpu_memory_utilization: 0.90
+  # The cheapest KV of the gemma-4 builds: 25 sliding layers (window 1024) are bounded at
+  # ~0.2 GB per sequence, and only 5 global layers grow, at ~20 KB/token. 128k ~= 2.8 GB.
+  # The full 262144 costs ~5.4 GB and still fits a 24 GB card — raise this if you need it.
+  max_model_len: 131072  # 128k      # null = model default (262144)
+  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  extra_args: #[]
+    # Same vLLM/transformers version interaction as the other gemma-4 models: use
+    # transformers < 5.15 with vLLM 0.25.1-0.27, or vLLM >= 0.28.
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - gemma4
+    - --reasoning-parser
+    - gemma4                         # <|channel>thought ... <channel|> -> reasoning_content
+    # Thinking is OFF by default in this chat template.
+    #- --default-chat-template-kwargs
+    #- '{"enable_thinking": true}'
+    #- --language-model-only          # drops the vision tower, frees ~1.15 GB
+    # Speculative decoding with the vendor's 4-layer assistant drafter. It runs all its
+    # layers in one forward to produce a single draft token, so this must be 1.
+    #- --speculative-config
+    #- '{"method": "mtp", "model": "google/gemma-4-26B-A4B-it-assistant", "num_speculative_tokens": 1}'

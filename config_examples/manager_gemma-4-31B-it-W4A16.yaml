@@ -1,0 +1,78 @@
+# oumigo manager configuration (v1).
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_file  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+# The manager reads `manager.yaml` (this file) and `model.yaml` (the single model)
+# from that directory by convention.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Authentication (v1: shared bearer token) ---
+auth:
+  # Path to a file whose contents are the shared bearer token workers must present.
+  # Precedence: $OUMIGO_MANAGER_TOKEN (env / .env) overrides this file.
+  # If neither is set, worker authentication is DISABLED (v1) and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Provisioning backend: how worker nodes come into existence ---
+# LAN    : workers are hand-started and self-register (no manager provisioning).
+# conoha : (future) manager provisions ConoHa VPS instances via the cloud API.
+provider: LAN
+
+# --- Desired scale ---
+# Only meaningful when the manager PROVISIONS workers (cloud / LAN). With static or
+# hand-started LAN workers, the replica count is simply however many workers register.
+replicas: 1
+
+
+model:
+  name: GotoAI-Inc/gemma-4-31B-it-W4A16  # int4 W4A16 build of google/gemma-4-31B-it
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/gemma-4-31B-it-W4A16
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
+  tensor_parallel_size: 1
+  # 19.07 GB of weights: 15.10 GB int4 LM linears + 2.82 GB bf16 embed_tokens (tied to
+  # the output head) + 1.15 GB bf16 vision tower. No audio tower on this size.
+  gpu_memory_utilization: 0.90
+  # 50 sliding layers (window 1024) are bounded at ~0.8 GB per sequence no matter the
+  # context; only the 10 global layers grow, at ~80 KB/token. So 32k ~= 3.4 GB total and
+  # 128k ~= 11.3 GB. 0.90 of 32 GB comfortably holds 32k-64k; on a 24 GB card this is
+  # marginal even at 32k — add --language-model-only below and expect ~16k.
+  max_model_len: 32768  # 32k        # null = model default (262144 — ~21.8 GB of KV)
+  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  extra_args: #[]
+    # Gemma 4 needs transformers >= 5.10.1, but vLLM <= 0.27.1 cannot serve it with
+    # transformers >= 5.15 (head_dim became a per-layer attribute). Use transformers < 5.15
+    # with vLLM 0.25.1-0.27, or vLLM >= 0.28, which handles both layouts.
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - gemma4
+    - --reasoning-parser
+    - gemma4                         # <|channel>thought ... <channel|> -> reasoning_content
+    # Thinking is OFF by default in this chat template — enable it per request, or here:
+    #- --default-chat-template-kwargs
+    #- '{"enable_thinking": true}'
+    # Text-only serving: frees the 1.15 GB vision tower plus the multimodal profiling
+    # headroom. This is what makes a 24 GB card viable.
+    #- --language-model-only

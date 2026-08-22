@@ -1,0 +1,81 @@
+# oumigo manager configuration (v1).
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_file  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+# The manager reads `manager.yaml` (this file) and `model.yaml` (the single model)
+# from that directory by convention.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Authentication (v1: shared bearer token) ---
+auth:
+  # Path to a file whose contents are the shared bearer token workers must present.
+  # Precedence: $OUMIGO_MANAGER_TOKEN (env / .env) overrides this file.
+  # If neither is set, worker authentication is DISABLED (v1) and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Provisioning backend: how worker nodes come into existence ---
+# LAN    : workers are hand-started and self-register (no manager provisioning).
+# conoha : (future) manager provisions ConoHa VPS instances via the cloud API.
+provider: LAN
+
+# --- Desired scale ---
+# Only meaningful when the manager PROVISIONS workers (cloud / LAN). With static or
+# hand-started LAN workers, the replica count is simply however many workers register.
+replicas: 1
+
+
+model:
+  name: GotoAI-Inc/Qwen3.6-27B-W4A16  # int4 W4A16 build of Qwen/Qwen3.6-27B
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/Qwen3.6-27B-W4A16
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
+  tensor_parallel_size: 1
+  # 19.42 GB of weights: 12.56 GB int4 LM linears + 5.09 GB bf16 embed_tokens/lm_head
+  # + 0.92 GB bf16 vision tower + 0.85 GB bf16 MTP head. The fraction must cover weights
+  # AND KV cache: 0.90 of a 24 GB card leaves ~2.2 GB for KV, which is the 32k below.
+  gpu_memory_utilization: 0.90
+  # 16 of 64 layers use full attention (4 KV heads, head_dim 256) -> ~64 KB/token; the
+  # other 48 are gated DeltaNet with constant-size state. 32k ~= 2.1 GB, 64k ~= 4.2 GB.
+  max_model_len: 32768  # 32k        # null = model default (262144 — needs ~17 GB of KV)
+  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  extra_args: #[]
+    # Runs on released vLLM >= 0.25.1 — Qwen3.6 reuses the Qwen3.5 architecture.
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_coder                    # chat template emits <tool_call><function=..><parameter=..>
+                                     # XML; `qwen3_xml` is an alias for the same parser
+    - --reasoning-parser
+    - qwen3                          # <think> ... </think> -> reasoning_content
+    # Thinking is ON by default. `preserve_thinking` keeps earlier turns' reasoning, which
+    # the base model card recommends for agentic use.
+    #- --default-chat-template-kwargs
+    #- '{"preserve_thinking": true}'
+    # Text-only serving: skips the vision tower and frees ~0.92 GB plus the multimodal
+    # profiling headroom (image and video inputs stop working).
+    #- --language-model-only
+    # Speculative decoding off the MTP head already in this checkpoint — no draft model
+    # to download. Add only after the base config is proven working.
+    #- --speculative-config
+    #- '{"method": "mtp", "num_speculative_tokens": 2}'
