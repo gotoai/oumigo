@@ -52,7 +52,7 @@ model:
   port: 7001                         # vLLM server port on each worker (data plane routes here)
   dtype: auto                        # auto | bfloat16 | float16
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.80
+  gpu_memory_utilization: 0.90
   max_model_len: 65536  # 64k        # null = model default
   max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
   extra_args: #[]

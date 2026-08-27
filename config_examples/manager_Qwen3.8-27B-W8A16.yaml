@@ -43,21 +43,33 @@ replicas: 1
 
 
 model:
-  name: GotoAI-Inc/gemma-4-12B-it-W4A16  # REQUIRED, e.g. google/gemma-4-12B-it
+  name: GotoAI-Inc/Qwen3.8-27B-W8A16  # int4 W4A16 build of Qwen/Qwen3.8-27B
   # Where the weights come from. Unset / null / `none` -> download `name` from the
   # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
   # (each worker checks its own disk; a node without the files can opt out with
   # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
-  storage_location: none            # e.g. file:///srv/models/gemma-4-12b
+  storage_location: none            # e.g. file:///srv/models/Qwen3.8-27B-W4A16
   port: 7001                         # vLLM server port on each worker (data plane routes here)
-  dtype: auto                        # auto | bfloat16 | float16
+  dtype: auto                        # auto -> bfloat16; the int4 weights carry their own scheme
   tensor_parallel_size: 1
+  # 19.42 GB of weights — structurally identical to the 3.6 build: 12.56 GB int4 LM
+  # linears + 5.09 GB bf16 embed_tokens/lm_head + 0.92 GB bf16 vision tower + 0.85 GB
+  # bf16 MTP head. 0.90 of a 24 GB card leaves ~2.2 GB for KV, which is the 32k below.
   gpu_memory_utilization: 0.90
-  max_model_len: 65536  # 64k        # null = model default
+  # 16 of 64 layers use full attention (4 KV heads, head_dim 256) -> ~64 KB/token.
+  max_model_len: 32768  # 32k        # null = model default (262144)
   max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
   extra_args: #[]
+    # Runs on released vLLM >= 0.25.1.
     - --enable-auto-tool-choice
     - --tool-call-parser
-    - gemma4
+    - qwen3_xml                      # chat template emits <tool_call><function=..><parameter=..> XML
     - --reasoning-parser
-    - gemma4
+    - qwen3                          # <think> ... </think> -> reasoning_content
+    # This model's template defaults to reasoning_effort='xhigh', which produces long
+    # deliberation. Request-level chat_template_kwargs still override this default.
+    #- --default-chat-template-kwargs
+    #- '{"reasoning_effort": "low"}'
+    #- --language-model-only          # drops the vision tower, frees ~0.92 GB
+    #- --speculative-config
+    #- '{"method": "mtp", "num_speculative_tokens": 2}'

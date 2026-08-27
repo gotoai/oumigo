@@ -43,7 +43,7 @@ replicas: 1
 
 
 model:
-  name: GotoAI-Inc/gemma-4-12B-it-W4A16  # REQUIRED, e.g. google/gemma-4-12B-it
+  name: google/gemma-4-31B-it-qat-w4a16-ct  # REQUIRED, e.g. google/gemma-4-12B-it
   # Where the weights come from. Unset / null / `none` -> download `name` from the
   # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
   # (each worker checks its own disk; a node without the files can opt out with
