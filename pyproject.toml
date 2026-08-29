@@ -51,7 +51,11 @@ worker = [
     # vLLM 0.25.x) and pulls the matching CUDA wheel transitively. Do NOT install a
     # separate/unpinned torch — vLLM's pin is authoritative and the HF stack below
     # rides on it. See INSTALL.md for the GPU-box flow.
-    "vllm>=0.5",
+    # [audio]: av / soundfile / soxr / scipy. Required for ANY audio input — without it
+    # vLLM binds them as PlaceholderModules and every audio request 500s with
+    # "Please install vllm[audio] for audio support". Both decode backends need it, and
+    # so does the default pyav resampler, so a partial install does not help.
+    "vllm[audio]>=0.5",
 
     # --backend=transformer: HF-Transformers serving (oumigo.service.worker.hf_server). vLLM
     # itself requires transformers v5, so these coexist with vLLM in one venv.
