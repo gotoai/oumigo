@@ -243,7 +243,7 @@ def create_router_app(
             finally:
                 promoter.cancel()
 
-    app = FastAPI(title="oumigo data plane (router)", lifespan=lifespan)
+    app = FastAPI(title="OumiGo data plane (router)", lifespan=lifespan)
 
     async def _forward(request: Request, method: str, path: str) -> Response:
         try:

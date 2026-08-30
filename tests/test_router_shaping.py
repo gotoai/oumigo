@@ -99,7 +99,7 @@ def test_over_limit_drops_trailing_clips_and_keeps_order() -> None:
     content = payload["messages"][0]["content"]
     audio = [p for p in content if p.get("type") == "input_audio"]
     assert len(audio) == 12
-    assert content[0]["type"] == "text" and content[0]["text"].startswith("[oumigo]")
+    assert content[0]["type"] == "text" and content[0]["text"].startswith("[OumiGo]")
     assert content[1] == {"type": "text", "text": "transcribe"}  # the client's own text survives
 
 

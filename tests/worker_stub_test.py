@@ -182,7 +182,7 @@ class StubWorker:
     # --- OpenAI-compatible serving --------------------------------------------
 
     def build_app(self) -> FastAPI:
-        app = FastAPI(title=f"oumigo stub worker {self.index}")
+        app = FastAPI(title=f"OumiGo stub worker {self.index}")
 
         @app.get("/health")
         async def health() -> dict:

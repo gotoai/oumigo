@@ -1,4 +1,4 @@
-# oumigo Python API — Reference
+# OumiGo Python API — Reference
 
 > Status: implemented. The client library lives under `oumigo.api` (the manager/worker
 > *handles*, the spawn/attach functions, and the `agent` inference layer). The *services*

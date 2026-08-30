@@ -466,7 +466,7 @@ class HFWorker:
     # --- OpenAI-compatible serving --------------------------------------------
 
     def build_app(self) -> FastAPI:
-        app = FastAPI(title=f"oumigo HF worker ({self.node_id[:8]})")
+        app = FastAPI(title=f"OumiGo HF worker ({self.node_id[:8]})")
 
         @app.get("/health")
         async def health() -> dict:

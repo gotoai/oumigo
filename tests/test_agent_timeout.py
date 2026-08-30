@@ -214,7 +214,7 @@ def test_expiry_between_round_trips_ends_the_turn(monkeypatch) -> None:
 
     assert resp.finish_reason == "timeout"
     assert len(calls) == 1          # the loop did not start another round-trip
-    assert "[oumigo] Timed out" in resp.text
+    assert "[OumiGo] Timed out" in resp.text
 
 
 def test_partial_answer_survives_a_timeout(monkeypatch) -> None:
@@ -246,7 +246,7 @@ def test_httpx_timeout_is_not_raised_at_the_caller(monkeypatch) -> None:
     resp = _agent(turn_timeout=90.0).create_chat().request("q")   # must not raise
 
     assert resp.finish_reason == "timeout"
-    assert resp.text.strip().startswith("[oumigo] Timed out")
+    assert resp.text.strip().startswith("[OumiGo] Timed out")
 
 
 def test_timeout_is_visible_to_a_streaming_consumer(monkeypatch) -> None:
@@ -254,4 +254,4 @@ def test_timeout_is_visible_to_a_streaming_consumer(monkeypatch) -> None:
     _install_post(monkeypatch, lambda i, t: (_ for _ in ()).throw(httpx.ReadTimeout("x")))
 
     resp = _agent(turn_timeout=90.0).create_chat().request("q", stream=False)
-    assert "[oumigo] Timed out" in "".join(resp)
+    assert "[OumiGo] Timed out" in "".join(resp)

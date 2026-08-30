@@ -124,14 +124,14 @@ Three sources, all implemented: **host** (`worker:*`, stdlib `/proc`), **GPU**
 (`gpu:#N_*`, NVML / nvidia-smi), and **vLLM engine** (`vllm:*`, scraped from the
 local `/metrics`). Each degrades to nothing when unavailable — no GPU, or vLLM not
 yet serving — so the set present at any grid slot reflects what the node can see.
-Names below are the oumigo storage keys, in the `<domain>:<key>` protocol above;
+Names below are the OumiGo storage keys, in the `<domain>:<key>` protocol above;
 per-GPU keys embed the index (e.g. `gpu:#0_util_pct`).
 
 ### Host / node metrics — always on
 
 Source: `/proc` (stdlib file reads), zero dependency.
 
-| oumigo metric | Type | Unit | Description |
+| OumiGo metric | Type | Unit | Description |
 |---|---|---|---|
 | `worker:cpu_cores` | gauge | count | logical CPU cores on the node (constant; the denominator for util %) |
 | `worker:cpu_util_pct` | gauge | 0–100 | CPU used % across all cores over the sample interval |
@@ -153,7 +153,7 @@ else silent (CPU-only node). `#N` is the GPU's sequence number; an individual
 reading that a card doesn't support (e.g. power on some laptops) is skipped as a
 gap, not fatal.
 
-| oumigo metric | Type | Unit | Description |
+| OumiGo metric | Type | Unit | Description |
 |---|---|---|---|
 | `gpu:#N_util_pct` | gauge | 0–100 | GPU utilization |
 | `gpu:#N_vram_used_bytes` | gauge | bytes | VRAM in use |

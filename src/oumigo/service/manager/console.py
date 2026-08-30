@@ -24,7 +24,7 @@ try:
 except ImportError:  # pragma: no cover - readline is stdlib on Linux (mandated platform)
     readline = None  # type: ignore[assignment]
 
-PROMPT = "oumigo> "
+PROMPT = "OumiGo> "
 HISTORY_LENGTH = 200  # commands retained in the console history cache
 
 
@@ -117,7 +117,7 @@ class ManagerConsole:
             return None
 
     def _banner(self) -> None:
-        print(f"oumigo manager {__version__}")
+        print(f"OumiGo manager {__version__}")
         print(f"attached to control plane: {self.base_url}")
         print("type 'help' for commands, 'quit' to exit.")
 
@@ -128,7 +128,7 @@ class ManagerConsole:
         print("  workers           list registered workers (id, ip, port, state, uptime)")
         print("  metrics           show each worker's latest received grid metrics")
         print("  verbose [on|off]  stream server logs to the console (toggle)")
-        print("  version           print the oumigo version")
+        print("  version           print the OumiGo version")
         print("  quit | exit       stop the manager (server + console)")
 
     def _status(self, args: list[str]) -> None:

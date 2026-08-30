@@ -16,7 +16,7 @@ import typer
 
 from oumigo import __version__
 
-app = typer.Typer(help="oumigo — run and manage vLLM replica fleets.", no_args_is_help=True)
+app = typer.Typer(help="OumiGo — run and manage vLLM replica fleets.", no_args_is_help=True)
 
 worker_app = typer.Typer(help="Worker-node coordinator (L1).", no_args_is_help=True)
 manager_app = typer.Typer(help="Manager node: control plane + router (L3).", no_args_is_help=True)
@@ -29,7 +29,7 @@ app.add_typer(cluster_app, name="cluster")
 
 @app.command("version")
 def version() -> None:
-    """Print the oumigo version."""
+    """Print the OumiGo version."""
     typer.echo(__version__)
 
 

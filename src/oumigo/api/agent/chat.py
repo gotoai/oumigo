@@ -60,7 +60,7 @@ _CONNECT_TIMEOUT_S = 10.0
 
 # Appended to the answer when a turn is cut short, so a caller that ignores
 # `finish_reason` still sees that the text is incomplete.
-_TIMEOUT_TEXT = "\n\n[oumigo] Timed out before the model finished this turn."
+_TIMEOUT_TEXT = "\n\n[OumiGo] Timed out before the model finished this turn."
 
 # Surfaced as the answer when a guard blocks/stops without giving a reason.
 _DEFAULT_BLOCK_TEXT = "This request was blocked by a guardrail policy."

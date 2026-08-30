@@ -64,7 +64,7 @@ Shared foundations: `oumigo.config` (typed settings + precedence resolution) and
 ### Using the fleet as an OpenAI-compatible endpoint
 
 Because the data plane speaks the OpenAI API, the manager can drop in wherever an
-OpenAI-compatible base URL is accepted — no oumigo client required. Point the tool at the
+OpenAI-compatible base URL is accepted — no OumiGo client required. Point the tool at the
 manager's router and it addresses the whole fleet through one endpoint:
 
 ```
@@ -90,12 +90,12 @@ oumigo version
 > On a GPU worker box, do **not** install `torch` separately — vLLM hard-pins it and pulls
 > the matching CUDA wheel transitively.
 
-To use oumigo from another project, add it as a dependency (`pip install oumigo`, or the
+To use OumiGo from another project, add it as a dependency (`pip install oumigo`, or the
 `[worker]` / `[manager]` extra as needed).
 
 ## Development
 
-Working on oumigo itself uses an editable install from a source checkout:
+Working on OumiGo itself uses an editable install from a source checkout:
 
 ```bash
 # from oumigo/

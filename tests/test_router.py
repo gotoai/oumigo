@@ -271,7 +271,7 @@ def test_audio_cap_trims_the_forwarded_body_and_reports_it(upstream) -> None:
     assert resp.status_code == 200
     assert len(_forwarded_audio(_MockVLLM.last_body)) == 2
     note = _MockVLLM.last_body["messages"][0]["content"][0]
-    assert note["type"] == "text" and note["text"].startswith("[oumigo]")
+    assert note["type"] == "text" and note["text"].startswith("[OumiGo]")
 
     assert resp.headers["x-oumigo-audio-trimmed"] == "true"
     assert resp.headers["x-oumigo-audio-limit-seconds"] == "60"

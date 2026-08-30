@@ -155,7 +155,7 @@ def _note(kept_s: float, dropped: int, total: int, limit_s: float) -> dict[str, 
     return {
         "type": "text",
         "text": (
-            f"[oumigo] This fleet processes at most {limit_s / 60:.0f} minutes of audio "
+            f"[OumiGo] This fleet processes at most {limit_s / 60:.0f} minutes of audio "
             f"per request. {dropped} of {total} audio clips were removed before the model "
             f"saw them; only the first {kept_s / 60:.1f} minutes were processed. "
             f"Say so in your reply, and tell the user to send the rest in a new request."

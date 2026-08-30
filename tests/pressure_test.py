@@ -1,6 +1,6 @@
 """Pressure-test prompt set — 20 questions × 10 languages.
 
-A fixed corpus of general-purpose LLM prompts for load/stress testing oumigo
+A fixed corpus of general-purpose LLM prompts for load/stress testing OumiGo
 worker nodes (vLLM). The mix spans reasoning, coding, math, creative, explanation,
 and long- vs short-form generation so it exercises different output lengths and
 decode paths. The same 20 questions are provided in ten languages to also exercise
@@ -761,7 +761,7 @@ def _bool(value: str) -> bool:
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Concurrent pressure test for an oumigo worker (OpenAI-compatible vLLM API).",
+        description="Concurrent pressure test for an OumiGo worker (OpenAI-compatible vLLM API).",
     )
     p.add_argument("--host", default="localhost", help="server host (default: localhost)")
     p.add_argument("--port", type=int, default=7012,

@@ -1,4 +1,4 @@
-"""oumigo — a vertical-integration toolkit for running vLLM replica fleets."""
+"""OumiGo — a vertical-integration toolkit for running vLLM replica fleets."""
 
 from oumigo.__about__ import __version__
 from oumigo.api.agent import (

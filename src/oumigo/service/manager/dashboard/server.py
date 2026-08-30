@@ -57,7 +57,7 @@ def create_dashboard_app(control_url: str, *, poll_interval_s: float = 5.0) -> F
                 stop.set()
                 task.cancel()
 
-    app = FastAPI(title="oumigo reporting plane (dashboard)", lifespan=lifespan)
+    app = FastAPI(title="OumiGo reporting plane (dashboard)", lifespan=lifespan)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:

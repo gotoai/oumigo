@@ -16,7 +16,7 @@ from oumigo.service.manager.dashboard.server import run_dashboard
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m oumigo.service.manager.dashboard",
-        description="oumigo reporting-plane dashboard (V1.0).",
+        description="OumiGo reporting-plane dashboard (V1.0).",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Web bind host.")  # noqa: S104
     parser.add_argument("--port", type=int, default=7080, help="Web bind port (default 7080).")

@@ -401,7 +401,7 @@ class HFServer:
         self.stats = _VLLMStats()
 
     def build_app(self) -> FastAPI:
-        app = FastAPI(title=f"oumigo HF server ({self.engine.model_id})")
+        app = FastAPI(title=f"OumiGo HF server ({self.engine.model_id})")
 
         @app.get("/health")
         async def health() -> dict:

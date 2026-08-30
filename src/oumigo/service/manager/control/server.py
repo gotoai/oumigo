@@ -113,7 +113,7 @@ def create_app(
                         pass
                 await aiozc.async_close()
 
-    app = FastAPI(title="oumigo manager control plane", lifespan=lifespan)
+    app = FastAPI(title="OumiGo manager control plane", lifespan=lifespan)
 
     @app.get("/spec")
     async def spec() -> dict:
