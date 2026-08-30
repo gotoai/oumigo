@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import random
+import struct
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -135,9 +137,12 @@ class _MockVLLM(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    last_body: dict | None = None   # what the router actually forwarded, for cap tests
+
     def do_POST(self):  # noqa: N802
         n = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(n) or b"{}")
+        _MockVLLM.last_body = body
         self._json({"echo_model": body.get("model"), "path": self.path})
 
     def _json(self, obj):
@@ -159,11 +164,11 @@ def upstream():
     srv.shutdown()
 
 
-def _router_app(upstream_addr):
+def _router_app(upstream_addr, **spec_kwargs):
     host, port = upstream_addr
     reg = Registry()
     _register(reg, "w1", host, NodeState.SERVING)
-    return create_router_app(reg, NodeSpec(model="acme/mock", port=port))
+    return create_router_app(reg, NodeSpec(model="acme/mock", port=port, **spec_kwargs))
 
 
 def test_forward_chat_completion(upstream) -> None:
@@ -216,3 +221,82 @@ def test_healthz_reports_worker_count(upstream) -> None:
     with TestClient(_router_app(upstream)) as client:
         body = client.get("/healthz").json()
     assert body == {"status": "ok", "healthy_workers": 1}
+
+
+# --- model-capability caps (end-to-end through the proxy) -----------------------
+
+
+def _wav30() -> str:
+    """30 seconds of 16 kHz mono PCM, base64 — one Kari audio item."""
+    data = b"\0" * (30 * 32000)
+    header = (
+        b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+        + b"data" + struct.pack("<I", len(data))
+    )
+    return base64.b64encode(header + data).decode()
+
+
+def _audio_request(clips: int, **extra) -> dict:
+    part = {"type": "input_audio", "input_audio": {"data": _wav30(), "format": "wav"}}
+    return {
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "transcribe"}, *([part] * clips)
+        ]}],
+        **extra,
+    }
+
+
+def _forwarded_audio(body: dict) -> list:
+    parts = body["messages"][0]["content"]
+    return [p for p in parts if p.get("type") == "input_audio"]
+
+
+def test_caps_are_off_unless_configured(upstream) -> None:
+    _MockVLLM.last_body = None
+    with TestClient(_router_app(upstream)) as client:      # no caps in the NodeSpec
+        resp = client.post("/v1/chat/completions", json=_audio_request(6))
+    assert resp.status_code == 200
+    assert len(_forwarded_audio(_MockVLLM.last_body)) == 6   # nothing trimmed
+    assert "max_tokens" not in _MockVLLM.last_body           # nothing clamped
+    assert "x-oumigo-audio-trimmed" not in resp.headers
+
+
+def test_audio_cap_trims_the_forwarded_body_and_reports_it(upstream) -> None:
+    _MockVLLM.last_body = None
+    app = _router_app(upstream, max_audio_seconds=60.0)     # 2 clips' worth
+    with TestClient(app) as client:
+        resp = client.post("/v1/chat/completions", json=_audio_request(6))
+
+    assert resp.status_code == 200
+    assert len(_forwarded_audio(_MockVLLM.last_body)) == 2
+    note = _MockVLLM.last_body["messages"][0]["content"][0]
+    assert note["type"] == "text" and note["text"].startswith("[oumigo]")
+
+    assert resp.headers["x-oumigo-audio-trimmed"] == "true"
+    assert resp.headers["x-oumigo-audio-limit-seconds"] == "60"
+    assert resp.headers["x-oumigo-audio-clips-dropped"] == "4/6"
+
+
+def test_output_clamp_bounds_the_forwarded_body(upstream) -> None:
+    _MockVLLM.last_body = None
+    app = _router_app(upstream, max_output_tokens=4096)
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions", json=_audio_request(1, max_tokens=100000))
+    assert _MockVLLM.last_body["max_tokens"] == 4096
+
+
+def test_output_clamp_applies_when_the_client_named_no_limit(upstream) -> None:
+    _MockVLLM.last_body = None
+    app = _router_app(upstream, max_output_tokens=4096)
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions", json=_audio_request(1))
+    assert _MockVLLM.last_body["max_tokens"] == 4096
+
+
+def test_caps_do_not_touch_the_completions_endpoint(upstream) -> None:
+    _MockVLLM.last_body = None
+    app = _router_app(upstream, max_output_tokens=4096)
+    with TestClient(app) as client:
+        client.post("/v1/completions", json={"prompt": "hi"})
+    assert "max_tokens" not in _MockVLLM.last_body

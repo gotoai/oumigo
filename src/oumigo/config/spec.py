@@ -57,6 +57,22 @@ class NodeSpec(BaseModel):
     max_model_len: int | None = Field(
         default=None, description="Max context length; None uses the model default."
     )
+
+    # Router-side capability caps (like `max_concurrent_requests`, these never reach
+    # `vllm serve`). They encode limits of the *model* the fleet serves, which only the
+    # manager knows — see `oumigo.service.manager.router.shaping` for the measurements.
+    max_audio_seconds: float | None = Field(
+        default=None, gt=0,
+        description="Cap on total audio in one chat request, in seconds. Audio past it "
+                    "is trimmed whole-clip and the model is told; the response carries "
+                    "`x-oumigo-audio-*` headers. None disables the cap.",
+    )
+    max_output_tokens: int | None = Field(
+        default=None, ge=1,
+        description="Ceiling on a request's `max_tokens`, also applied when the client "
+                    "sends none. Bounds a model that degenerates into repetition instead "
+                    "of letting it hold a worker slot. None disables the clamp.",
+    )
     download_dir: str | None = Field(
         default=None, description="Where vLLM downloads weights; None uses HF_HOME / the HF default."
     )

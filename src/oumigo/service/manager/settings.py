@@ -82,6 +82,8 @@ def build_node_spec(config: dict) -> NodeSpec | None:
         tensor_parallel_size=int(model.get("tensor_parallel_size", 1)),
         gpu_memory_utilization=float(model.get("gpu_memory_utilization", 0.80)),
         max_model_len=model.get("max_model_len"),
+        max_audio_seconds=model.get("max_audio_seconds"),
+        max_output_tokens=model.get("max_output_tokens"),
         download_dir=model.get("download_dir"),
         extra_args=list(model.get("extra_args") or []),
     )

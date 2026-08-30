@@ -55,6 +55,23 @@ model:
   gpu_memory_utilization: 0.90
   max_model_len: 65536  # 64k        # null = model default
   max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+
+  # --- Router-side capability caps (enforced by the manager, never sent to vLLM) ---
+  # Measured on this checkpoint: one audio item is hard-capped by the processor at
+  # audio_seq_length (750 tokens x 40 ms = 30 s) and anything longer is silently dropped,
+  # so clients must chunk. Total audio is the limit that actually bites: past ~8 minutes
+  # the model stops emitting new text and repeats a block until it hits the output
+  # ceiling. The collapse is stochastic (24 clips came back clean while 20 did not), so
+  # 6 minutes is the shipped value and 8 the highest that was ever trusted.
+  # Audio past the cap is trimmed whole-clip, the model is told in the prompt, and the
+  # response carries x-oumigo-audio-* headers.
+  max_audio_seconds: 360             # 6 min. null / omitted = no cap.
+  # Bounds the repetition loop directly: without it a degenerate generation runs to the
+  # server ceiling and holds the worker slot, which a client cannot distinguish from a
+  # hang. Also applied when the client sends no max_tokens at all — that is exactly the
+  # shape of request that ran away. Matches oumi-gateway's own clamp.
+  max_output_tokens: 4096            # null / omitted = no clamp.
+
   extra_args: #[]
     - --enable-auto-tool-choice
     - --tool-call-parser

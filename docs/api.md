@@ -384,6 +384,47 @@ the thinking; without it, `resp.reasoning` is `""`.
 > fetches its spec from the manager at startup, so a change requires **restarting the
 > manager and the worker**.
 
+**Audio input** requires the worker's vLLM to carry its `audio` extra (`pip install
+"vllm[audio]"`, which `oumigo[worker]` now pulls in). Without it every request containing
+audio fails with HTTP 500 `Please install vllm[audio] for audio support` — and because the
+missing modules are bound as placeholders at import time, installing them under a running
+worker changes nothing until it restarts.
+
+**Capability caps** are two optional `model:` keys enforced by the *router*, not by vLLM.
+They are off unless set:
+
+```yaml
+model:
+  max_audio_seconds: 360     # total audio per request; over-long audio is trimmed
+  max_output_tokens: 4096    # ceiling on max_tokens, also applied when the client sends none
+```
+
+They exist because a model's real limits are fleet knowledge — the router is the only
+component that knows which model the fleet serves — and because tripping them produces no
+usable error from vLLM. On `google/gemma-4-12B-it-qat-w4a16-ct`, one audio item is capped
+by the processor at 30 s (`audio_seq_length` 750 × 40 ms) and anything longer is dropped
+**silently**, so clients chunk; past roughly 8 minutes of total audio the model stops
+producing new text and repeats a block until it hits the output ceiling, which from the
+client is indistinguishable from a hang.
+
+When the audio cap trips, whole clips are dropped from the end (the manager has no decoder
+and cannot re-encode a partial clip), a note is prepended to the message so the model can
+say what happened, and the response carries:
+
+| Header | Meaning |
+| --- | --- |
+| `x-oumigo-audio-trimmed` | `true` — present only when something was dropped |
+| `x-oumigo-audio-limit-seconds` | the configured cap |
+| `x-oumigo-audio-submitted-seconds` | audio the client sent, as the model counts it |
+| `x-oumigo-audio-processed-seconds` | audio that survived |
+| `x-oumigo-audio-clips-dropped` | `dropped/total` |
+
+Budgeting counts each clip as `min(measured, 30 s)`, since 30 s is all the model ingests
+from one item however long it is. WAV duration is read from the RIFF header; any other
+container is billed at the 30 s ceiling. Note this overlaps oumi-gateway, which shapes
+requests for Kari traffic and clamps `max_tokens` itself — the router's copy is defence in
+depth for anything reaching the fleet without a gateway in front.
+
 ---
 
 ## Notes & limits

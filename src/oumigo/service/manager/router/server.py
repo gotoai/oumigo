@@ -29,6 +29,14 @@ Model field: a client **may** send a `model` in the request body, but the router
 manager configured, handed to every worker at registration). The homogeneous fleet
 serves exactly one model, so the manager is the source of truth — a client can't 404
 by naming a model the worker's vLLM doesn't serve.
+
+Capability caps: on `/v1/chat/completions` the router may also trim over-long audio
+and clamp `max_tokens`, both **off unless `model.max_audio_seconds` /
+`model.max_output_tokens` are configured**. These are limits of the *model* rather
+than business policy — the router is the only component that knows which model the
+fleet serves — so they live here even though request shaping otherwise belongs to a
+gateway in front. See `oumigo.service.manager.router.shaping` for what was measured
+and why. A trimmed request comes back with `x-oumigo-audio-*` response headers.
 """
 
 from __future__ import annotations
@@ -49,6 +57,11 @@ from fastapi.routing import APIRoute
 from oumigo import __version__
 from oumigo.config.spec import NodeSpec
 from oumigo.service.manager.control.registry import NodeRecord, Registry
+from oumigo.service.manager.router.shaping import (
+    cap_audio,
+    clamp_output_tokens,
+    shaping_headers,
+)
 from oumigo.protocol.states import NodeState
 
 log = logging.getLogger("oumigo.service.manager.router")
@@ -63,6 +76,8 @@ _DROP_RESPONSE = {
     "keep-alive",
     "content-type",       # carried separately as the response media_type
 }
+
+CHAT_PATH = "/v1/chat/completions"  # the only path carrying messages worth shaping
 
 DEFAULT_QUEUE_TIMEOUT_S = 300.0  # give up (503) if all workers stay saturated this long
 _PROMOTE_INTERVAL_S = 0.2        # re-check the queue this often (catches newly-joined workers)
@@ -211,6 +226,9 @@ def create_router_app(
     default_capacity = node_spec.max_concurrent_requests if node_spec else 4
     vllm_port = node_spec.port if node_spec else None
     fleet_model = node_spec.model if node_spec else None  # authoritative model name
+    # Capability caps (None = off). Fleet knowledge: only the manager knows the model.
+    max_audio_seconds = node_spec.max_audio_seconds if node_spec else None
+    max_output_tokens = node_spec.max_output_tokens if node_spec else None
     pool = WorkerPool(registry, default_capacity, queue_timeout)
 
     @asynccontextmanager
@@ -257,6 +275,7 @@ def create_router_app(
             # with the fleet's real model name (spec: the client's value is ignored, the
             # manager is authoritative). Non-JSON / non-dict bodies pass through untouched.
             streaming = False
+            extra_headers: dict[str, str] = {}
             if body:
                 try:
                     payload = json.loads(body)
@@ -264,8 +283,19 @@ def create_router_app(
                     payload = None
                 if isinstance(payload, dict):
                     streaming = bool(payload.get("stream"))
+                    mutated = False
                     if fleet_model is not None:
                         payload["model"] = fleet_model
+                        mutated = True
+                    if path == CHAT_PATH:
+                        # Capability caps: trim audio the model cannot use, and bound the
+                        # reply so a degenerate generation can't hold the slot forever.
+                        shaping = cap_audio(payload, max_audio_seconds)
+                        if shaping.trimmed:
+                            extra_headers = shaping_headers(shaping)
+                            mutated = True
+                        mutated |= clamp_output_tokens(payload, max_output_tokens)
+                    if mutated:
                         body = json.dumps(payload).encode()
 
             if streaming:
@@ -275,14 +305,14 @@ def create_router_app(
                 return StreamingResponse(
                     _relay(upstream, _release),
                     status_code=upstream.status_code,
-                    headers=_filter_response_headers(upstream),
+                    headers={**_filter_response_headers(upstream), **extra_headers},
                     media_type=upstream.headers.get("content-type"),
                 )
             upstream = await client.request(method, url, content=body or None, headers=headers)
             response = Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
-                headers=_filter_response_headers(upstream),
+                headers={**_filter_response_headers(upstream), **extra_headers},
                 media_type=upstream.headers.get("content-type"),
             )
             _release()
@@ -298,10 +328,10 @@ def create_router_app(
             _release()
             raise
 
-    @app.post("/v1/chat/completions")
+    @app.post(CHAT_PATH)
     async def chat_completions(request: Request) -> Response:
         """proxy an OpenAI chat completion to a healthy worker vLLM"""
-        return await _forward(request, "POST", "/v1/chat/completions")
+        return await _forward(request, "POST", CHAT_PATH)
 
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
