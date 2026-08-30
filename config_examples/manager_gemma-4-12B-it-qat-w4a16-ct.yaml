@@ -42,6 +42,23 @@ provider: LAN
 replicas: 1
 
 
+# --- Inference-client defaults, served to clients at GET /agent-defaults ---------
+# These bind `oumigo.api.agent` (the Python client), not the manager or the workers.
+# They live here because "how long may one turn take against this model?" is fleet
+# policy. A client that passes its own values ignores these; a client that cannot
+# reach the manager falls back to no timeout at all. Both are seconds; null = no limit.
+agent:
+  # Wall clock for ONE request(), spanning every tool-loop round-trip and tool call.
+  # This is the number an end user experiences, which is why it is the primary control:
+  # a per-request timeout would silently multiply by max_iterations (default 5).
+  turn_timeout: 90.0
+  # How long one round-trip may return NO bytes before it is abandoned. Secondary —
+  # it catches a dead connection or a stalled worker inside the turn budget.
+  # NOTE: a value above turn_timeout can never fire, since the turn deadline always
+  # bites first. Set it below turn_timeout for it to mean anything on its own.
+  stall_timeout: 120.0
+
+
 model:
   name: google/gemma-4-12B-it-qat-w4a16-ct  # REQUIRED, e.g. google/gemma-4-12B-it
   # Where the weights come from. Unset / null / `none` -> download `name` from the

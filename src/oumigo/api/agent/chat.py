@@ -10,6 +10,14 @@ manager's data plane (``data_url``), which the router proxies to a SERVING worke
 the model asks to call a tool, the loop here executes the matching Python callback, feeds
 the result back, and continues — until the model returns prose or the iteration cap is hit.
 
+**Timeouts.** When the agent resolves a ``turn_timeout`` (from its constructor or the
+fleet's ``agent:`` block), :meth:`OumiGoChat.request` arms a wall-clock deadline for the
+*whole* turn. It is checked before every round-trip and after every tool call, and the
+remaining budget is handed to httpx as each request's read timeout so a single slow call
+cannot overrun it. Expiry ends the loop with ``finish_reason="timeout"``, preserving the
+partial answer and appending a visible marker. ``stall_timeout`` bounds one round-trip's
+silence within that budget. Neither set = wait indefinitely, as before.
+
 **Guardrails.** When the agent carries a non-empty :class:`oumigo.guard.GuardProfile`, the
 loop consults it at the five intercept points — ``USER_INPUT`` (in :meth:`request`/:meth:`_run`),
 ``ASSEMBLED_PROMPT`` (every round-trip, in :meth:`_complete_turn`), ``TOOL_CALL`` / ``TOOL_RESULT``
@@ -27,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Generator, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -44,8 +53,14 @@ log = logging.getLogger("oumigo.api.agent.chat")
 # value we send is a placeholder that only has to satisfy the OpenAI schema.
 _MODEL_PLACEHOLDER = "oumigo"
 
-# No total read timeout — a long generation must not be cut off; cap only the connect.
-_TIMEOUT = httpx.Timeout(None, connect=10.0)
+# Connect is always capped; the read side comes from the fleet's `agent:` block (see
+# OumiGoAgent.turn_timeout / .stall_timeout). Unset means no read timeout at all — a long
+# generation is not cut off, which is the behavior from before timeouts existed.
+_CONNECT_TIMEOUT_S = 10.0
+
+# Appended to the answer when a turn is cut short, so a caller that ignores
+# `finish_reason` still sees that the text is incomplete.
+_TIMEOUT_TEXT = "\n\n[oumigo] Timed out before the model finished this turn."
 
 # Surfaced as the answer when a guard blocks/stops without giving a reason.
 _DEFAULT_BLOCK_TEXT = "This request was blocked by a guardrail policy."
@@ -70,6 +85,11 @@ class OumiGoChat:
         self._history: list[dict[str, Any]] = _normalize_history(history)
         self._trim_history()
         self._url = f"{agent.data_url}/v1/chat/completions"
+        # Resolved once here (the properties may consult the fleet) so a turn's budget
+        # cannot shift mid-loop.
+        self._turn_timeout = agent.turn_timeout
+        self._stall_timeout = agent.stall_timeout
+        self._deadline: float | None = None
         self._headers = {"Authorization": f"Bearer {agent.token}"} if agent.token else {}
         # Guardrail fast path: everything below is skipped unless a non-empty profile is set,
         # keeping the unguarded request path identical to the original.
@@ -103,6 +123,11 @@ class OumiGoChat:
         repeat) until the model returns prose or ``max_iterations`` model round-trips are
         reached (``finish_reason="max_iterations"``). The (user, final-answer) exchange is
         appended to this chat's history.
+
+        Bounded by the agent's ``turn_timeout`` when one is set (fleet-declared or passed
+        explicitly): the budget covers this whole call — every round-trip and every tool
+        execution — and running out ends the turn with ``finish_reason="timeout"``,
+        keeping whatever text was produced. Unset, the call waits indefinitely.
 
         Args:
             contents: The user's message (plain string).
@@ -150,9 +175,29 @@ class OumiGoChat:
             user_contents = contents if isinstance(contents, str) else user_contents
             messages[-1] = {"role": "user", "content": user_contents}
 
+        # The budget covers the WHOLE turn — every round-trip plus every tool call —
+        # because that is the wait an end user actually experiences. A per-request
+        # timeout would silently multiply by `max_iterations`.
+        self._deadline = (
+            time.monotonic() + self._turn_timeout if self._turn_timeout else None
+        )
+
         reason = "max_iterations"
         for _ in range(self._agent.max_iterations):
-            assistant, finish, answer = yield from self._complete_turn(resp, messages, stream)
+            if self._expired():
+                reason = "timeout"
+                break
+            try:
+                assistant, finish, answer = yield from self._complete_turn(
+                    resp, messages, stream
+                )
+            except httpx.TimeoutException:
+                # Whatever was streamed before this stays on the response: a short
+                # answer with finish_reason="timeout" beats losing it to an exception.
+                log.warning("turn timed out (turn=%s stall=%s)",
+                            self._turn_timeout, self._stall_timeout)
+                reason = "timeout"
+                break
             if assistant is None:  # POINT 2 (assembled prompt) halted the turn
                 reason = finish or "blocked"
                 break
@@ -182,8 +227,18 @@ class OumiGoChat:
                     reason = "stopped" if tverdict.stops else "blocked"
                     halted = True
                     break
+                # A tool body is plain Python with no deadline of its own; the budget is
+                # only observable between calls, so a single slow tool can still overrun
+                # it. This at least stops the loop from starting more work.
+                if self._expired():
+                    reason = "timeout"
+                    halted = True
+                    break
             if halted:
                 break
+        if reason == "timeout":
+            resp.text += _TIMEOUT_TEXT
+            yield "answer", _TIMEOUT_TEXT
         resp.finish_reason = reason
         self._remember(user_contents, resp.text)
 
@@ -454,10 +509,33 @@ class OumiGoChat:
 
     # -- HTTP --------------------------------------------------------------- #
 
+    def _remaining(self) -> float | None:
+        """Seconds left in this turn's budget, or None when it is unbounded."""
+        if self._deadline is None:
+            return None
+        return self._deadline - time.monotonic()
+
+    def _expired(self) -> bool:
+        remaining = self._remaining()
+        return remaining is not None and remaining <= 0
+
+    def _timeout(self) -> httpx.Timeout:
+        """Read budget for one round-trip: the stall limit, never past the turn deadline.
+
+        Handing the remaining turn budget to httpx is what keeps the *last* round-trip
+        from overrunning the deadline — checking the clock between round-trips alone
+        would let a single slow call blow the whole budget.
+        """
+        read = self._stall_timeout
+        remaining = self._remaining()
+        if remaining is not None:
+            read = remaining if read is None else min(read, remaining)
+        return httpx.Timeout(read, connect=_CONNECT_TIMEOUT_S)
+
     def _post_json(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         resp = httpx.post(
             self._url, json=self._payload(messages, stream=False),
-            headers=self._headers, timeout=_TIMEOUT,
+            headers=self._headers, timeout=self._timeout(),
         )
         _raise_for_status(resp.status_code, resp)
         return resp.json()
@@ -466,7 +544,7 @@ class OumiGoChat:
         """Yield parsed SSE events from a streaming completion (drops the ``[DONE]`` marker)."""
         with httpx.stream(
             "POST", self._url, json=self._payload(messages, stream=True),
-            headers=self._headers, timeout=_TIMEOUT,
+            headers=self._headers, timeout=self._timeout(),
         ) as resp:
             if resp.status_code != 200:
                 body = resp.read().decode(errors="replace")

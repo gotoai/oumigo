@@ -39,7 +39,8 @@ class OumiGoResponse:
             across the request's turns and kept out of ``text``. Populated only when the
             worker's vLLM runs a ``--reasoning-parser``; ``""`` otherwise. Output-only —
             for display/debugging, never fed back to the model (see the class notes).
-        finish_reason: Why generation stopped — ``"stop"``, ``"length"``, or
+        finish_reason: Why generation stopped — ``"stop"``, ``"length"``, ``"timeout"``
+            (the turn's wall-clock budget ran out; ``text`` holds the partial answer), or
             ``"max_iterations"`` when the tool loop hit its cap without a final answer;
             ``"blocked"`` / ``"stopped"`` when a guardrail ended the turn / aborted the request.
         tool_calls_made: One ``{"name", "arguments", "result"}`` entry per tool the loop

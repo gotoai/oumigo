@@ -221,6 +221,7 @@ def create_router_app(
     registry: Registry,
     node_spec: NodeSpec | None = None,
     queue_timeout: float = DEFAULT_QUEUE_TIMEOUT_S,
+    agent_defaults: dict[str, float | None] | None = None,
 ) -> FastAPI:
     """Build the data-plane FastAPI app that proxies to healthy worker vLLMs."""
     default_capacity = node_spec.max_concurrent_requests if node_spec else 4
@@ -342,6 +343,11 @@ def create_router_app(
     async def models(request: Request) -> Response:
         """list the model(s) served by the fleet"""
         return await _forward(request, "GET", "/v1/models")
+
+    @app.get("/agent-defaults")
+    async def agent_defaults_() -> dict:
+        """client-side defaults the fleet declares (see `manager.yaml` `agent:`)"""
+        return dict(agent_defaults or {"turn_timeout": None, "stall_timeout": None})
 
     @app.get("/healthz")
     async def healthz() -> dict:

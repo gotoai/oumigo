@@ -35,6 +35,7 @@ from oumigo.service.manager.control.store import MetricStore
 from oumigo.service.manager.router.server import create_router_app
 from oumigo.service.manager.settings import (
     build_node_spec,
+    get_agent_defaults,
     get_dashboard,
     get_data_plane,
     load_manager_yaml,
@@ -252,7 +253,8 @@ def run_server(
         reaper_forget_after=forget_after,
         node_spec=node_spec,
     )
-    router_app = create_router_app(registry, node_spec)
+    router_app = create_router_app(registry, node_spec,
+                                   agent_defaults=get_agent_defaults(manager_config))
 
     log.info(
         "manager control plane on %s:%d | data plane on %s:%d "

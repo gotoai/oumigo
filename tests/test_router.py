@@ -300,3 +300,19 @@ def test_caps_do_not_touch_the_completions_endpoint(upstream) -> None:
     with TestClient(app) as client:
         client.post("/v1/completions", json={"prompt": "hi"})
     assert "max_tokens" not in _MockVLLM.last_body
+
+
+def test_agent_defaults_are_served_to_clients(upstream) -> None:
+    app = _router_app(upstream)   # no agent: block configured
+    with TestClient(app) as client:
+        assert client.get("/agent-defaults").json() == {
+            "turn_timeout": None, "stall_timeout": None,
+        }
+
+    host, port = upstream
+    reg = Registry()
+    _register(reg, "w1", host, NodeState.SERVING)
+    app = create_router_app(reg, NodeSpec(model="acme/mock", port=port),
+                            agent_defaults={"turn_timeout": 90.0, "stall_timeout": 45.0})
+    with TestClient(app) as client:
+        assert client.get("/agent-defaults").json()["turn_timeout"] == 90.0

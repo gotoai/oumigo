@@ -46,6 +46,36 @@ def get_data_plane(config: dict) -> tuple[str, int]:
     )
 
 
+def get_agent_defaults(config: dict) -> dict[str, float | None]:
+    """Client-side agent defaults from the `agent:` block, served to clients.
+
+    These bind the *inference client* (`oumigo.api.agent`), not the manager or the
+    workers — but they are fleet policy ("how long may one turn take against this
+    model?"), so the fleet declares them and the router hands them out at
+    `GET /agent-defaults`. A client that passes its own values explicitly ignores
+    these; an unreachable manager just means no timeout, as before.
+
+    Both are seconds; absent or `null` means no limit.
+    """
+    block = config.get("agent") or {}
+    return {
+        "turn_timeout": _opt_seconds(block.get("turn_timeout"), "agent.turn_timeout"),
+        "stall_timeout": _opt_seconds(block.get("stall_timeout"), "agent.stall_timeout"),
+    }
+
+
+def _opt_seconds(value: object, field: str) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be a number of seconds, got {value!r}") from None
+    if seconds <= 0:
+        raise ValueError(f"{field} must be positive, got {seconds}")
+    return seconds
+
+
 def get_dashboard(config: dict) -> tuple[bool, str, int]:
     """The reporting-plane dashboard's enabled flag + bind host/port from `dashboard`.
 

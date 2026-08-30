@@ -114,6 +114,10 @@ def _install_stream(monkeypatch, line_batches):
 
 
 def _agent(**kw):
+    # Explicit None keeps these tests offline: an unset timeout would send the agent
+    # to the fleet's /agent-defaults. Timeout behavior has its own module.
+    kw.setdefault("turn_timeout", None)
+    kw.setdefault("stall_timeout", None)
     return OumiGoAgent(data_url="http://d:7012", token=None, **kw)
 
 

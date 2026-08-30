@@ -390,6 +390,35 @@ audio fails with HTTP 500 `Please install vllm[audio] for audio support` — and
 missing modules are bound as placeholders at import time, installing them under a running
 worker changes nothing until it restarts.
 
+**Client timeouts** are declared in a top-level `agent:` block and served to clients at
+`GET /agent-defaults` on the data plane:
+
+```yaml
+agent:
+  turn_timeout: 90.0     # wall clock for one request(), across the whole tool loop
+  stall_timeout: 45.0    # one round-trip may return no bytes for this long
+```
+
+These bind `oumigo.api.agent`, not the manager or the workers — but "how long may one
+turn take against this model?" is fleet policy, so the fleet declares it. An
+`OumiGoAgent` fetches them once, lazily, on its first chat; values passed to the
+constructor win and skip the lookup, and an unreachable manager falls back to no timeout
+(the behavior from before timeouts existed), because an optional config endpoint must
+never break inference.
+
+`turn_timeout` is the primary control because it is the wait an end user actually
+experiences: it spans every tool-loop round-trip (up to `max_iterations`, default 5) and
+every tool execution, so a per-request timeout would silently multiply by five. The
+remaining budget is handed to httpx as each request's read timeout, so the last
+round-trip cannot overrun the deadline. On expiry the turn ends with
+`finish_reason="timeout"`, keeping whatever text and tool results were produced and
+appending a visible marker to the answer. A `stall_timeout` larger than `turn_timeout`
+can never fire.
+
+One gap to know about: a tool callback is plain Python with no deadline of its own, so
+the budget is only observed *between* tool calls — a single blocking tool can still
+overrun it.
+
 **Capability caps** are two optional `model:` keys enforced by the *router*, not by vLLM.
 They are off unless set:
 
