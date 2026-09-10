@@ -43,7 +43,7 @@ replicas: 1
 
 
 model:
-  name: GotoAI-Inc/Qwen3.8-27B-W8A16  # int4 W4A16 build of Qwen/Qwen3.8-27B
+  name: GotoAI-Inc/Qwen3.8-27B-W8A16  # int8 W8A16 build of Qwen/Qwen3.8-27B
   # Where the weights come from. Unset / null / `none` -> download `name` from the
   # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
   # (each worker checks its own disk; a node without the files can opt out with
@@ -55,10 +55,10 @@ model:
   # 19.42 GB of weights — structurally identical to the 3.6 build: 12.56 GB int4 LM
   # linears + 5.09 GB bf16 embed_tokens/lm_head + 0.92 GB bf16 vision tower + 0.85 GB
   # bf16 MTP head. 0.90 of a 24 GB card leaves ~2.2 GB for KV, which is the 32k below.
-  gpu_memory_utilization: 0.90
+  gpu_memory_utilization: 0.95
   # 16 of 64 layers use full attention (4 KV heads, head_dim 256) -> ~64 KB/token.
-  max_model_len: 32768  # 32k        # null = model default (262144)
-  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  max_model_len: 131072  # 128k        # null = model default (262144)
+  max_concurrent_requests: 10         # maximum requests that can be processed simultaneously
   extra_args: #[]
     # Runs on released vLLM >= 0.25.1.
     - --enable-auto-tool-choice

@@ -43,7 +43,7 @@ replicas: 1
 
 
 model:
-  name: GotoAI-Inc/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W8A16  # int4 W4A16 build of
+  name: GotoAI-Inc/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W8A16  # int8 W8A16 build of
                                      # nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
   # Where the weights come from. Unset / null / `none` -> download `name` from the
   # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
