@@ -1,0 +1,159 @@
+# oumigo manager configuration (v1).
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_file  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+# The manager reads `manager.yaml` (this file) and `model.yaml` (the single model)
+# from that directory by convention.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# Note: vLLM 0.32.0 (released 2026-10-18) is required.
+# ---
+# python3.12 -m venv .venv-nemotron-super && source .venv-nemotron-super/bin/activate
+# pip install "vllm[audio]==0.32.0"        # pulls torch 2.13.0 + transformers 5.16.x + flashinfer
+# pip install -e . --no-deps && pip install pydantic pydantic-settings httpx fastapi uvicorn typer pyyaml zeroconf
+# ---
+
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Authentication (v1: shared bearer token) ---
+auth:
+  # Path to a file whose contents are the shared bearer token workers must present.
+  # Precedence: $OUMIGO_MANAGER_TOKEN (env / .env) overrides this file.
+  # If neither is set, worker authentication is DISABLED (v1) and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Provisioning backend: how worker nodes come into existence ---
+# LAN    : workers are hand-started and self-register (no manager provisioning).
+# conoha : (future) manager provisions ConoHa VPS instances via the cloud API.
+provider: LAN
+
+# --- Desired scale ---
+# Only meaningful when the manager PROVISIONS workers (cloud / LAN). With static or
+# hand-started LAN workers, the replica count is simply however many workers register.
+replicas: 1
+
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4  # the VENDOR's own NVFP4
+                                     # build (ModelOpt 0.37.0 + QAD from
+                                     # NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16).
+                                     # No GotoAI-Inc requant: nothing to gain, NVIDIA
+                                     # already ships the quantized-aware-distilled one.
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+                                    # 88 shards, 75.1 GB on disk -> budget ~85 GB free
+                                    # under HF_HOME; the first pull is the slow part.
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto -> bfloat16; the checkpoint carries its own
+                                     # per-layer scheme (quant_algo MIXED_PRECISION)
+  tensor_parallel_size: 1            # 1x H200 / 1x RTX PRO 6000 / 1x GB200. Use 2 for
+                                     # 2x H100 80GB — num_key_value_heads is 2, so TP=2
+                                     # is the largest size that still shards the KV heads
+                                     # one-per-GPU instead of replicating them.
+  # ~70 GiB resident: 112.7B of the 120B params are routed experts (40 MoE blocks x 512
+  # experts, each 2688x1024 up + down in the 1024-dim MoE latent space) at NVFP4 4.5
+  # bits/param = ~59 GiB; + ~2.2 GiB bf16 untied embed/lm_head (131072 x 4096 each);
+  # + ~1.2 GiB bf16 C-RADIO ViT-H vision tower (32 layers, hidden 1280) and ~0.4 GiB
+  # projector; + the FP8 W8A8 group (mamba in/out_proj and the 8 attention blocks'
+  # q/k/v/o, 113 layers); + bf16 conv1d / fp32 routers / the MTP block. Only ~12B of
+  # 120B params are active per token (num_experts_per_tok 22 of 512 + 1 shared).
+  gpu_memory_utilization: 0.89       # the model card's own figure for this checkpoint
+  # An 88-block hybrid: 40 mamba, 40 MoE, only 8 attention. Just those 8 carry a KV
+  # cache -> 8 KB/token (2 kv heads x 128 head_dim x 2 for K+V x bf16), so 256k is only
+  # 2 GiB and the full 1048576 just 8 GiB — cheap, which is why 1M context is the
+  # supported window rather than a stunt. The mamba blocks hold a fixed recurrent state
+  # instead: 40 x (128 heads x 64 head_dim x 128 ssm_state) = 80 MiB per CONCURRENT
+  # SEQUENCE at float16 (160 MiB at the checkpoint's default fp32) — independent of
+  # length. That, not context, is what concurrency costs here: --max-num-seqs 32 below
+  # reserves ~2.5 GiB of mamba state.
+  max_model_len: 262144  # 256k      # null = model default (1048576; it fits on H200 /
+                                     # 2x H100 — raise this if a workload needs it)
+  max_concurrent_requests: 8         # router admission cap (never reaches vllm serve);
+                                     # keep it under --max-num-seqs below
+  extra_args: #[]
+    # Pin vLLM 0.32.0: the version NVIDIA validated this checkpoint on. The pieces this
+    # config needs landed in 0.31.0 (NemotronH_Omni_Reasoning_V3 in registry.py mapped
+    # onto nano_nemotron_vl, `modelopt_mixed`/ModelOptMixedPrecisionConfig for quant_algo
+    # MIXED_PRECISION, and the mamba prefix-cache flags below), so 0.31 would likely run
+    # — but untested by the vendor, so don't.
+    #
+    # INSTALL: vLLM 0.32 pins transformers>=5.16.1, so this needs its OWN venv — it
+    # cannot share one with the gemma-4 configs here (those need transformers <5.15).
+    # Install `vllm[audio]==0.32.0` together with PLAIN `oumigo`, never `oumigo[worker]`:
+    # that extra's own transformers<5.15 pin makes pip silently backtrack to vLLM 0.31.0
+    # (or, if vLLM 0.32 is pinned alongside it, to the older oumigo 0.2.0).
+    - --trust-remote-code            # config.json auto_maps nemotron_h_omni to the repo's
+                                     # own modeling/processing code for the processor
+    - --max-num-seqs
+    - "32"
+    # Chunked prefill budget from the model card. The 0.5 MB-ish image path and 1M
+    # context both ride on this, so do not shrink it much.
+    - --max-num-batched-tokens
+    - "16384"
+    # The mamba group's state is stored on a 64-token grid; block-size and
+    # prefix-match-unit must agree with it for prefix caching to hit.
+    - --block-size
+    - "64"
+    - --prefix-match-unit
+    - "64"
+    - --mamba-backend
+    - flashinfer
+    # Halves the mamba state cache (fp32 -> fp16: 160 -> 80 MiB per sequence). The model
+    # card pairs it with stochastic rounding to keep the precision loss bounded.
+    - --mamba-ssm-cache-dtype
+    - float16
+    - --enable-mamba-cache-stochastic-rounding
+    - --mamba-cache-philox-rounds
+    - "5"
+    # Resume a prefix-cache hit mid-block instead of only on a 64-token boundary. Only
+    # takes effect with --mamba-cache-mode align + MTP speculation + a prefix-match-unit
+    # below the mamba block size — all three are set here.
+    - --enable-mamba-shared-prefix-checkpoint
+    - --mamba-cache-mode
+    - align
+    # Speculative decoding off the MTP block already in this checkpoint
+    # (num_nextn_predict_layers 1). The card uses 3 draft tokens on Hopper, 5 on
+    # Blackwell / DGX Spark.
+    - --speculative-config.method
+    - mtp
+    - --speculative-config.num_speculative_tokens
+    - "3"
+    # Vision/video intake. config.json defaults video_pruning_rate to 0.7; the card's
+    # serving recipe uses 0.5. For 1080p sources prefer fps 1 / num_frames 128.
+    - --video-pruning-rate
+    - "0.5"
+    - --media-io-kwargs
+    - '{"video": {"fps": 2, "num_frames": 256}}'
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_coder                    # Nemotron 3.5 emits the same XML tool framing as
+                                     # Qwen3-Coder; vLLM has no `nemotron` tool parser
+    - --reasoning-parser
+    - nemotron_v3
+    # Thinking is configurable in this chat template: off | medium | on.
+    #- --default-chat-template-kwargs
+    #- '{"enable_thinking": true}'
+    # One image + one video per request is what the card documents; raise only if a
+    # client really sends more.
+    #- --limit-mm-per-prompt
+    #- '{"image": 1, "video": 1}'
