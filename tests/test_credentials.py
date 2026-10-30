@@ -131,3 +131,14 @@ def test_revoked_node_is_refused_with_403() -> None:
     assert client.post("/register", json=_reg_body("n1"), headers=_auth("fleet-secret")).status_code == 403
     assert store.unrevoke_node("n1")
     assert client.post("/heartbeat", json=_hb_body("n1"), headers=_auth(node_token)).status_code == 200
+
+
+def test_refused_tunnel_registration_does_not_spend_the_token() -> None:
+    store = AuthStore()
+    auth = Authenticator(store, None, wan=True)
+    client = TestClient(create_app(Registry(), None, auth=auth, provider_name="CUSTOM",
+                                   tunnel_enabled=False))
+    _, join = store.create_join_token(uses=1)
+    resp = client.post("/register", json=_reg_body("n1", "tunnel"), headers=_auth(join))
+    assert resp.status_code == 400
+    assert store.check_join_token(join, consume=False)  # still usable for a direct worker

@@ -29,6 +29,15 @@ PROMPT = "OumiGo> "
 HISTORY_LENGTH = 200  # commands retained in the console history cache
 
 
+def _fmt_transport(row: dict) -> str:
+    """'direct', or 'tunnel <idle>/<open> <rtt>' — e.g. 'tunnel 2/3 112ms'."""
+    if row.get("transport") != "tunnel":
+        return row.get("transport") or "direct"
+    text = f"tunnel {row.get('tunnel_idle', 0)}/{row.get('tunnel_conns', 0)}"
+    rtt = row.get("tunnel_rtt_ms")
+    return f"{text} {rtt:.0f}ms" if rtt is not None else text
+
+
 class ManagerConsole:
     """REPL that talks to the control-plane server over HTTP."""
 
@@ -126,7 +135,7 @@ class ManagerConsole:
         print("commands:")
         print("  help              show this help")
         print("  status            show manager status")
-        print("  workers           list registered workers (id, ip, port, state, uptime)")
+        print("  workers           list registered workers (id, ip, port, transport, state, uptime)")
         print("  metrics           show each worker's latest received grid metrics")
         print("  verbose [on|off]  stream server logs to the console (toggle)")
         print("  version           print the OumiGo version")
@@ -167,13 +176,14 @@ class ManagerConsole:
                 str(r["port"]) if r.get("port") is not None else "-",
                 (r.get("capabilities") or {}).get("gpu") or "-",
                 r.get("backend") or "-",
+                _fmt_transport(r),
                 r["state"],
                 r.get("model") or "-",
                 self._fmt_utc(start),
                 f"{now - r['last_seen']:.0f}s ago",
             ))
 
-        headers = ("WORKER", "HASH ID", "IP", "PORT", "GPU#0", "BACKEND", "STATE", "MODEL_NAME", "START (UTC)", "LAST SEEN")
+        headers = ("WORKER", "HASH ID", "IP", "PORT", "GPU#0", "BACKEND", "TRANSPORT", "STATE", "MODEL_NAME", "START (UTC)", "LAST SEEN")
         widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
         fmt = "  ".join(f"{{:<{w}}}" for w in widths)
         print("  " + fmt.format(*headers))

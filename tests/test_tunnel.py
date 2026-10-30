@@ -75,7 +75,10 @@ class Servers:
             self._servers.append(server)
         servers = list(self._servers)
 
+        self.loop: asyncio.AbstractEventLoop | None = None
+
         async def run_all() -> None:
+            self.loop = asyncio.get_running_loop()
             await asyncio.gather(*(s.serve() for s in servers))
 
         threading.Thread(target=lambda: asyncio.run(run_all()), daemon=True).start()
@@ -243,3 +246,15 @@ def test_revoking_a_node_closes_its_tunnels(fleet: Fleet) -> None:
         assert time.time() < deadline, "revoked node was not dropped"
         time.sleep(0.1)
     assert fleet.tunnels.connected("node1") == 0
+
+
+def test_slots_redial_after_their_connections_drop(fleet: Fleet) -> None:
+    # e.g. a NAT dropped them, or the manager restarted: the worker re-dials on its own.
+    future = asyncio.run_coroutine_threadsafe(
+        fleet.tunnels.close_node("node1"), fleet.manager.loop
+    )
+    assert future.result(timeout=5) == fleet.reg["tunnel_pool_size"]
+    fleet.client.wake()  # what the coordinator does right after re-registering
+    fleet.wait_conns(fleet.reg["tunnel_pool_size"], timeout=5)
+    resp = httpx.post(f"{fleet.router_url}/v1/chat/completions", json={}, timeout=10)
+    assert resp.status_code == 200

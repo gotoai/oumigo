@@ -1,0 +1,80 @@
+# oumigo manager configuration — CUSTOM provider on a VPS behind nginx (0.4.0+).
+#
+# Workers run anywhere (RunPod, Vast.ai, other clouds, other on-prem sites) and reach
+# this manager through nginx at https://oumigo.example.net. See docs/tunnel.md for the
+# nginx config and the worker-side settings.
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+# CUSTOM: any vendor or site, no vendor-specific processing. mDNS off, worker auth always
+# enforced, and the manager refuses to start if anything below would be exposed unsafely.
+provider: CUSTOM
+
+# --- Control plane: worker registration, heartbeat, metrics, /tunnel ---
+control_plane:
+  host: 127.0.0.1               # nginx terminates TLS on :443 and forwards here
+  port: 7014
+  trusted_proxies: [127.0.0.1]  # X-Forwarded-For is believed only from nginx
+  # Without nginx, serve TLS directly (then host may be 0.0.0.0):
+  # tls_cert_file: /etc/oumigo/tls/fullchain.pem
+  # tls_key_file:  /etc/oumigo/tls/privkey.pem
+
+# --- Data plane: the router. No client auth yet, so same-host apps only. ---
+data_plane:
+  host: 127.0.0.1
+  port: 7012
+
+# --- Reporting plane: view through an SSH tunnel (ssh -L 7080:127.0.0.1:7080 vps) ---
+dashboard:
+  host: 127.0.0.1
+  port: 7080
+
+# --- Tunnel transport: workers with OUMIGO_TRANSPORT=tunnel dial out to /tunnel ---
+tunnel:
+  enabled: true
+  pool_spare: 1                 # connections kept beyond each worker's capacity
+
+heartbeat:
+  interval_s: 10
+  timeout_s: 30
+  forget_after_seconds: 3600
+
+# --- Worker auth ---
+# Per-pod join tokens: `oumigo manager token create --ttl 1h --uses 1 -c <this file>`.
+# A reusable token (token_file or $OUMIGO_MANAGER_TOKEN) is optional.
+auth:
+  token_file: null
+  state_dir: /var/lib/oumigo    # signing secret, minted tokens, revoked nodes (mode 0600)
+
+# --- Optional: limit worker-facing endpoints to these source addresses / ranges ---
+worker_allowlist:
+  enabled: false
+  addresses: []                 # e.g. ["203.0.113.7", "198.51.100.0/24"]
+
+replicas: 1
+
+model:
+  name: Qwen/Qwen3.5-9B              # vendor repo — mandatory. Fits only via --quantization below.
+  # Where the weights come from. Unset / null / `none` -> download `name` from the
+  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
+  # (each worker checks its own disk; a node without the files can opt out with
+  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
+  storage_location: none            # e.g. file:///srv/models/qwen3.5-9b
+  port: 7001                         # vLLM server port on each worker (data plane routes here)
+  dtype: auto                        # auto | bfloat16 | float16  (auto -> bfloat16 per config.json)
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 32768  # 32k        # null = model default (262144 — far too large for this GPU)
+  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+  extra_args: #[]
+    - --quantization
+    - bitsandbytes
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_xml                      # chat template emits <tool_call><function=..><parameter=..> XML
+    - --reasoning-parser
+    - qwen3                          # <think> ... </think>
+    - --max-num-seqs
+    - "2"
+    - --language-model-only

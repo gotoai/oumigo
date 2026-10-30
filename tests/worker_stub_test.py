@@ -24,6 +24,11 @@ manager its own control/data ports:
     oumigo manager serve -c test_manager.yaml --no-mdns --host 127.0.0.1 --port 7016
     python tests/worker_stub_test.py --workers 3 --manager-url http://127.0.0.1:7016
 
+Tunnel transport: `--transport tunnel` makes each stub dial out to the manager's
+`/tunnel` (the real worker's TunnelClient) instead of being dialed; its server then
+requires the per-node API key the manager hands out, as a real tunnel backend does.
+For a TLS manager pass its https URL and, for a private certificate, `--ca-file`.
+
 NOTE: this is a runnable script, not a pytest module. It deliberately defines no
 `test_*` functions and does nothing at import time, so pytest collects nothing
 from it even though the filename matches `*_test.py`.
@@ -39,6 +44,7 @@ import math
 import os
 import random
 import signal
+import ssl
 import time
 from collections.abc import AsyncIterator, Callable
 from uuid import uuid4
@@ -56,10 +62,12 @@ from oumigo.protocol.messages import (
     NodeCapabilities,
     RegisterRequest,
     RegisterResponse,
+    Transport,
 )
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.service.worker.metrics import M_VLLM_START, M_WORKER_START, grid_timestamp
 from oumigo.service.worker.supervisor import PortUnavailable, find_free_port  # reuse the worker's logic
+from oumigo.service.worker.tunnel import TunnelClient
 
 log = logging.getLogger("oumigo.worker_stub")
 
@@ -109,8 +117,14 @@ class StubWorker:
 
     def __init__(
         self, index: int, manager_url: str, token: str | None, request_latency: float,
+        transport: str = "direct", ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.index = index
+        self.transport = transport
+        self.ssl_context = ssl_context
+        self.api_key: str | None = None        # tunnel: what the router must present
+        self.tunnel_pool_size = 1
+        self.tunnel: TunnelClient | None = None
         self.host = HOST
         self.manager_url = manager_url.rstrip("/")
         self.token = token
@@ -147,6 +161,7 @@ class StubWorker:
         req = RegisterRequest(
             node_id=self.node_id,
             address=self.host,
+            transport=Transport(self.transport),
             incarnation=0,
             state=NodeState.REGISTERING,
             capabilities=NodeCapabilities(gpu="StubGPU", vram_gb=16.0),
@@ -167,6 +182,11 @@ class StubWorker:
                     return
                 continue
             self.heartbeat_interval = parsed.heartbeat_interval_s or 10
+            if parsed.node_token:
+                self.token = parsed.node_token  # this node's own credential from now on
+            if self.transport == "tunnel":
+                self.api_key = parsed.vllm_api_key
+                self.tunnel_pool_size = parsed.tunnel_pool_size or 1
             # Preferred port = the manager's model.port (like a real worker), else a
             # default. The actual port is preflight-negotiated and reported on the
             # heartbeat, so it need not match anything the manager configured.
@@ -203,6 +223,8 @@ class StubWorker:
         return app
 
     async def _handle(self, request: Request, *, chat: bool) -> Response:
+        if self.api_key and request.headers.get("authorization") != f"Bearer {self.api_key}":
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
         body = await request.json()
         prompt = _extract_prompt(body, chat)
         model = body.get("model") or "stub-model"
@@ -287,6 +309,7 @@ class StubWorker:
         req = HeartbeatRequest(
             node_id=self.node_id, node_state=NodeState.SERVING, run_state=run_state,
             vllm_port=self.port,  # tell the router which (preflight-negotiated) port to target
+            tunnel_rtt_ms=self.tunnel.rtt_ms if self.tunnel is not None else None,
         )
         try:
             resp = await client.post(
@@ -297,6 +320,8 @@ class StubWorker:
             )
             resp.raise_for_status()
             hb = HeartbeatResponse.model_validate(resp.json())
+            if self.tunnel is not None:
+                self.tunnel.set_pool_size(hb.tunnel_pool_size)
             if not hb.known:  # manager forgot us -> re-register
                 log.info("worker %d unknown to manager; re-registering", self.index)
                 await self.register(client)
@@ -365,10 +390,21 @@ class StubWorker:
             except (httpx.HTTPError, ValueError) as exc:
                 log.debug("worker %d metrics report failed: %s", self.index, exc)
 
+    def start_tunnel(self) -> None:
+        """Dial out to the manager's /tunnel (once this stub's server is listening)."""
+        assert self.port is not None
+        self.tunnel = TunnelClient(
+            self.manager_url, token=lambda: self.token, backend_port=self.port,
+            pool_size=self.tunnel_pool_size, ssl_context=self.ssl_context,
+        )
+        self.tunnel.start()
+
     def stop(self) -> None:
         self._stop.set()
         if self._server is not None:
             self._server.should_exit = True
+        if self.tunnel is not None:
+            self.tunnel.stop(timeout=1.0)
 
 
 def _chat_payload(text: str, model: str, p_toks: int, c_toks: int) -> dict:
@@ -426,12 +462,15 @@ def _text_chunk(cid: str, created: int, model: str, *, text: str, finish: str | 
 
 
 async def _run_fleet(args: argparse.Namespace) -> None:
+    ssl_context = ssl.create_default_context(cafile=args.ca_file)
     workers = [
         StubWorker(
             index=i,
             manager_url=args.manager_url,
             token=args.token,
             request_latency=args.request_latency,
+            transport=args.transport,
+            ssl_context=ssl_context,
         )
         for i in range(args.workers)
     ]
@@ -447,7 +486,7 @@ async def _run_fleet(args: argparse.Namespace) -> None:
         except NotImplementedError:  # pragma: no cover - non-Unix
             pass
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=ssl_context) as client:
         for w in workers:  # register first so each learns its preferred port
             await w.register(client)
 
@@ -487,13 +526,16 @@ async def _run_fleet(args: argparse.Namespace) -> None:
             next_port = w.port + 1  # next worker scans upward from here
             w.serving_since = time.time()
             log.info("worker %d serving on %s:%d", w.index, w.host, w.port)
+            if w.transport == "tunnel":
+                w.start_tunnel()
             tasks.append(asyncio.create_task(w.heartbeat_loop(client)))
             tasks.append(asyncio.create_task(w.metrics_loop(client)))
 
         ports = ", ".join(str(w.port) for w in workers)
         print(
             f"stub fleet up: {len(workers)} worker(s) on {HOST}:[{ports}], "
-            f"latency={args.request_latency}s ±50%, manager={args.manager_url}. Ctrl-C to stop."
+            f"latency={args.request_latency}s ±50%, transport={args.transport}, "
+            f"manager={args.manager_url}. Ctrl-C to stop."
         )
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -534,8 +576,18 @@ def main() -> None:
         help="Manager control-plane URL (same host as this stub).",
     )
     parser.add_argument(
-        "--token", default=os.environ.get("OUMIGO_MANAGER_TOKEN"),
-        help="Shared bearer token, if the manager requires auth.",
+        "--token", default=os.environ.get("OUMIGO_JOIN_TOKEN") or os.environ.get("OUMIGO_MANAGER_TOKEN"),
+        help="Join token, if the manager requires auth (a minted token must allow one "
+        "use per stub: --uses N).",
+    )
+    parser.add_argument(
+        "--transport", choices=("direct", "tunnel"),
+        default=os.environ.get("OUMIGO_TRANSPORT", "direct"),
+        help="direct: the router dials each stub; tunnel: each stub dials out to /tunnel.",
+    )
+    parser.add_argument(
+        "--ca-file", default=os.environ.get("OUMIGO_MANAGER_CA_FILE"),
+        help="PEM to trust for an https manager with a private certificate.",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Log at DEBUG.")
     args = parser.parse_args()

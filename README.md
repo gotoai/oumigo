@@ -9,11 +9,13 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an OumiGo fleet (as of v0.2.0):
+Key functions provided by an OumiGo fleet (as of v0.4.0):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
 3. Performance monitoring
+4. Remote workers on any vendor or site (RunPod, Vast.ai, other clouds, other on-prem
+   sites) through a worker-initiated tunnel — no inbound ports or VPN on the GPU side
 4. Vertical integration of administration and programming interfaces:
     - Command line interface (CLI) administration
     - Python API function with built-in Agent loop, supporting Agent chat, tool call usage
@@ -38,9 +40,13 @@ Two roles:
   - **dashboard** (`manager.dashboard`): performance & diagnostics — later.
   - **provisioning** (`oumigo.providers`): how workers come into existence — a
     minimal, lifecycle-shaped `Provider` protocol used by the control plane. Ships
-    with `StaticProvider` (LAN: workers are hand-started and self-register, no
-    provisioning); cloud backends (e.g. OpenStack-based) are future
-    implementations of the same protocol.
+    with `StaticProvider` in two postures: `LAN` (trusted local network) and `CUSTOM`
+    (workers on any vendor or site, no vendor-specific processing; TLS and worker auth
+    enforced). Workers are hand-started and self-register; cloud backends that
+    provision through a vendor API are future implementations of the same protocol.
+  - **transport** (per worker): `direct` (the router dials the worker) or `tunnel` (the
+    worker dials out to the manager's `/tunnel` and the router borrows those
+    connections) — see [docs/tunnel.md](docs/tunnel.md).
 
   
 - **Worker** (`oumigo.service.worker`): a long-lived *coordinator* supervises a LLM server
@@ -111,3 +117,4 @@ oumigo version
 - [docs/api.md](docs/api.md) — Python API: Agent loop, chat, tool calls, streaming.
 - [docs/metrics.md](docs/metrics.md) — performance monitoring and metrics.
 - [docs/worker-node-states.md](docs/worker-node-states.md) — worker node state machine.
+- [docs/tunnel.md](docs/tunnel.md) — remote workers: CUSTOM provider, tunnel transport, nginx deployment, join tokens.

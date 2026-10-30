@@ -250,6 +250,8 @@ class WorkerCoordinator:
                 resp = client.register(self.manager_url, self.register_req, self.join_token)
             if resp.node_token:
                 self._adopt_token(resp.node_token)
+            if self.tunnel is not None:
+                self.tunnel.wake()  # tunnels were refused while the manager didn't know us
             if resp.vllm_api_key and resp.vllm_api_key != os.environ.get(ENV_BACKEND_API_KEY):
                 # Only if the manager lost its auth state: the router now presents a new
                 # key, so the backend must be restarted to require it.
@@ -546,6 +548,13 @@ def run_worker(
     client.configure_tls()  # system CAs, plus $OUMIGO_MANAGER_CA_FILE for a private cert
     try:
         spec, provider = client.fetch_spec(manager_url, token)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == 401:
+            raise SystemExit(
+                f"manager {manager_url} rejected the join token (401): set OUMIGO_JOIN_TOKEN — "
+                "a minted token may be expired, revoked or already used")
+        raise SystemExit(f"manager {manager_url} refused /spec (HTTP {code}): {_detail(exc.response)}")
     except Exception as exc:  # noqa: BLE001 - surface any client/server error as a clean exit
         raise SystemExit(f"could not fetch spec from manager {manager_url}: {exc}")
     if provider == CUSTOM and not manager_url.lower().startswith("https://"):

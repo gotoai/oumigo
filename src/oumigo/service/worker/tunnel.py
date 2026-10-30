@@ -69,6 +69,7 @@ class TunnelClient:
         self._thread: threading.Thread | None = None
         self._main: asyncio.Task | None = None
         self._resized: asyncio.Event | None = None
+        self._wake: asyncio.Event | None = None  # cuts reconnect backoff short
         self._latency: dict[int, float] = {}  # slot -> last ping RTT (s)
         self.connected = 0  # open WebSockets (parked or carrying a request)
 
@@ -85,6 +86,17 @@ class TunnelClient:
             loop.call_soon_threadsafe(main.cancel)
         if self._thread is not None:
             self._thread.join(timeout)
+
+    def wake(self) -> None:
+        """Redial now instead of waiting out the backoff — e.g. right after the worker
+        re-registered with a restarted manager, which refused tunnels until then."""
+        if self._loop is not None and self._wake is not None:
+            self._loop.call_soon_threadsafe(self._wake_now)
+
+    def _wake_now(self) -> None:
+        assert self._wake is not None
+        self._wake.set()
+        self._wake = asyncio.Event()  # later sleepers wait on a fresh event
 
     def set_pool_size(self, size: int | None) -> None:
         if size is None or max(1, size) == self._pool_size:
@@ -115,6 +127,7 @@ class TunnelClient:
         """Keep exactly `pool_size` slot tasks running; resize when the manager asks."""
         self._main = asyncio.current_task()
         self._resized = asyncio.Event()
+        self._wake = asyncio.Event()
         slots: dict[int, asyncio.Task] = {}
         try:
             while True:
@@ -163,7 +176,12 @@ class TunnelClient:
                 log.debug("tunnel slot %d: %s", index, exc)
             delay = backoff * random.uniform(0.5, 1.5)
             backoff = min(backoff * 2, BACKOFF_MAX_S)
-            await asyncio.sleep(delay)
+            assert self._wake is not None
+            try:
+                await asyncio.wait_for(self._wake.wait(), delay)
+                backoff = BACKOFF_START_S  # woken: the manager should take us now
+            except asyncio.TimeoutError:
+                pass
 
     async def _carry(self, index: int, ws: ClientConnection) -> None:
         """Park until a request arrives, then bridge it to the backend until either side

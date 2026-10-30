@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, WebSocket
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
 from zeroconf.asyncio import AsyncZeroconf
 
 from oumigo import discovery
@@ -33,6 +33,7 @@ from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.common.state import default_state_dir
 from oumigo.config.spec import NodeSpec
 from oumigo.providers.static import CUSTOM, LAN
+from oumigo.service.manager.access import FailureLimiter, WorkerAllowlist
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.control.store import MetricStore
 from oumigo.service.manager.credentials import Authenticator, AuthStore
@@ -47,6 +48,7 @@ from oumigo.service.manager.settings import (
     get_data_plane,
     get_trusted_proxies,
     get_tunnel,
+    get_worker_allowlist,
     load_manager_yaml,
 )
 from oumigo.protocol.messages import (
@@ -76,6 +78,7 @@ def create_app(
     tunnels: TunnelRegistry | None = None,
     tunnel_enabled: bool = True,
     tunnel_pool_spare: int = 1,
+    worker_allowlist: list[str] | None = None,
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
@@ -86,6 +89,8 @@ def create_app(
     `auth` decides who may call the worker-facing endpoints (see
     `oumigo.service.manager.credentials`). Without one, an in-memory authenticator is
     built around `token` (the reusable fleet token), enforced only when it is set.
+    `worker_allowlist` (addresses / CIDR ranges, None = off) and a failed-auth limiter
+    guard the same endpoints by source address (`oumigo.service.manager.access`).
     """
 
     store = store or MetricStore()
@@ -99,7 +104,21 @@ def create_app(
         connection is always waiting even when every slot is busy."""
         return (capacity if capacity is not None else default_capacity) + tunnel_pool_spare
 
-    def _deny(node_id: str | None = None) -> HTTPException:
+    allowlist = WorkerAllowlist(worker_allowlist)
+    limiter = FailureLimiter()
+
+    async def worker_source(request: Request) -> None:
+        """Gate for worker-facing endpoints: allowlist, then failed-auth throttling."""
+        host = request.client.host if request.client else None
+        if not allowlist.allows(host):
+            log.warning("worker request from %s refused: not in worker_allowlist", host)
+            raise HTTPException(status_code=403, detail="source address not allowed")
+        if limiter.blocked(host):
+            raise HTTPException(status_code=429, detail="too many failed auth attempts")
+        request.state.source = host
+
+    def _deny(request: Request, node_id: str | None = None) -> HTTPException:
+        limiter.record(request.state.source)
         if node_id is not None and auth.store.is_node_revoked(node_id):
             return HTTPException(status_code=403, detail=f"node {node_id} is revoked")
         return HTTPException(status_code=401, detail="invalid or missing bearer token")
@@ -143,27 +162,27 @@ def create_app(
 
     app = FastAPI(title="OumiGo manager control plane", lifespan=lifespan)
 
-    @app.get("/spec")
-    async def spec(authorization: str | None = Header(default=None)) -> dict:
+    @app.get("/spec", dependencies=[Depends(worker_source)])
+    async def spec(request: Request, authorization: str | None = Header(default=None)) -> dict:
         """Hand the fleet's vLLM spec to a worker so it can preflight its port and
         derive its node_id *before* registering. None until a model is configured.
         `provider` tells the worker which posture to enforce (CUSTOM: TLS only)."""
         if not auth.may_read_spec(authorization):
-            raise _deny()
+            raise _deny(request)
         return {
             "node_spec": node_spec.model_dump() if node_spec is not None else None,
             "provider": provider_name,
         }
 
-    @app.post("/register", response_model=RegisterResponse)
+    @app.post("/register", response_model=RegisterResponse, dependencies=[Depends(worker_source)])
     async def register(
-        req: RegisterRequest, authorization: str | None = Header(default=None)
+        req: RegisterRequest, request: Request, authorization: str | None = Header(default=None)
     ) -> RegisterResponse:
-        if not auth.may_register(authorization, req.node_id):
-            raise _deny(req.node_id)
         tunneled = req.transport == Transport.TUNNEL
-        if tunneled and not tunnel_enabled:
+        if tunneled and not tunnel_enabled:  # checked first: don't spend a join token on it
             raise HTTPException(400, "this manager does not accept tunnel workers (tunnel.enabled: false)")
+        if not auth.may_register(authorization, req.node_id):
+            raise _deny(request, req.node_id)
         registry.register(
             node_id=req.node_id,
             address=req.address,
@@ -196,12 +215,12 @@ def create_app(
             ),
         )
 
-    @app.post("/heartbeat", response_model=HeartbeatResponse)
+    @app.post("/heartbeat", response_model=HeartbeatResponse, dependencies=[Depends(worker_source)])
     async def heartbeat(
-        req: HeartbeatRequest, authorization: str | None = Header(default=None)
+        req: HeartbeatRequest, request: Request, authorization: str | None = Header(default=None)
     ) -> HeartbeatResponse:
         if not auth.may_act_as(authorization, req.node_id):
-            raise _deny(req.node_id)
+            raise _deny(request, req.node_id)
         run_state = req.run_state.value if req.run_state is not None else None
         known = registry.heartbeat(
             req.node_id, req.node_state.value, run_state, req.vllm_port,
@@ -223,6 +242,11 @@ def create_app(
         """A tunnel worker's outbound connection: parked until the router borrows it to
         carry one HTTP/1.1 connection to the worker's backend. Refused before the upgrade
         (HTTP 403) unless it carries a valid node token of a registered tunnel worker."""
+        host = ws.client.host if ws.client else None
+        if not allowlist.allows(host) or limiter.blocked(host):
+            log.warning("tunnel from %s refused: not allowed or throttled", host)
+            await ws.close(code=1008)
+            return
         node_id = auth.tunnel_node(ws.headers.get("authorization"))
         record = registry.get(node_id) if node_id is not None else None
         if (
@@ -230,6 +254,8 @@ def create_app(
             or record is None
             or record.transport != Transport.TUNNEL.value
         ):
+            if node_id is None:
+                limiter.record(host)  # a bad credential, not just "not registered yet"
             log.debug("tunnel refused (node=%s)", node_id)
             await ws.close(code=1008)
             return
@@ -241,10 +267,12 @@ def create_app(
         finally:
             tunnels.remove(conn)
 
-    @app.post("/metrics")
-    async def metrics(report: MetricsReport, authorization: str | None = Header(default=None)) -> dict:
+    @app.post("/metrics", dependencies=[Depends(worker_source)])
+    async def metrics(
+        report: MetricsReport, request: Request, authorization: str | None = Header(default=None)
+    ) -> dict:
         if not auth.may_act_as(authorization, report.node_id):
-            raise _deny(report.node_id)
+            raise _deny(request, report.node_id)
         written = store.ingest(report.node_id, report.points)
         log.debug("metrics: ingested %d points from node %s", written, report.node_id)
         return {"ok": True, "accepted": written}
@@ -358,6 +386,9 @@ def run_server(
     auth = Authenticator(auth_store, token, wan=provider_name == CUSTOM)
     log.info("auth state in %s (worker auth %s)", auth_store.path,
              "enforced" if auth.enforced else "DISABLED")
+    allowlist = get_worker_allowlist(manager_config)
+    if allowlist is not None:
+        log.info("worker_allowlist ON: %s", ", ".join(allowlist) or "(empty: no worker allowed)")
 
     tunnel_enabled, pool_spare = get_tunnel(manager_config)
     registry = Registry()
@@ -376,6 +407,7 @@ def run_server(
         tunnels=tunnels,
         tunnel_enabled=tunnel_enabled,
         tunnel_pool_spare=pool_spare,
+        worker_allowlist=allowlist,
     )
     router_app = create_router_app(registry, node_spec,
                                    agent_defaults=get_agent_defaults(manager_config),
