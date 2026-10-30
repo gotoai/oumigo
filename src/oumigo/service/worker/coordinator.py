@@ -33,9 +33,11 @@ from oumigo.protocol.messages import (
     NodeCapabilities,
     RegisterRequest,
     RegisterResponse,
+    Transport,
     WorkerCommand,
 )
 from oumigo.protocol.states import NodeState, RunState
+from oumigo.providers.static import CUSTOM
 from oumigo.service.worker import client
 from oumigo.service.worker.identity import resolve_worker_identity
 from oumigo.service.worker.metrics import MetricsCollector, probe_gpu0_name
@@ -79,6 +81,10 @@ class WorkerCoordinator:
         metrics_evict_chunk_s: float = 300.0,
     ) -> None:
         self.manager_url = manager_url
+        # `token` starts as the join token; registration swaps in this node's own token
+        # (bound to node_id), which every later call presents. The join token is kept to
+        # re-join if the manager ever stops accepting the node token (auth state wiped).
+        self.join_token = token
         self.token = token
         self.node_id = node_id
         self.register_req = register_req
@@ -198,11 +204,17 @@ class WorkerCoordinator:
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
             if code == 401:
-                raise SystemExit("registration rejected (401): check the shared bearer token")
-            raise SystemExit(f"registration failed: HTTP {code}")
+                raise SystemExit(
+                    "registration rejected (401): check the join token (OUMIGO_JOIN_TOKEN) — "
+                    "a minted token may be expired or already used")
+            if code == 403:
+                raise SystemExit(f"registration refused (403): {_detail(exc.response)}")
+            raise SystemExit(f"registration failed: HTTP {code}: {_detail(exc.response)}")
         except httpx.RequestError as exc:
             raise SystemExit(f"could not reach manager at {self.manager_url}: {exc}")
         self.interval = resp.heartbeat_interval_s or 10
+        if resp.node_token:
+            self.token = resp.node_token
         log.info(
             "registered with manager %s (accepted=%s, heartbeat=%.0fs)",
             self.manager_url,
@@ -213,9 +225,24 @@ class WorkerCoordinator:
 
     def _reregister(self) -> None:
         try:
-            client.register(self.manager_url, self.register_req, self.token)
+            try:
+                resp = client.register(self.manager_url, self.register_req, self.token)
+            except httpx.HTTPStatusError as exc:
+                # The manager forgot our node token's signing secret (auth state wiped):
+                # fall back to the join token once — it works if it is reusable.
+                if exc.response.status_code != 401 or self.token == self.join_token:
+                    raise
+                log.warning("manager rejected our node token; re-joining with the join token")
+                resp = client.register(self.manager_url, self.register_req, self.join_token)
+            if resp.node_token:
+                self._adopt_token(resp.node_token)
         except Exception as exc:  # noqa: BLE001 - best-effort; next tick retries
             log.warning("re-registration failed: %s", exc)
+
+    def _adopt_token(self, token: str) -> None:
+        self.token = token
+        if self.metrics is not None:
+            self.metrics.token = token
 
     def _make_process(self, spec: NodeSpec, port: int) -> _ServerProcess:
         """Build the supervised backend child for this worker's `--backend`."""
@@ -435,12 +462,20 @@ def _check_local_weights(spec: NodeSpec) -> None:
     log.info("serving %s from local weights at %s", spec.model, path)
 
 
+def _detail(resp: httpx.Response) -> str:
+    try:
+        return str(resp.json().get("detail") or resp.text)
+    except ValueError:
+        return resp.text
+
+
 def run_worker(
     manager_url: str | None,
     token: str | None,
     state_dir: Path | None = None,
     discover_timeout: float = discovery.DEFAULT_DISCOVER_TIMEOUT,
     backend: str = BACKEND_VLLM,
+    transport: str = Transport.DIRECT.value,
 ) -> None:
     """Find the manager, fetch + env-negotiate the spec, preflight a port, derive
     identity, then hand off to the coordinator loop. The node_id is a hash of the host id +
@@ -460,10 +495,15 @@ def run_worker(
 
     # 1) Fetch the fleet spec (for the preferred port + model), then overlay env overrides.
     #    A manager without a model is fine as long as MODEL_NAME is set in the environment.
+    client.configure_tls()  # system CAs, plus $OUMIGO_MANAGER_CA_FILE for a private cert
     try:
-        spec = client.fetch_node_spec(manager_url, token)
+        spec, provider = client.fetch_spec(manager_url, token)
     except Exception as exc:  # noqa: BLE001 - surface any client/server error as a clean exit
         raise SystemExit(f"could not fetch spec from manager {manager_url}: {exc}")
+    if provider == CUSTOM and not manager_url.lower().startswith("https://"):
+        raise SystemExit(
+            f"manager {manager_url} runs provider CUSTOM, which requires TLS: "
+            "use its https:// URL")
     spec = _apply_env_overrides(spec)
 
     # 2) Preflight the actual port, then derive identity from host id + port.
@@ -481,6 +521,7 @@ def run_worker(
     register_req = RegisterRequest(
         node_id=node_id,
         address=address,
+        transport=Transport(transport),
         vllm_port=port,
         model=spec.model,  # effective model (after env negotiation) for the manager to display
         backend=backend,   # which inference backend this worker runs

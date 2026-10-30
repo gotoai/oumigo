@@ -23,21 +23,28 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from zeroconf.asyncio import AsyncZeroconf
 
 from oumigo import discovery
+from oumigo.common.http import local_control_url
 from oumigo.common.logging import configure_logging, set_verbosity
 from oumigo.common.proc import die_with_parent_preexec, terminate
+from oumigo.common.state import default_state_dir
 from oumigo.config.spec import NodeSpec
+from oumigo.providers.static import CUSTOM, LAN
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.control.store import MetricStore
+from oumigo.service.manager.credentials import Authenticator, AuthStore
 from oumigo.service.manager.router.server import create_router_app
 from oumigo.service.manager.settings import (
     build_node_spec,
     get_agent_defaults,
+    get_auth_state_dir,
+    get_control_tls,
     get_dashboard,
     get_data_plane,
+    get_trusted_proxies,
     load_manager_yaml,
 )
 from oumigo.protocol.messages import (
@@ -61,21 +68,28 @@ def create_app(
     reaper_forget_after: float | None = None,
     node_spec: NodeSpec | None = None,
     store: MetricStore | None = None,
+    auth: Authenticator | None = None,
+    provider_name: str = LAN,
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
     If `advertise_port` is set, the app advertises via mDNS from its lifespan, in a
     background task so registration happens after the socket is serving (no race)
     and without delaying startup or blocking the loop.
+
+    `auth` decides who may call the worker-facing endpoints (see
+    `oumigo.service.manager.credentials`). Without one, an in-memory authenticator is
+    built around `token` (the reusable fleet token), enforced only when it is set.
     """
 
     store = store or MetricStore()
+    if auth is None:
+        auth = Authenticator(AuthStore(), token, wan=provider_name == CUSTOM)
 
-    async def check_auth(authorization: str | None = Header(default=None)) -> None:
-        if token is None:
-            return  # auth disabled (v1 fail-open)
-        if authorization != f"Bearer {token}":
-            raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+    def _deny(node_id: str | None = None) -> HTTPException:
+        if node_id is not None and auth.store.is_node_revoked(node_id):
+            return HTTPException(status_code=403, detail=f"node {node_id} is revoked")
+        return HTTPException(status_code=401, detail="invalid or missing bearer token")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -116,13 +130,23 @@ def create_app(
     app = FastAPI(title="OumiGo manager control plane", lifespan=lifespan)
 
     @app.get("/spec")
-    async def spec() -> dict:
+    async def spec(authorization: str | None = Header(default=None)) -> dict:
         """Hand the fleet's vLLM spec to a worker so it can preflight its port and
-        derive its node_id *before* registering. None until a model is configured."""
-        return {"node_spec": node_spec.model_dump() if node_spec is not None else None}
+        derive its node_id *before* registering. None until a model is configured.
+        `provider` tells the worker which posture to enforce (CUSTOM: TLS only)."""
+        if not auth.may_read_spec(authorization):
+            raise _deny()
+        return {
+            "node_spec": node_spec.model_dump() if node_spec is not None else None,
+            "provider": provider_name,
+        }
 
     @app.post("/register", response_model=RegisterResponse)
-    async def register(req: RegisterRequest, _: None = Depends(check_auth)) -> RegisterResponse:
+    async def register(
+        req: RegisterRequest, authorization: str | None = Header(default=None)
+    ) -> RegisterResponse:
+        if not auth.may_register(authorization, req.node_id):
+            raise _deny(req.node_id)
         registry.register(
             node_id=req.node_id,
             address=req.address,
@@ -145,14 +169,19 @@ def create_app(
             node_id=req.node_id,
             heartbeat_interval_s=heartbeat_interval,
             node_spec=node_spec,
+            node_token=auth.store.node_token(req.node_id),
         )
 
     @app.post("/heartbeat", response_model=HeartbeatResponse)
-    async def heartbeat(req: HeartbeatRequest, _: None = Depends(check_auth)) -> HeartbeatResponse:
+    async def heartbeat(
+        req: HeartbeatRequest, authorization: str | None = Header(default=None)
+    ) -> HeartbeatResponse:
+        if not auth.may_act_as(authorization, req.node_id):
+            raise _deny(req.node_id)
         run_state = req.run_state.value if req.run_state is not None else None
         known = registry.heartbeat(
             req.node_id, req.node_state.value, run_state, req.vllm_port,
-            req.max_concurrent_requests,
+            req.max_concurrent_requests, req.tunnel_rtt_ms,
         )
         if not known:
             log.warning("heartbeat from unknown node %s (asking it to re-register)", req.node_id)
@@ -162,7 +191,9 @@ def create_app(
         return HeartbeatResponse(ok=True, known=known)
 
     @app.post("/metrics")
-    async def metrics(report: MetricsReport, _: None = Depends(check_auth)) -> dict:
+    async def metrics(report: MetricsReport, authorization: str | None = Header(default=None)) -> dict:
+        if not auth.may_act_as(authorization, report.node_id):
+            raise _deny(report.node_id)
         written = store.ingest(report.node_id, report.points)
         log.debug("metrics: ingested %d points from node %s", written, report.node_id)
         return {"ok": True, "accepted": written}
@@ -186,7 +217,7 @@ def create_app(
 
     @app.get("/status")
     async def status() -> dict:
-        data = {"workers": registry.count(), "auth": token is not None}
+        data = {"workers": registry.count(), "auth": auth.enforced}
         if status_info:
             data.update(status_info)
         return data
@@ -243,6 +274,14 @@ def run_server(
     data_host, data_port = get_data_plane(manager_config)
     dash_enabled, dash_host, dash_port = get_dashboard(manager_config)
 
+    # Auth state (signing secret, minted join tokens, revoked nodes) persists in the state
+    # dir so node tokens survive a manager restart and the CLI can mint/revoke while we run.
+    state_dir = get_auth_state_dir(manager_config) or default_state_dir()
+    auth_store = AuthStore.at(state_dir)
+    auth = Authenticator(auth_store, token, wan=provider_name == CUSTOM)
+    log.info("auth state in %s (worker auth %s)", auth_store.path,
+             "enforced" if auth.enforced else "DISABLED")
+
     registry = Registry()
     control_app = create_app(
         registry,
@@ -253,6 +292,8 @@ def run_server(
         reaper_timeout=heartbeat_timeout,
         reaper_forget_after=forget_after,
         node_spec=node_spec,
+        auth=auth,
+        provider_name=provider_name,
     )
     router_app = create_router_app(registry, node_spec,
                                    agent_defaults=get_agent_defaults(manager_config))
@@ -265,26 +306,38 @@ def run_server(
         data_host,
         data_port,
         provider_name,
-        "enabled" if token else "disabled",
+        "enforced" if auth.enforced else "disabled",
         node_spec.model if node_spec else "unset",
     )
 
     signal.signal(signal.SIGUSR1, lambda *_: set_verbosity(True))   # console: verbose on
     signal.signal(signal.SIGUSR2, lambda *_: set_verbosity(False))  # console: verbose off
 
+    # Control-plane transport: optional built-in TLS (normally nginx terminates it), and
+    # X-Forwarded-For believed only from the trusted proxies (nginx), so the client IP
+    # the allowlist sees can't be spoofed by a worker sending its own header.
+    control_opts: dict = {
+        "proxy_headers": True,
+        "forwarded_allow_ips": get_trusted_proxies(manager_config),
+    }
+    tls = get_control_tls(manager_config)
+    if tls is not None:
+        control_opts.update(ssl_certfile=tls[0], ssl_keyfile=tls[1])
+        log.info("control plane serves TLS itself (%s)", tls[0])
+
     # Reporting plane: bundled with the manager, but its own process for fault
     # isolation (a render hang there must never touch inference or heartbeats). It
     # pulls from this control plane over loopback, so point it at 127.0.0.1:<port>.
     dashboard = None
     if dash_enabled:
-        dashboard = _spawn_dashboard(port, dash_host, dash_port, verbose)
+        dashboard = _spawn_dashboard(port, dash_host, dash_port, verbose, tls=tls is not None)
 
     log_level = "info" if verbose else "warning"
     try:
         asyncio.run(
             _serve_both(
-                (control_app, host, port),
-                (router_app, data_host, data_port),
+                (control_app, host, port, control_opts),
+                (router_app, data_host, data_port, {}),
                 log_level,
             )
         )
@@ -296,7 +349,7 @@ def run_server(
 
 
 def _spawn_dashboard(
-    control_port: int, host: str, port: int, verbose: bool
+    control_port: int, host: str, port: int, verbose: bool, tls: bool = False
 ) -> subprocess.Popen | None:
     """Start the reporting-plane dashboard as a child process, or None if it fails.
 
@@ -310,7 +363,7 @@ def _spawn_dashboard(
         sys.executable, "-m", "oumigo.service.manager.dashboard",
         "--host", host,
         "--port", str(port),
-        "--control-url", f"http://127.0.0.1:{control_port}",
+        "--control-url", local_control_url(control_port, tls),
     ]
     if verbose:
         cmd.append("--verbose")
@@ -326,8 +379,8 @@ def _spawn_dashboard(
 
 
 async def _serve_both(
-    control: tuple[FastAPI, str, int],
-    router: tuple[FastAPI, str, int],
+    control: tuple[FastAPI, str, int, dict],
+    router: tuple[FastAPI, str, int, dict],
     log_level: str,
 ) -> None:
     """Serve the control and router apps concurrently on one event loop.
@@ -336,7 +389,7 @@ async def _serve_both(
     so we disable them and install a single handler that asks both to drain.
     """
     servers: list[uvicorn.Server] = []
-    for app, bind_host, bind_port in (control, router):
+    for app, bind_host, bind_port, extra in (control, router):
         config = uvicorn.Config(
             app,
             host=bind_host,
@@ -344,6 +397,7 @@ async def _serve_both(
             log_config=None,
             access_log=False,
             log_level=log_level,
+            **extra,
         )
         server = uvicorn.Server(config)
         server.install_signal_handlers = lambda: None  # we manage shutdown centrally

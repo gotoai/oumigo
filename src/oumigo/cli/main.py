@@ -8,7 +8,9 @@ One CLI with subcommands grouped by layer:
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +28,11 @@ app.add_typer(worker_app, name="worker")
 app.add_typer(manager_app, name="manager")
 app.add_typer(cluster_app, name="cluster")
 
+token_app = typer.Typer(help="Worker join tokens (run on the manager host).", no_args_is_help=True)
+node_app = typer.Typer(help="Registered worker nodes (run on the manager host).", no_args_is_help=True)
+manager_app.add_typer(token_app, name="token")
+manager_app.add_typer(node_app, name="node")
+
 
 @app.command("version")
 def version() -> None:
@@ -42,10 +49,17 @@ def worker_run(
         help="Manager control-plane URL. If unset, discover on the LAN via mDNS.",
     ),
     token_file: Optional[Path] = typer.Option(
-        None, "--token-file", help="Path to a file containing the shared bearer token."
+        None, "--token-file", help="Path to a file containing the join token."
     ),
     state_dir: Optional[Path] = typer.Option(
         None, "--state-dir", help="Directory holding the persisted node identity."
+    ),
+    transport: str = typer.Option(
+        "direct",
+        "--transport",
+        envvar="OUMIGO_TRANSPORT",
+        help="How the router reaches this worker: 'direct' (router dials this host; LAN) or "
+        "'tunnel' (this worker dials out to the manager; no inbound port needed).",
     ),
     discover_timeout: float = typer.Option(
         60.0,
@@ -89,13 +103,20 @@ def worker_run(
     if env_file is not None:
         load_env_file(env_file)
 
-    try:
-        token = resolve_manager_token(token_file)
-    except OSError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(1)
+    if transport not in ("direct", "tunnel"):
+        typer.echo(f"error: unknown --transport {transport!r}; choose direct or tunnel.", err=True)
+        raise typer.Exit(2)
+
+    # Join token: $OUMIGO_JOIN_TOKEN, else the v1 names ($OUMIGO_MANAGER_TOKEN / --token-file).
+    token = os.environ.get("OUMIGO_JOIN_TOKEN", "").strip() or None
     if token is None:
-        typer.echo("info: no token set; registering without authentication.", err=True)
+        try:
+            token = resolve_manager_token(token_file)
+        except OSError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1)
+    if token is None:
+        typer.echo("info: no join token set; registering without authentication.", err=True)
 
     run_worker(
         manager_url=manager_url,
@@ -103,6 +124,7 @@ def worker_run(
         state_dir=state_dir,
         discover_timeout=discover_timeout,
         backend=backend,
+        transport=transport,
     )
 
 
@@ -174,6 +196,7 @@ def _resolve_manager_runtime(
         "provider": provider,
         "node_spec": build_node_spec(manager_config),
         "bind_host": bind_host,
+        "control_tls": control_tls is not None,
         "bind_port": port or int(control_plane.get("port", 7014)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
         "heartbeat_timeout": int(heartbeat_cfg.get("timeout_s", 30)),
@@ -307,7 +330,96 @@ def manager_run(
         token=rt["token"],
         forward_args=forward,
         verbose=verbose,
+        tls=rt["control_tls"],
     )
+
+
+def _auth_store(config_file: Optional[Path]):
+    """Open the manager's auth state (the same file the running manager reads)."""
+    from oumigo.common.state import default_state_dir
+    from oumigo.config import resolve_config_file
+    from oumigo.service.manager.credentials import AuthStore
+    from oumigo.service.manager.settings import get_auth_state_dir, load_manager_yaml
+
+    config = load_manager_yaml(resolve_config_file(config_file))
+    return AuthStore.at(get_auth_state_dir(config) or default_state_dir())
+
+
+def _parse_duration(text: str) -> float | None:
+    """'90s' / '30m' / '1h' / '2d' -> seconds; '0' / 'none' / 'never' -> None (no expiry)."""
+    value = text.strip().lower()
+    if value in ("0", "none", "never", ""):
+        return None
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    try:
+        if value[-1] in units:
+            return float(value[:-1]) * units[value[-1]]
+        return float(value)
+    except ValueError:
+        raise typer.BadParameter(f"not a duration: {text!r} (e.g. 30m, 1h, 2d, never)") from None
+
+
+_CONFIG_OPTION = typer.Option(
+    None, "--config-file", "-c", envvar="OUMIGO_CONFIG_FILE",
+    help="Manager config file (locates auth.state_dir).",
+)
+
+
+@token_app.command("create")
+def token_create(
+    ttl: str = typer.Option("1h", "--ttl", help="Lifetime: 30m, 1h, 2d, or 'never'."),
+    uses: int = typer.Option(1, "--uses", help="Registrations allowed; 0 = unlimited."),
+    label: Optional[str] = typer.Option(None, "--label", help="Free-form note (e.g. the pod name)."),
+    config_file: Optional[Path] = _CONFIG_OPTION,
+) -> None:
+    """Mint a join token for a new worker (set it as OUMIGO_JOIN_TOKEN on the worker)."""
+    token_id, token = _auth_store(config_file).create_join_token(
+        ttl_s=_parse_duration(ttl), uses=uses or None, label=label
+    )
+    typer.echo(f"id: {token_id}", err=True)
+    typer.echo(token)  # stdout carries only the token, so it can be captured by scripts
+
+
+@token_app.command("list")
+def token_list(config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+    """List minted join tokens (the tokens themselves are not stored)."""
+    tokens = _auth_store(config_file).list_join_tokens()
+    if not tokens:
+        typer.echo("no join tokens minted.")
+        return
+    typer.echo(f"{'ID':<10}{'STATUS':<10}{'USES LEFT':<11}{'EXPIRES (UTC)':<21}LABEL")
+    for t in tokens:
+        status = "revoked" if t.revoked else ("usable" if t.usable else "spent")
+        expires = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t.expires_at))
+                   if t.expires_at else "never")
+        uses_left = "unlimited" if t.uses_left is None else str(t.uses_left)
+        typer.echo(f"{t.id:<10}{status:<10}{uses_left:<11}{expires:<21}{t.label or ''}")
+
+
+@token_app.command("revoke")
+def token_revoke(token_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+    """Revoke an unused join token. Workers that already joined keep their node tokens."""
+    if not _auth_store(config_file).revoke_join_token(token_id):
+        typer.echo(f"error: no join token with id {token_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"revoked join token {token_id}")
+
+
+@node_app.command("revoke")
+def node_revoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+    """Revoke a worker: its node token stops working and the manager drops it and closes
+    its tunnels within seconds. It cannot re-register under this node_id."""
+    _auth_store(config_file).revoke_node(node_id)
+    typer.echo(f"revoked node {node_id}")
+
+
+@node_app.command("unrevoke")
+def node_unrevoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+    """Lift a node revocation: its node token (derived, not stored) is accepted again."""
+    if not _auth_store(config_file).unrevoke_node(node_id):
+        typer.echo(f"error: node {node_id} is not revoked", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"node {node_id} may register again")
 
 
 def main() -> None:

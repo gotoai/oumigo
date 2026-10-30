@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 
 from oumigo import __version__
+from oumigo.common.http import loopback_verify
 
 try:
     # Importing readline transparently upgrades input() with line editing and
@@ -109,7 +110,7 @@ class ManagerConsole:
 
     def _get(self, path: str):
         try:
-            resp = httpx.get(self.base_url + path, timeout=3.0)
+            resp = httpx.get(self.base_url + path, timeout=3.0, verify=loopback_verify(self.base_url))
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:  # noqa: BLE001 - surface any client/server error to the REPL

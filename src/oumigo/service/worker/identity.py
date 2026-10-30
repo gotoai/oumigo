@@ -26,23 +26,11 @@ import uuid
 from pathlib import Path
 
 from oumigo.common.identity import compute_node_id
+from oumigo.common.state import default_state_dir
 
 STATE_FILE = "incarnations.json"
 HOST_ID_FILE = "host_id"
 ENV_HOST_ID = "OUMIGO_HOST_ID"
-
-
-def default_state_dir() -> Path:
-    """Prefer /var/lib/oumigo (service state); fall back to $XDG_STATE_HOME/oumigo."""
-    var = Path("/var/lib/oumigo")
-    try:
-        var.mkdir(parents=True, exist_ok=True)
-        if os.access(var, os.W_OK):
-            return var
-    except (PermissionError, OSError):
-        pass
-    state_home = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
-    return Path(state_home) / "oumigo"
 
 
 def resolve_host_id(directory: Path) -> str:

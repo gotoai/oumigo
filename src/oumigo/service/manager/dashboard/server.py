@@ -19,6 +19,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from oumigo.common.http import loopback_verify
 from oumigo.service.manager.dashboard.aggregate import gpu_util_series
 from oumigo.service.manager.dashboard.source import MetricMirror
 from oumigo.service.manager.dashboard.web import INDEX_HTML
@@ -38,7 +39,8 @@ def create_dashboard_app(control_url: str, *, poll_interval_s: float = 5.0) -> F
         # surfaces spurious `RemoteProtocolError: Server disconnected` warnings.
         # A fresh connection per pull costs nothing at this cadence and removes it.
         async with httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=0)
+            limits=httpx.Limits(max_keepalive_connections=0),
+            verify=loopback_verify(control_url),  # built-in TLS: own manager over loopback
         ) as client:
             await mirror.refresh(client)  # seed once so the first page isn't empty
             stop = asyncio.Event()

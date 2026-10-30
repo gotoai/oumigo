@@ -17,6 +17,7 @@ import time
 
 import httpx
 
+from oumigo.common.http import local_control_url, loopback_verify
 from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.service.manager.console import ManagerConsole
 
@@ -28,6 +29,7 @@ def run_with_child_server(
     forward_args: list[str],
     verbose: bool,
     startup_timeout: float = 15.0,
+    tls: bool = False,
 ) -> None:
     env = dict(os.environ)
     if token is not None:
@@ -38,7 +40,7 @@ def run_with_child_server(
         cmd, env=env, start_new_session=True, preexec_fn=die_with_parent_preexec()
     )
 
-    base_url = f"http://127.0.0.1:{port}"
+    base_url = local_control_url(port, tls)
     if not _wait_healthy(child, base_url, startup_timeout):
         print("error: control-plane server did not start", file=sys.stderr)
         terminate(child)
@@ -58,7 +60,7 @@ def _wait_healthy(child: subprocess.Popen, base_url: str, timeout: float) -> boo
         if child.poll() is not None:  # child exited before becoming healthy
             return False
         try:
-            httpx.get(base_url + "/healthz", timeout=0.5)
+            httpx.get(base_url + "/healthz", timeout=0.5, verify=loopback_verify(base_url))
             return True
         except Exception:  # noqa: BLE001 - not up yet
             time.sleep(0.1)
