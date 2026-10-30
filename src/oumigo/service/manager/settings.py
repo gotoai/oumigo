@@ -21,6 +21,9 @@ DEFAULT_DATA_PLANE_PORT = 7012
 DEFAULT_DASHBOARD_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so the LAN can view it
 DEFAULT_DASHBOARD_PORT = 7080  # 7070 is commonly taken (AnyDesk); reporting plane uses 7080
 
+DEFAULT_TRUSTED_PROXIES = ["127.0.0.1"]  # whose X-Forwarded-For is believed (nginx on the host)
+DEFAULT_TUNNEL_POOL_SPARE = 1  # tunnel connections kept beyond a worker's capacity
+
 
 def load_manager_yaml(config_file: Path | None) -> dict:
     """Load the manager config file, or ``{}`` if absent."""
@@ -44,6 +47,53 @@ def get_data_plane(config: dict) -> tuple[str, int]:
         str(dp.get("host", DEFAULT_DATA_PLANE_HOST)),
         int(dp.get("port", DEFAULT_DATA_PLANE_PORT)),
     )
+
+
+def get_control_tls(config: dict) -> tuple[str, str] | None:
+    """Built-in TLS for the control plane: (cert_file, key_file), or None (plain HTTP).
+
+    Optional — the normal deployment terminates TLS in nginx and binds the control
+    plane to loopback. Both files must be given together.
+    """
+    cp = config.get("control_plane") or {}
+    cert, key = cp.get("tls_cert_file"), cp.get("tls_key_file")
+    if not cert and not key:
+        return None
+    if not (cert and key):
+        raise ValueError("control_plane.tls_cert_file and tls_key_file must be set together")
+    return str(Path(cert).expanduser()), str(Path(key).expanduser())
+
+
+def get_trusted_proxies(config: dict) -> list[str]:
+    """Proxy addresses whose X-Forwarded-For the control plane believes (default: loopback)."""
+    cp = config.get("control_plane") or {}
+    proxies = cp.get("trusted_proxies")
+    if proxies is None:
+        return list(DEFAULT_TRUSTED_PROXIES)
+    return [str(p) for p in proxies]
+
+
+def get_tunnel(config: dict) -> tuple[bool, int]:
+    """(enabled, pool_spare) from the `tunnel` block. On by default under every provider —
+    each worker opts in with `OUMIGO_TRANSPORT=tunnel`; `enabled: false` refuses them."""
+    tb = config.get("tunnel") or {}
+    return bool(tb.get("enabled", True)), max(0, int(tb.get("pool_spare", DEFAULT_TUNNEL_POOL_SPARE)))
+
+
+def get_worker_allowlist(config: dict) -> list[str] | None:
+    """Worker source-IP allowlist (addresses / CIDR ranges), or None when switched off."""
+    wl = config.get("worker_allowlist") or {}
+    if not wl.get("enabled", False):
+        return None
+    return [str(a) for a in (wl.get("addresses") or [])]
+
+
+def get_auth_state_dir(config: dict) -> Path | None:
+    """Where the manager keeps its auth state (join tokens, signing secret, revocations).
+    None means the default state directory."""
+    auth = config.get("auth") or {}
+    path = auth.get("state_dir")
+    return Path(path).expanduser() if path else None
 
 
 def get_agent_defaults(config: dict) -> dict[str, float | None]:

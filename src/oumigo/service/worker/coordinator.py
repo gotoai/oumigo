@@ -369,6 +369,9 @@ def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
     # build on common minor-skewed installs, taking the whole backend down. vLLM's native
     # top-k/top-p sampler is the safe default; opt back in explicitly per node.
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    # The backend's idle keep-alive (vLLM default 5s) must outlast the router's (60s) so
+    # the router never reuses a connection the backend is closing; the HF server reads it too.
+    os.environ.setdefault("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "120")
 
     # HF cache/token: normalize in place so the backend child inherits them unchanged.
     hf_home = os.environ.get("HF_HOME")
@@ -440,7 +443,7 @@ def run_worker(
     backend: str = BACKEND_VLLM,
 ) -> None:
     """Find the manager, fetch + env-negotiate the spec, preflight a port, derive
-    identity, then hand off to the coordinator loop. The node_id is a hash of address +
+    identity, then hand off to the coordinator loop. The node_id is a hash of the host id +
     the *actual* backend port, so the port must be chosen before we register."""
     if backend not in BACKENDS:
         raise SystemExit(f"unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}")
@@ -463,13 +466,13 @@ def run_worker(
         raise SystemExit(f"could not fetch spec from manager {manager_url}: {exc}")
     spec = _apply_env_overrides(spec)
 
-    # 2) Preflight the actual port, then derive identity from address:port.
+    # 2) Preflight the actual port, then derive identity from host id + port.
     address = discovery.get_lan_ip()
     try:
         port = find_free_port(spec.host, spec.port)
     except PortUnavailable as exc:
         raise SystemExit(f"cannot start backend: {exc}")
-    node_id, incarnation, path = resolve_worker_identity(address, port, state_dir)
+    node_id, incarnation, path = resolve_worker_identity(port, state_dir)
     log.info(
         "worker identity %s (incarnation %d) at %s:%d, backend=%s, model=%s [%s]",
         node_id, incarnation, address, port, backend, spec.model, path,

@@ -141,17 +141,51 @@ def _resolve_manager_runtime(
 
     control_plane = manager_config.get("control_plane", {}) or {}
     heartbeat_cfg = manager_config.get("heartbeat", {}) or {}
+    bind_host = host or control_plane.get("host", "0.0.0.0")
+
+    # CUSTOM assumes an untrusted WAN: refuse bind layouts that would expose an
+    # unauthenticated or plain-HTTP surface (see oumigo.service.manager.posture).
+    from oumigo.service.manager.posture import check_posture
+    from oumigo.service.manager.settings import get_control_tls, get_dashboard, get_data_plane
+
+    try:
+        control_tls = get_control_tls(manager_config)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    data_host, _ = get_data_plane(manager_config)
+    dash_enabled, dash_host, _ = get_dashboard(manager_config)
+    problems = check_posture(
+        provider.name,
+        control_host=bind_host,
+        control_tls=control_tls is not None,
+        data_host=data_host,
+        dashboard_enabled=dash_enabled,
+        dashboard_host=dash_host,
+    )
+    if problems:
+        for problem in problems:
+            typer.echo(f"error: {problem}", err=True)
+        raise typer.Exit(1)
+
     return {
         "config_file": config_file,
         "token": token,
         "provider": provider,
         "node_spec": build_node_spec(manager_config),
-        "bind_host": host or control_plane.get("host", "0.0.0.0"),
+        "bind_host": bind_host,
         "bind_port": port or int(control_plane.get("port", 7014)),
         "heartbeat_interval": int(heartbeat_cfg.get("interval_s", 10)),
         "heartbeat_timeout": int(heartbeat_cfg.get("timeout_s", 30)),
         "forget_after": int(heartbeat_cfg.get("forget_after_seconds", 3600)),  # 1 hour
     }
+
+
+def _no_token_message(provider) -> str:
+    """Startup notice when no reusable join token is configured, per provider posture."""
+    from oumigo.service.manager.auth import NO_TOKEN_WARNING, NO_TOKEN_WAN_NOTICE
+
+    return NO_TOKEN_WAN_NOTICE if provider.is_wan else NO_TOKEN_WARNING
 
 
 @manager_app.command("serve")
@@ -175,12 +209,11 @@ def manager_serve(
 
     This is what systemd should run, and what `manager run` spawns on a TTY.
     """
-    from oumigo.service.manager.auth import NO_TOKEN_WARNING
     from oumigo.service.manager.control.server import run_server
 
     rt = _resolve_manager_runtime(config_file, token_file, host, port)
     if rt["token"] is None:
-        typer.echo(NO_TOKEN_WARNING, err=True)
+        typer.echo(_no_token_message(rt["provider"]), err=True)
 
     run_server(
         host=rt["bind_host"],
@@ -190,7 +223,7 @@ def manager_serve(
         heartbeat_interval=rt["heartbeat_interval"],
         heartbeat_timeout=rt["heartbeat_timeout"],
         forget_after=rt["forget_after"],
-        advertise=not no_mdns,
+        advertise=not no_mdns and not rt["provider"].is_wan,  # CUSTOM: workers use an explicit URL
         verbose=verbose,
         config_file=rt["config_file"],
         node_spec=rt["node_spec"],
@@ -234,8 +267,6 @@ def manager_run(
     systemd): run the server directly. Serves the control plane and the data-plane
     router (client inference calls forwarded to healthy worker vLLMs) together.
     """
-    from oumigo.service.manager.auth import NO_TOKEN_WARNING
-
     rt = _resolve_manager_runtime(config_file, token_file, host, port)
 
     if not sys.stdin.isatty():
@@ -243,7 +274,7 @@ def manager_run(
         from oumigo.service.manager.control.server import run_server
 
         if rt["token"] is None:
-            typer.echo(NO_TOKEN_WARNING, err=True)
+            typer.echo(_no_token_message(rt["provider"]), err=True)
         run_server(
             host=rt["bind_host"],
             port=rt["bind_port"],
@@ -252,7 +283,7 @@ def manager_run(
             heartbeat_interval=rt["heartbeat_interval"],
             heartbeat_timeout=rt["heartbeat_timeout"],
             forget_after=rt["forget_after"],
-            advertise=not no_mdns,
+            advertise=not no_mdns and not rt["provider"].is_wan,
             verbose=verbose,
             config_file=rt["config_file"],
             node_spec=rt["node_spec"],

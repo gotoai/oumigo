@@ -32,6 +32,8 @@ class NodeRecord:
     # Worker's negotiated in-flight cap; None until reported (router falls back to the
     # fleet default from node_spec.max_concurrent_requests).
     max_concurrent_requests: int | None = None
+    transport: str = "direct"  # "direct" (router dials address:port) | "tunnel" (worker dials out)
+    tunnel_rtt_ms: float | None = None  # tunnel worker's last reported WebSocket ping RTT
 
     @property
     def name(self) -> str:
@@ -62,6 +64,7 @@ class Registry:
         port: int | None = None,
         model: str | None = None,
         backend: str | None = None,
+        transport: str = "direct",
     ) -> NodeRecord:
         """Idempotent: keyed on node_id, so a re-register updates in place.
 
@@ -94,6 +97,7 @@ class Registry:
                 backend=backend if backend is not None else (existing.backend if existing else None),
                 # keep negotiated in-flight cap across re-register
                 max_concurrent_requests=existing.max_concurrent_requests if existing else None,
+                transport=transport,
             )
             self._nodes[node_id] = record
             return record
@@ -105,8 +109,9 @@ class Registry:
         run_state: str | None = None,
         port: int | None = None,
         max_concurrent_requests: int | None = None,
+        tunnel_rtt_ms: float | None = None,
     ) -> bool:
-        """Update last_seen + state (+ port / in-flight cap when reported). False if unknown."""
+        """Update last_seen + state (+ port / in-flight cap / RTT when reported). False if unknown."""
         with self._lock:
             record = self._nodes.get(node_id)
             if record is None:
@@ -118,7 +123,18 @@ class Registry:
                 record.port = port
             if max_concurrent_requests is not None:  # negotiated in-flight cap; keep last if omitted
                 record.max_concurrent_requests = max_concurrent_requests
+            if tunnel_rtt_ms is not None:
+                record.tunnel_rtt_ms = tunnel_rtt_ms
             return True
+
+    def get(self, node_id: str) -> NodeRecord | None:
+        with self._lock:
+            return self._nodes.get(node_id)
+
+    def remove(self, node_id: str) -> bool:
+        """Forget a node immediately (e.g. revoked). False if it was unknown."""
+        with self._lock:
+            return self._nodes.pop(node_id, None) is not None
 
     def list(self) -> list[NodeRecord]:
         with self._lock:

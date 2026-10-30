@@ -22,6 +22,12 @@ NO_TOKEN_WARNING = (
     "more details."
 )
 
+NO_TOKEN_WAN_NOTICE = (
+    "Notice: no reusable join token (OUMIGO_MANAGER_TOKEN / auth.token_file) is set. "
+    "Under provider CUSTOM worker authentication stays ENABLED: workers join with "
+    "per-pod tokens from `oumigo manager token create`."
+)
+
 
 def resolve_manager_token(token_file: Path | None = None) -> str | None:
     """Return the shared bearer token, or ``None`` if auth should be disabled.

@@ -1,11 +1,15 @@
-"""Worker node identity: a deterministic hash of address + actual vLLM port.
+"""Worker node identity: a deterministic hash of the host id + actual vLLM port.
 
-The `node_id` is derived (`oumigo.common.identity.compute_node_id`), not minted —
-same host + same port always yields the same id, so restarts don't create phantom
-nodes and no id has to be persisted. What *is* persisted is `incarnation`: a
-per-node counter bumped each start so the manager can tell "same node, restarted"
-apart from stale duplicates. It is keyed by node_id because one host may run
-several workers (different negotiated ports -> different ids).
+The `node_id` is derived (`oumigo.common.identity.compute_node_id`) from a *host id*
+and the port. The host id is a random UUID minted once and persisted here, or taken
+from `$OUMIGO_HOST_ID` — useful on pods whose disk is wiped on restart (e.g. a RunPod
+container disk) that should still come back as the same node. Same host + same port
+always yields the same id, so restarts don't create phantom nodes, and an address
+change (DHCP, NAT, tunnel) doesn't either.
+
+Also persisted is `incarnation`: a per-node counter bumped each start so the manager
+can tell "same node, restarted" apart from stale duplicates. It is keyed by node_id
+because one host may run several workers (different negotiated ports -> different ids).
 
 The port is known only after the coordinator preflights a free one, so identity is
 resolved *after* port selection (not at process start).
@@ -18,11 +22,14 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
 
 from oumigo.common.identity import compute_node_id
 
 STATE_FILE = "incarnations.json"
+HOST_ID_FILE = "host_id"
+ENV_HOST_ID = "OUMIGO_HOST_ID"
 
 
 def default_state_dir() -> Path:
@@ -38,17 +45,30 @@ def default_state_dir() -> Path:
     return Path(state_home) / "oumigo"
 
 
-def resolve_worker_identity(
-    address: str, port: int, state_dir: Path | None = None
-) -> tuple[str, int, Path]:
-    """Return (node_id, incarnation, path) for a worker at ``address:port``.
+def resolve_host_id(directory: Path) -> str:
+    """The host id: `$OUMIGO_HOST_ID` if set, else the persisted UUID (minted on first use)."""
+    env = os.environ.get(ENV_HOST_ID, "").strip()
+    if env:
+        return env
+    path = directory / HOST_ID_FILE
+    if path.is_file():
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    host_id = str(uuid.uuid4())
+    _atomic_write(path, host_id + "\n")
+    return host_id
 
-    `node_id` is derived from (address, port); `incarnation` is read for that id,
+
+def resolve_worker_identity(port: int, state_dir: Path | None = None) -> tuple[str, int, Path]:
+    """Return (node_id, incarnation, path) for this host's worker at ``port``.
+
+    `node_id` is derived from (host id, port); `incarnation` is read for that id,
     bumped, and persisted. First run for an id yields incarnation 1.
     """
-    node_id = compute_node_id(address, port)
     directory = Path(state_dir) if state_dir else default_state_dir()
     directory.mkdir(parents=True, exist_ok=True)
+    node_id = compute_node_id(resolve_host_id(directory), port)
     path = directory / STATE_FILE
 
     incarnations: dict[str, int] = {}

@@ -132,6 +132,7 @@ def create_app(
             port=req.vllm_port,
             model=req.model,
             backend=req.backend,
+            transport=req.transport.value,
         )
         log.info(
             "registered worker %s at %s:%s (incarnation=%d)",

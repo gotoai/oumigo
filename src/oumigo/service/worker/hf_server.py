@@ -402,6 +402,18 @@ class HFServer:
 
     def build_app(self) -> FastAPI:
         app = FastAPI(title=f"OumiGo HF server ({self.engine.model_id})")
+        # Same contract as vLLM: with `VLLM_API_KEY` set, /v1/* requires that bearer key
+        # (/health and /metrics stay open for the local supervisor). A tunnel worker sets
+        # it so only the manager's router can use the backend.
+        api_key = os.environ.get("VLLM_API_KEY") or None
+        if api_key:
+            expected = f"Bearer {api_key}"
+
+            @app.middleware("http")
+            async def require_api_key(request: Request, call_next):
+                if request.url.path.startswith("/v1/") and request.headers.get("authorization") != expected:
+                    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                return await call_next(request)
 
         @app.get("/health")
         async def health() -> dict:
@@ -542,7 +554,9 @@ def main() -> None:
 
     server = HFServer(engine, served_model_name=args.served_model_name)
     uvicorn.run(server.build_app(), host=args.host, port=args.port,
-                log_config=None, access_log=False, log_level="info" if args.verbose else "warning")
+                log_config=None, access_log=False, log_level="info" if args.verbose else "warning",
+                # vLLM's knob, honored here too: idle keep-alive must outlast the router's.
+                timeout_keep_alive=int(os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")))
 
 
 if __name__ == "__main__":

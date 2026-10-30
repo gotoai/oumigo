@@ -80,6 +80,13 @@ _DROP_RESPONSE = {
 CHAT_PATH = "/v1/chat/completions"  # the only path carrying messages worth shaping
 
 DEFAULT_QUEUE_TIMEOUT_S = 300.0  # give up (503) if all workers stay saturated this long
+# Upstream connection reuse. Idle connections are kept this long — below the worker
+# backend's own idle timeout (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, which the worker raises to
+# 120s) so the router never reuses a connection the backend is closing. httpx's 5s
+# default meant most requests after a short pause paid a fresh connect (+1-2 RTT on WAN).
+# No connection cap: `WorkerPool` already bounds in-flight requests per worker, and
+# httpx's default of 100 across *all* workers would queue a large fleet inside httpx.
+UPSTREAM_LIMITS = httpx.Limits(max_connections=None, max_keepalive_connections=None, keepalive_expiry=60.0)
 _PROMOTE_INTERVAL_S = 0.2        # re-check the queue this often (catches newly-joined workers)
 
 
@@ -235,7 +242,9 @@ def create_router_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # One shared client; no total read timeout so long generations aren't cut off.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(600.0, connect=10.0), limits=UPSTREAM_LIMITS
+        ) as client:
             app.state.client = client
             promoter = asyncio.create_task(pool.run_promoter())
             try:
@@ -306,7 +315,9 @@ def create_router_app(
                 return StreamingResponse(
                     _relay(upstream, _release),
                     status_code=upstream.status_code,
-                    headers={**_filter_response_headers(upstream), **extra_headers},
+                    # X-Accel-Buffering: an nginx in front must not buffer SSE tokens.
+                    headers={**_filter_response_headers(upstream), **extra_headers,
+                             "X-Accel-Buffering": "no"},
                     media_type=upstream.headers.get("content-type"),
                 )
             upstream = await client.request(method, url, content=body or None, headers=headers)
