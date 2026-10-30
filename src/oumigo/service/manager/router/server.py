@@ -20,6 +20,13 @@ may run vLLM on a different port — it preflight-negotiates a free one at start
 `http://{worker.address}:{worker.port}`, falling back to the fleet-default
 `node_spec.port` for a worker that hasn't reported its port yet.
 
+Transport, per worker: a `direct` worker is dialed at that address. A `tunnel` worker
+dialed out to the manager instead (`oumigo.service.manager.tunnel`); its requests go
+through a second httpx client whose connections are borrowed tunnel connections, with
+the node's backend API key in place of the client's `Authorization` header. A tunnel
+worker is routable only while it has at least one live tunnel connection — a good
+heartbeat alone doesn't prove the data path works.
+
 Endpoints are a thin passthrough of the vLLM OpenAI API (`/v1/chat/completions`,
 `/v1/completions`, `/v1/models`), including **SSE streaming** — the upstream response
 is relayed chunk-by-chunk.
@@ -57,11 +64,14 @@ from fastapi.routing import APIRoute
 from oumigo import __version__
 from oumigo.config.spec import NodeSpec
 from oumigo.service.manager.control.registry import NodeRecord, Registry
+from oumigo.service.manager.credentials import AuthStore
 from oumigo.service.manager.router.shaping import (
     cap_audio,
     clamp_output_tokens,
     shaping_headers,
 )
+from oumigo.service.manager.tunnel import TunnelRegistry, TunnelTransport, tunnel_host
+from oumigo.protocol.messages import Transport
 from oumigo.protocol.states import NodeState
 
 log = logging.getLogger("oumigo.service.manager.router")
@@ -117,8 +127,10 @@ class WorkerPool:
         default_capacity: int,
         queue_timeout: float = DEFAULT_QUEUE_TIMEOUT_S,
         rng: random.Random | None = None,
+        tunnels: TunnelRegistry | None = None,
     ) -> None:
         self.registry = registry
+        self.tunnels = tunnels
         self.default_capacity = max(1, default_capacity)
         self.queue_timeout = queue_timeout
         self._rng = rng or random
@@ -129,8 +141,15 @@ class WorkerPool:
         cap = record.max_concurrent_requests
         return cap if cap is not None else self.default_capacity
 
+    def _routable(self, record: NodeRecord) -> bool:
+        if record.state != NodeState.SERVING.value:
+            return False
+        if record.transport == Transport.TUNNEL.value:
+            return self.tunnels is not None and self.tunnels.connected(record.node_id) > 0
+        return True
+
     def _serving(self) -> list[NodeRecord]:
-        return [r for r in self.registry.list() if r.state == NodeState.SERVING.value]
+        return [r for r in self.registry.list() if self._routable(r)]
 
     def _available(self) -> list[NodeRecord]:
         return [r for r in self._serving() if self._inflight[r.node_id] < self._capacity(r)]
@@ -224,28 +243,59 @@ async def _relay(upstream: httpx.Response, on_done: Callable[[], None]):
         on_done()
 
 
+_RETRYABLE = (httpx.ConnectError, httpx.WriteError, httpx.RemoteProtocolError)
+
+
+async def _send_with_retry(
+    client: httpx.AsyncClient, request: httpx.Request, attempts: int
+) -> httpx.Response:
+    """Send (response body not yet read), retrying a failure that happened before any
+    response arrived — so a retry can never re-run a generation that already started."""
+    for attempt in range(attempts):
+        try:
+            return await client.send(request, stream=True)
+        except _RETRYABLE as exc:
+            if attempt + 1 >= attempts:
+                raise
+            log.info("upstream connection failed before a response (%s); retrying", exc)
+    raise AssertionError("unreachable")
+
+
 def create_router_app(
     registry: Registry,
     node_spec: NodeSpec | None = None,
     queue_timeout: float = DEFAULT_QUEUE_TIMEOUT_S,
     agent_defaults: dict[str, float | None] | None = None,
+    tunnels: TunnelRegistry | None = None,
+    auth_store: AuthStore | None = None,
 ) -> FastAPI:
-    """Build the data-plane FastAPI app that proxies to healthy worker vLLMs."""
+    """Build the data-plane FastAPI app that proxies to healthy worker vLLMs.
+
+    `tunnels` (shared with the control plane) and `auth_store` (to derive each tunnel
+    worker's backend API key) enable routing to `tunnel` workers; without them only
+    `direct` workers are routable.
+    """
     default_capacity = node_spec.max_concurrent_requests if node_spec else 4
     vllm_port = node_spec.port if node_spec else None
     fleet_model = node_spec.model if node_spec else None  # authoritative model name
     # Capability caps (None = off). Fleet knowledge: only the manager knows the model.
     max_audio_seconds = node_spec.max_audio_seconds if node_spec else None
     max_output_tokens = node_spec.max_output_tokens if node_spec else None
-    pool = WorkerPool(registry, default_capacity, queue_timeout)
+    pool = WorkerPool(registry, default_capacity, queue_timeout, tunnels=tunnels)
+    timeout = httpx.Timeout(600.0, connect=10.0)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # One shared client; no total read timeout so long generations aren't cut off.
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(600.0, connect=10.0), limits=UPSTREAM_LIMITS
-        ) as client:
+        async with (
+            httpx.AsyncClient(timeout=timeout, limits=UPSTREAM_LIMITS) as client,
+            httpx.AsyncClient(
+                timeout=timeout,
+                transport=TunnelTransport(tunnels or TunnelRegistry(), UPSTREAM_LIMITS),
+            ) as tunnel_client,
+        ):
             app.state.client = client
+            app.state.tunnel_client = tunnel_client
             promoter = asyncio.create_task(pool.run_promoter())
             try:
                 yield
@@ -276,10 +326,21 @@ def create_router_app(
             port = record.port if record.port is not None else vllm_port
             if port is None:
                 raise HTTPException(503, "no model configured; workers have no vLLM to route to")
-            url = f"http://{record.address}:{port}" + path
             body = await request.body()
             headers = _filter_request_headers(request.headers)  # drops content-length; httpx recomputes
-            client: httpx.AsyncClient = request.app.state.client
+            tunneled = record.transport == Transport.TUNNEL.value
+            if tunneled:
+                if auth_store is None:
+                    raise HTTPException(503, "tunnel workers are not routable (no auth store)")
+                url = f"http://{tunnel_host(record.node_id)}:{port}" + path
+                client: httpx.AsyncClient = request.app.state.tunnel_client
+                # The backend requires the node's key; the client's own credential (if any)
+                # never leaves the manager.
+                headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+                headers["Authorization"] = f"Bearer {auth_store.vllm_api_key(record.node_id)}"
+            else:
+                url = f"http://{record.address}:{port}" + path
+                client = request.app.state.client
 
             # Parse the body once: detect streaming AND overwrite the client's `model`
             # with the fleet's real model name (spec: the client's value is ignored, the
@@ -308,9 +369,14 @@ def create_router_app(
                     if mutated:
                         body = json.dumps(payload).encode()
 
+            # A tunnel connection can die while parked (worker restart, NAT drop). Nothing
+            # reached the backend if sending failed, so one retry on a fresh connection is
+            # safe; anything later (a partial response) is surfaced as 502 instead.
+            attempts = 2 if tunneled else 1
+
             if streaming:
                 up_req = client.build_request(method, url, content=body, headers=headers)
-                upstream = await client.send(up_req, stream=True)
+                upstream = await _send_with_retry(client, up_req, attempts)
                 # Slot is released by _relay's finally (stream end or client disconnect).
                 return StreamingResponse(
                     _relay(upstream, _release),
@@ -320,7 +386,12 @@ def create_router_app(
                              "X-Accel-Buffering": "no"},
                     media_type=upstream.headers.get("content-type"),
                 )
-            upstream = await client.request(method, url, content=body or None, headers=headers)
+            up_req = client.build_request(method, url, content=body or None, headers=headers)
+            upstream = await _send_with_retry(client, up_req, attempts)
+            try:
+                await upstream.aread()
+            finally:
+                await upstream.aclose()
             response = Response(
                 content=upstream.content,
                 status_code=upstream.status_code,

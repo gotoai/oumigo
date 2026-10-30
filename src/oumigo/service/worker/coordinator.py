@@ -41,6 +41,7 @@ from oumigo.providers.static import CUSTOM
 from oumigo.service.worker import client
 from oumigo.service.worker.identity import resolve_worker_identity
 from oumigo.service.worker.metrics import MetricsCollector, probe_gpu0_name
+from oumigo.service.worker.tunnel import TunnelClient
 from oumigo.service.worker.supervisor import (
     HFProcess,
     PortUnavailable,
@@ -56,6 +57,8 @@ BACKEND_VLLM = "vllm"
 BACKEND_TRANSFORMER = "transformer"
 BACKENDS = (BACKEND_VLLM, BACKEND_TRANSFORMER)
 
+ENV_BACKEND_API_KEY = "VLLM_API_KEY"  # read by vLLM and by the HF server
+
 
 class WorkerCoordinator:
     """Registers with the manager, supervises the backend, and drives the state machine."""
@@ -70,6 +73,7 @@ class WorkerCoordinator:
         spec: NodeSpec,
         vllm_port: int,
         backend: str = BACKEND_VLLM,
+        transport: str = Transport.DIRECT.value,
         max_restarts: int = 3,
         restart_backoff_s: float = 5.0,
         stop_grace_s: float = 30.0,
@@ -89,6 +93,8 @@ class WorkerCoordinator:
         self.node_id = node_id
         self.register_req = register_req
         self.backend = backend
+        self.transport = transport
+        self.tunnel: TunnelClient | None = None  # started after registration (tunnel only)
         # The transformer backend generates one request at a time (no batching), so it
         # tells the router to admit only one in-flight request to this worker. vLLM
         # batches — leave None so the router keeps the fleet-default capacity.
@@ -123,14 +129,18 @@ class WorkerCoordinator:
     def run(self) -> None:
         self._install_signals()
         assert self.spec is not None  # resolved pre-construction via /spec
-        self._register()  # identity + port already chosen; response only carries cadence
+        resp = self._register()  # identity + port already chosen; response carries cadence
+        if self.transport == Transport.TUNNEL.value:
+            self._start_tunnel(resp)  # before the backend: its API key must be in place
         self._start_vllm(self.spec)
         self._start_metrics()
         self._loop()
         # Loop returns on a graceful stop (drain + shut down) or on FAILED (already dead).
         if self.node_state != NodeState.FAILED:
-            self._drain_and_stop()
+            self._drain_and_stop()  # tunnels stay up meanwhile: in-flight requests use them
         self._stop_metrics()
+        if self.tunnel is not None:
+            self.tunnel.stop()
         log.info("coordinator exiting (final state=%s)", self.node_state.value)
 
     # --- main loop -----------------------------------------------------------
@@ -144,6 +154,8 @@ class WorkerCoordinator:
             resp = self._send_heartbeat()
             if resp is None:
                 continue  # transient blip; stay alive and retry next tick
+            if self.tunnel is not None:
+                self.tunnel.set_pool_size(resp.tunnel_pool_size)
             if not resp.known:
                 log.warning("manager does not know us; re-registering")
                 self._reregister()
@@ -193,6 +205,8 @@ class WorkerCoordinator:
         port = self._select_port(self.spec)  # re-preflight: the port may have freed or moved
         if port is None:
             return  # FAILED set by _select_port
+        if self.tunnel is not None:
+            self.tunnel.backend_port = port
         self.supervisor = self._make_process(self.spec, port)
         self.supervisor.start()
 
@@ -236,6 +250,13 @@ class WorkerCoordinator:
                 resp = client.register(self.manager_url, self.register_req, self.join_token)
             if resp.node_token:
                 self._adopt_token(resp.node_token)
+            if resp.vllm_api_key and resp.vllm_api_key != os.environ.get(ENV_BACKEND_API_KEY):
+                # Only if the manager lost its auth state: the router now presents a new
+                # key, so the backend must be restarted to require it.
+                log.warning("backend API key changed; restarting the backend")
+                os.environ[ENV_BACKEND_API_KEY] = resp.vllm_api_key
+                if self.supervisor is not None:
+                    self.supervisor.stop(self.stop_grace_s)  # reconcile restarts it
         except Exception as exc:  # noqa: BLE001 - best-effort; next tick retries
             log.warning("re-registration failed: %s", exc)
 
@@ -243,6 +264,25 @@ class WorkerCoordinator:
         self.token = token
         if self.metrics is not None:
             self.metrics.token = token
+
+    def _start_tunnel(self, resp: RegisterResponse) -> None:
+        """Tunnel transport: require the manager's backend key and dial out the pool."""
+        if not resp.vllm_api_key or not resp.tunnel_pool_size:
+            raise SystemExit(
+                "manager did not hand out tunnel settings; it may predate 0.4.0 or have "
+                "tunnel.enabled: false")
+        # The backend child inherits this (vLLM and the HF server both read VLLM_API_KEY):
+        # /v1/* then needs the key, which only the manager's router presents.
+        os.environ[ENV_BACKEND_API_KEY] = resp.vllm_api_key
+        assert self.vllm_port is not None
+        self.tunnel = TunnelClient(
+            self.manager_url,
+            token=lambda: self.token,
+            backend_port=self.vllm_port,
+            pool_size=resp.tunnel_pool_size,
+            ssl_context=client.configure_tls(),
+        )
+        self.tunnel.start()
 
     def _make_process(self, spec: NodeSpec, port: int) -> _ServerProcess:
         """Build the supervised backend child for this worker's `--backend`."""
@@ -355,9 +395,17 @@ class WorkerCoordinator:
                     run_state=self.run_state,
                     vllm_port=self.vllm_port,
                     max_concurrent_requests=self.report_max_concurrent,
+                    tunnel_rtt_ms=self.tunnel.rtt_ms if self.tunnel is not None else None,
                 ),
                 self.token,
             )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:  # revoked: the manager won't take us back
+                log.error("manager refused this node (%s); shutting down", _detail(exc.response))
+                self._stop.set()
+            else:
+                log.warning("heartbeat failed: %s", exc)
+            return None
         except Exception as exc:  # noqa: BLE001 - keep the worker alive across blips
             log.warning("heartbeat failed: %s", exc)
             return None
@@ -505,6 +553,10 @@ def run_worker(
             f"manager {manager_url} runs provider CUSTOM, which requires TLS: "
             "use its https:// URL")
     spec = _apply_env_overrides(spec)
+    if transport == Transport.TUNNEL.value:
+        # Nothing dials a tunnel worker: its backend binds loopback, reachable only
+        # through the tunnel (and by the local supervisor's health/metrics polls).
+        spec = spec.model_copy(update={"host": "127.0.0.1"})
 
     # 2) Preflight the actual port, then derive identity from host id + port.
     address = discovery.get_lan_ip()
@@ -530,5 +582,6 @@ def run_worker(
         capabilities=NodeCapabilities(gpu=probe_gpu0_name()),
     )
     WorkerCoordinator(
-        manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend
+        manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend,
+        transport=transport,
     ).run()

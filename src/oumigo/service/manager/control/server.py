@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, WebSocket
 from zeroconf.asyncio import AsyncZeroconf
 
 from oumigo import discovery
@@ -36,6 +36,7 @@ from oumigo.providers.static import CUSTOM, LAN
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.control.store import MetricStore
 from oumigo.service.manager.credentials import Authenticator, AuthStore
+from oumigo.service.manager.tunnel import TunnelConn, TunnelRegistry
 from oumigo.service.manager.router.server import create_router_app
 from oumigo.service.manager.settings import (
     build_node_spec,
@@ -45,6 +46,7 @@ from oumigo.service.manager.settings import (
     get_dashboard,
     get_data_plane,
     get_trusted_proxies,
+    get_tunnel,
     load_manager_yaml,
 )
 from oumigo.protocol.messages import (
@@ -53,6 +55,7 @@ from oumigo.protocol.messages import (
     MetricsReport,
     RegisterRequest,
     RegisterResponse,
+    Transport,
 )
 
 log = logging.getLogger("oumigo.service.manager")
@@ -70,6 +73,9 @@ def create_app(
     store: MetricStore | None = None,
     auth: Authenticator | None = None,
     provider_name: str = LAN,
+    tunnels: TunnelRegistry | None = None,
+    tunnel_enabled: bool = True,
+    tunnel_pool_spare: int = 1,
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
@@ -85,6 +91,13 @@ def create_app(
     store = store or MetricStore()
     if auth is None:
         auth = Authenticator(AuthStore(), token, wan=provider_name == CUSTOM)
+    tunnels = tunnels if tunnels is not None else TunnelRegistry()
+    default_capacity = node_spec.max_concurrent_requests if node_spec else 4
+
+    def _pool_size(capacity: int | None) -> int:
+        """Tunnel connections a worker keeps open: its capacity plus spares, so a parked
+        connection is always waiting even when every slot is busy."""
+        return (capacity if capacity is not None else default_capacity) + tunnel_pool_spare
 
     def _deny(node_id: str | None = None) -> HTTPException:
         if node_id is not None and auth.store.is_node_revoked(node_id):
@@ -113,6 +126,7 @@ def create_app(
             background.append(
                 asyncio.create_task(_reaper_loop(registry, reaper_timeout, forget_after))
             )
+        background.append(asyncio.create_task(_revocation_loop(registry, tunnels, auth.store)))
 
         try:
             yield
@@ -147,6 +161,9 @@ def create_app(
     ) -> RegisterResponse:
         if not auth.may_register(authorization, req.node_id):
             raise _deny(req.node_id)
+        tunneled = req.transport == Transport.TUNNEL
+        if tunneled and not tunnel_enabled:
+            raise HTTPException(400, "this manager does not accept tunnel workers (tunnel.enabled: false)")
         registry.register(
             node_id=req.node_id,
             address=req.address,
@@ -159,8 +176,8 @@ def create_app(
             transport=req.transport.value,
         )
         log.info(
-            "registered worker %s at %s:%s (incarnation=%d)",
-            req.node_id, req.address, req.vllm_port, req.incarnation,
+            "registered worker %s at %s:%s via %s (incarnation=%d)",
+            req.node_id, req.address, req.vllm_port, req.transport.value, req.incarnation,
         )
         if node_spec is None:
             log.warning("no model configured; node %s gets no vLLM config", req.node_id)
@@ -170,6 +187,13 @@ def create_app(
             heartbeat_interval_s=heartbeat_interval,
             node_spec=node_spec,
             node_token=auth.store.node_token(req.node_id),
+            # Tunnel workers: the key their backend must require (the router presents it),
+            # and how many connections to keep open. The transformer backend serves one
+            # request at a time, so it needs only one slot.
+            vllm_api_key=auth.store.vllm_api_key(req.node_id) if tunneled else None,
+            tunnel_pool_size=(
+                _pool_size(1 if req.backend == "transformer" else None) if tunneled else None
+            ),
         )
 
     @app.post("/heartbeat", response_model=HeartbeatResponse)
@@ -188,7 +212,34 @@ def create_app(
         # STOP delivery hook: a future console/router command sets a per-node command
         # here (HeartbeatResponse.command). None for now — the pull channel is wired,
         # the trigger is not.
-        return HeartbeatResponse(ok=True, known=known)
+        record = registry.get(req.node_id) if known else None
+        pool_size = None
+        if record is not None and record.transport == Transport.TUNNEL.value:
+            pool_size = _pool_size(record.max_concurrent_requests)
+        return HeartbeatResponse(ok=True, known=known, tunnel_pool_size=pool_size)
+
+    @app.websocket("/tunnel")
+    async def tunnel(ws: WebSocket) -> None:
+        """A tunnel worker's outbound connection: parked until the router borrows it to
+        carry one HTTP/1.1 connection to the worker's backend. Refused before the upgrade
+        (HTTP 403) unless it carries a valid node token of a registered tunnel worker."""
+        node_id = auth.tunnel_node(ws.headers.get("authorization"))
+        record = registry.get(node_id) if node_id is not None else None
+        if (
+            not tunnel_enabled
+            or record is None
+            or record.transport != Transport.TUNNEL.value
+        ):
+            log.debug("tunnel refused (node=%s)", node_id)
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        conn = TunnelConn(ws, node_id)
+        tunnels.add(conn)
+        try:
+            await conn.pump()  # returns when either side closes the connection
+        finally:
+            tunnels.remove(conn)
 
     @app.post("/metrics")
     async def metrics(report: MetricsReport, authorization: str | None = Header(default=None)) -> dict:
@@ -213,7 +264,13 @@ def create_app(
 
     @app.get("/workers")
     async def workers() -> dict:
-        return {"workers": [r.as_dict() for r in registry.list()]}
+        rows = []
+        for record in registry.list():
+            row = record.as_dict()
+            if record.transport == Transport.TUNNEL.value:
+                row.update(tunnels.stats(record.node_id))
+            rows.append(row)
+        return {"workers": rows}
 
     @app.get("/status")
     async def status() -> dict:
@@ -240,6 +297,26 @@ async def _reaper_loop(registry: Registry, timeout_s: float, forget_after_s: flo
                 log.info("node %s went silent (> %.0fs) -> LOST", node_id, timeout_s)
             for node_id in removed:
                 log.info("node %s forgotten after prolonged silence", node_id)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _revocation_loop(
+    registry: Registry, tunnels: TunnelRegistry, auth_store: AuthStore, interval: float = 2.0
+) -> None:
+    """Enforce `oumigo manager node revoke` (written by the CLI into the auth store) on
+    a running manager: forget the node and close its open tunnel connections. Its node
+    token is already refused on the next call; this cuts the connections it holds."""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            revoked = auth_store.revoked_nodes()
+            for record in registry.list():
+                if record.node_id in revoked:
+                    registry.remove(record.node_id)
+                    closed = await tunnels.close_node(record.node_id)
+                    log.warning("node %s revoked: dropped (closed %d tunnel connections)",
+                                record.node_id, closed)
     except asyncio.CancelledError:
         pass
 
@@ -282,7 +359,9 @@ def run_server(
     log.info("auth state in %s (worker auth %s)", auth_store.path,
              "enforced" if auth.enforced else "DISABLED")
 
+    tunnel_enabled, pool_spare = get_tunnel(manager_config)
     registry = Registry()
+    tunnels = TunnelRegistry()  # shared with the router on this one event loop
     control_app = create_app(
         registry,
         token,
@@ -294,9 +373,13 @@ def run_server(
         node_spec=node_spec,
         auth=auth,
         provider_name=provider_name,
+        tunnels=tunnels,
+        tunnel_enabled=tunnel_enabled,
+        tunnel_pool_spare=pool_spare,
     )
     router_app = create_router_app(registry, node_spec,
-                                   agent_defaults=get_agent_defaults(manager_config))
+                                   agent_defaults=get_agent_defaults(manager_config),
+                                   tunnels=tunnels, auth_store=auth_store)
 
     log.info(
         "manager control plane on %s:%d | data plane on %s:%d "

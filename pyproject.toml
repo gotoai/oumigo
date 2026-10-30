@@ -33,6 +33,7 @@ dependencies = [
     "typer>=0.12",       # single CLI with subcommands
     "pyyaml>=6",         # config files
     "zeroconf>=0.130",   # LAN discovery (mDNS / DNS-SD)
+    "websockets>=13",    # tunnel transport: /tunnel server (via uvicorn) + worker client
 ]
 
 [project.urls]
