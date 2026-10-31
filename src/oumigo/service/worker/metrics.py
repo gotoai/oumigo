@@ -313,6 +313,34 @@ def probe_gpu0_name() -> str | None:
     return None
 
 
+def probe_gpu0_vram_gib() -> float | None:
+    """One-shot total VRAM of GPU 0 in GiB (NVML first, else nvidia-smi); None when
+    neither is available. Like `probe_gpu0_name`, it creates no CUDA context."""
+    try:
+        import pynvml  # type: ignore[import-untyped]  # optional, GPU-only dep, no stubs
+
+        pynvml.nvmlInit()
+        try:
+            info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(0))
+            return info.total / 2**30
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:  # noqa: BLE001 - NVML absent/unusable; try nvidia-smi
+        pass
+    if shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits",
+                 "-i", "0"],
+                capture_output=True, text=True, timeout=3.0, check=True,
+            )
+            mib = _smi_float(proc.stdout.strip().splitlines()[0])
+            return mib / 1024 if mib is not None else None
+        except (OSError, subprocess.SubprocessError, IndexError):
+            pass
+    return None
+
+
 def _smi_float(token: str) -> float | None:
     """nvidia-smi emits 'N/A' / '[Not Supported]' for missing readings -> None."""
     try:

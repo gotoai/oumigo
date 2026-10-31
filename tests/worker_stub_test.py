@@ -118,8 +118,10 @@ class StubWorker:
     def __init__(
         self, index: int, manager_url: str, token: str | None, request_latency: float,
         transport: str = "direct", ssl_context: ssl.SSLContext | None = None,
+        profile: str | None = None,
     ) -> None:
         self.index = index
+        self.profile = profile  # catalog profile to register with (None: the fleet default)
         self.transport = transport
         self.ssl_context = ssl_context
         self.api_key: str | None = None        # tunnel: what the router must present
@@ -162,6 +164,7 @@ class StubWorker:
             node_id=self.node_id,
             address=self.host,
             transport=Transport(self.transport),
+            profile=self.profile,
             incarnation=0,
             state=NodeState.REGISTERING,
             capabilities=NodeCapabilities(gpu="StubGPU", vram_gb=16.0),
@@ -471,6 +474,7 @@ async def _run_fleet(args: argparse.Namespace) -> None:
             request_latency=args.request_latency,
             transport=args.transport,
             ssl_context=ssl_context,
+            profile=args.profile,
         )
         for i in range(args.workers)
     ]
@@ -588,6 +592,10 @@ def main() -> None:
     parser.add_argument(
         "--ca-file", default=os.environ.get("OUMIGO_MANAGER_CA_FILE"),
         help="PEM to trust for an https manager with a private certificate.",
+    )
+    parser.add_argument(
+        "--profile", default=os.environ.get("OUMIGO_MODEL_PROFILE"),
+        help="Catalog profile the stubs register with (default: the fleet's default).",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Log at DEBUG.")
     args = parser.parse_args()

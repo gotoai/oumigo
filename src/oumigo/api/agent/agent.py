@@ -21,6 +21,7 @@ import httpx
 
 from oumigo.api.agent.chat import OumiGoChat
 from oumigo.api.agent.tool import Tool
+from oumigo.config.catalog import ANY_MODEL
 from oumigo.guard import GuardProfile
 
 log = logging.getLogger("oumigo.api.agent.agent")
@@ -55,8 +56,12 @@ class OumiGoAgent:
         profile: GuardProfile | None = None,
         turn_timeout: float | None = UNSET,
         stall_timeout: float | None = UNSET,
+        model: str = ANY_MODEL,
     ) -> None:
         self.data_url = data_url.rstrip("/")
+        # The model id every request names (a catalog profile id, e.g.
+        # `gemma-4-12B-it-qat-w4a16-ct@128k`), or `any-model` for whatever the fleet serves.
+        self.model = model
         self.token = token
         self.max_iterations = max(1, int(max_iterations))
         self.sampling = dict(sampling or {})
@@ -95,6 +100,7 @@ class OumiGoAgent:
         try:
             resp = httpx.get(
                 f"{self.data_url}/agent-defaults",
+                params={"model": self.model},
                 headers={"Authorization": f"Bearer {self.token}"} if self.token else {},
                 timeout=_DEFAULTS_FETCH_TIMEOUT_S,
             )

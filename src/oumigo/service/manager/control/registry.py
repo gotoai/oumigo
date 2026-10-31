@@ -27,7 +27,8 @@ class NodeRecord:
     run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
     seq: int = 0  # 1-based order of first registration; drives the friendly name
     port: int | None = None  # worker's actual vLLM port (negotiated); None until reported
-    model: str | None = None  # effective model the worker serves (env-negotiable); None until reported
+    model: str | None = None  # weights the worker loads (Hub repo); None until reported
+    profile: str | None = None  # catalog profile id = the model id it serves; None: pre-0.5 worker
     backend: str | None = None  # inference backend in use ("vllm" | "transformer"); None until reported
     # Worker's negotiated in-flight cap; None until reported (router falls back to the
     # fleet default from node_spec.max_concurrent_requests).
@@ -36,13 +37,19 @@ class NodeRecord:
     tunnel_rtt_ms: float | None = None  # tunnel worker's last reported WebSocket ping RTT
 
     @property
+    def served_name(self) -> str | None:
+        """The model id this worker answers to (what the router routes by)."""
+        return self.profile or self.model
+
+    @property
     def name(self) -> str:
         """Human-facing label — the manager owns the seq -> UUID mapping."""
         return f"Worker#{self.seq}"
 
     def as_dict(self) -> dict:
         d = asdict(self)
-        d["name"] = self.name  # a property, so not captured by asdict
+        d["name"] = self.name  # properties, so not captured by asdict
+        d["served_name"] = self.served_name
         return d
 
 
@@ -65,6 +72,7 @@ class Registry:
         model: str | None = None,
         backend: str | None = None,
         transport: str = "direct",
+        profile: str | None = None,
     ) -> NodeRecord:
         """Idempotent: keyed on node_id, so a re-register updates in place.
 
@@ -93,6 +101,7 @@ class Registry:
                 port=port if port is not None else (existing.port if existing else None),
                 # worker reports its effective model at registration; keep last if omitted
                 model=model if model is not None else (existing.model if existing else None),
+                profile=profile if profile is not None else (existing.profile if existing else None),
                 # worker reports its backend at registration; keep last if omitted
                 backend=backend if backend is not None else (existing.backend if existing else None),
                 # keep negotiated in-flight cap across re-register

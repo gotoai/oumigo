@@ -6,8 +6,9 @@ The router is health-aware: it only ever forwards to workers the control-plane
 latest heartbeat-driven state without a network hop.
 
 Dispatch is a **FIFO admission queue** (`WorkerPool`), not round-robin. Each request
-is handed to a random worker that has a free slot; when every worker is at capacity
-the request waits in a single FIFO queue until a slot frees (or a new worker joins).
+is handed to a random eligible worker (one serving the model it names) that has a free
+slot; when every eligible worker is at capacity the request waits in a single FIFO
+queue until a slot it can use frees (or a new worker joins).
 Capacity is per worker and **negotiated** — a worker's reported
 `max_concurrent_requests` (defaulting to the fleet's `node_spec.max_concurrent_requests`).
 This gives backpressure and fault isolation: a stuck worker simply stops freeing its
@@ -37,15 +38,18 @@ Client auth: with `client_auth` on (always under provider CUSTOM, opt-in under L
 is checked here and never forwarded: it is dropped before the request goes to any
 worker, `direct` or `tunnel`.
 
-Model field: a client **may** send a `model` in the request body, but the router
-**always ignores and overwrites it** with the fleet's real model name (the model the
-manager configured, handed to every worker at registration). The homogeneous fleet
-serves exactly one model, so the manager is the source of truth — a client can't 404
-by naming a model the worker's vLLM doesn't serve.
+Model field: routing is **by model id**, and a model id is a catalog profile id
+(`gemma-4-12B-it-qat-w4a16-ct@128k`): every start-time configuration is its own model.
+A request naming an id goes only to workers running that profile; `any-model` (or no
+`model` at all) goes to any SERVING worker, and the router then names the chosen
+worker's id in the request, so the response says which model answered. An id the fleet
+doesn't know is `404 model_not_found`; a known id with no SERVING worker is
+`503 model_unavailable` (both in OpenAI's error shape). `/v1/models` is answered here,
+from the registry: `any-model` plus every id with a SERVING worker.
 
 Capability caps: on `/v1/chat/completions` the router may also trim over-long audio
-and clamp `max_tokens`, both **off unless `model.max_audio_seconds` /
-`model.max_output_tokens` are configured**. These are limits of the *model* rather
+and clamp `max_tokens`, both **off unless the chosen worker's profile sets
+`caps.max_audio_seconds` / `caps.max_output_tokens`**. These are limits of the *model* rather
 than business policy — the router is the only component that knows which model the
 fleet serves — so they live here even though request shaping otherwise belongs to a
 gateway in front. See `oumigo.service.manager.router.shaping` for what was measured
@@ -64,10 +68,11 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
 from oumigo import __version__
+from oumigo.config.catalog import ANY_MODEL, FleetCatalog, Profile
 from oumigo.config.spec import NodeSpec
 from oumigo.service.manager.control.registry import NodeRecord, Registry
 from oumigo.service.manager.credentials import AuthStore, bearer
@@ -107,7 +112,10 @@ _PROMOTE_INTERVAL_S = 0.2        # re-check the queue this often (catches newly-
 
 
 class NoWorkersAvailable(RuntimeError):
-    """Raised by `WorkerPool.acquire` when the fleet has no SERVING worker at all."""
+    """Raised by `WorkerPool.acquire` when no eligible worker is SERVING at all."""
+
+
+Eligible = Callable[[NodeRecord], bool]  # which workers a request accepts
 
 
 class WorkerPool:
@@ -115,10 +123,13 @@ class WorkerPool:
 
     A request acquires a *slot* on a worker before it's forwarded and releases it when
     the response finishes. Selection: any SERVING worker whose in-flight count is below
-    its capacity is eligible; one is chosen at random. When none are eligible the caller
-    joins a single FIFO queue and is woken — in arrival order — as slots free up. A
-    worker that never returns a response never frees its slots, so it drops out of the
-    eligible set and the queue routes around it (fault isolation).
+    its capacity is eligible; one is chosen at random. A request may narrow that set
+    (`eligible`, e.g. "serves model X"). When none are free the caller joins a single
+    FIFO queue and is woken as slots free up: a freed slot goes to the **oldest waiter
+    that accepts that worker**, so a busy model never holds up requests for another one,
+    and order is kept within each model. A worker that never returns a response never
+    frees its slots, so it drops out of the eligible set and the queue routes around it
+    (fault isolation).
 
     Capacity is per worker: the registry record's negotiated `max_concurrent_requests`,
     falling back to `default_capacity` when the worker hasn't reported one.
@@ -141,7 +152,7 @@ class WorkerPool:
         self.queue_timeout = queue_timeout
         self._rng = rng or random
         self._inflight: dict[str, int] = defaultdict(int)
-        self._waiters: deque[asyncio.Future[NodeRecord]] = deque()
+        self._waiters: deque[tuple[asyncio.Future[NodeRecord], Eligible | None]] = deque()
 
     def _capacity(self, record: NodeRecord) -> int:
         cap = record.max_concurrent_requests
@@ -154,39 +165,43 @@ class WorkerPool:
             return self.tunnels is not None and self.tunnels.connected(record.node_id) > 0
         return True
 
-    def _serving(self) -> list[NodeRecord]:
-        return [r for r in self.registry.list() if self._routable(r)]
+    def serving(self, eligible: Eligible | None = None) -> list[NodeRecord]:
+        return [r for r in self.registry.list()
+                if self._routable(r) and (eligible is None or eligible(r))]
 
-    def _available(self) -> list[NodeRecord]:
-        return [r for r in self._serving() if self._inflight[r.node_id] < self._capacity(r)]
+    def _available(self, eligible: Eligible | None = None) -> list[NodeRecord]:
+        return [r for r in self.serving(eligible)
+                if self._inflight[r.node_id] < self._capacity(r)]
 
-    def healthy_count(self) -> int:
-        return len(self._serving())
+    def healthy_count(self, eligible: Eligible | None = None) -> int:
+        return len(self.serving(eligible))
 
-    async def acquire(self) -> NodeRecord:
-        """Return a worker with a free slot, waiting FIFO if all are saturated.
+    async def acquire(self, eligible: Eligible | None = None) -> NodeRecord:
+        """Return a worker (among `eligible`) with a free slot, waiting FIFO if all are
+        saturated.
 
-        Raises `NoWorkersAvailable` when the fleet is empty (nothing to wait for) and
-        `asyncio.TimeoutError` if the queue wait exceeds `queue_timeout`.
+        Raises `NoWorkersAvailable` when no eligible worker is serving (nothing to wait
+        for) and `asyncio.TimeoutError` if the queue wait exceeds `queue_timeout`.
         """
-        # Fast path: nobody queued ahead of us and a slot is free -> take it now.
-        if not self._waiters:
-            avail = self._available()
-            if avail:
-                return self._take(self._rng.choice(avail))
+        # Earlier waiters first: whatever they can use goes to them. A free slot that is
+        # left over is ours if we accept that worker.
+        self._promote()
+        avail = self._available(eligible)
+        if avail:
+            return self._take(self._rng.choice(avail))
 
-        if self.healthy_count() == 0:  # nothing serving -> fail fast instead of hanging
+        if self.healthy_count(eligible) == 0:  # nothing serving -> fail fast, don't hang
             raise NoWorkersAvailable
 
         fut: asyncio.Future[NodeRecord] = asyncio.get_running_loop().create_future()
-        self._waiters.append(fut)
+        self._waiters.append((fut, eligible))
         try:
             return await asyncio.wait_for(fut, self.queue_timeout)
         except BaseException:
             # Timed out, or the client disconnected while queued. Drop our waiter; if a
             # slot was handed to us in the race window, give it back.
-            if fut in self._waiters:
-                self._waiters.remove(fut)
+            if any(waiter is fut for waiter, _ in self._waiters):
+                self._waiters = deque(w for w in self._waiters if w[0] is not fut)
             elif fut.done() and not fut.cancelled() and fut.exception() is None:
                 self.release(fut.result().node_id)
             raise
@@ -202,18 +217,19 @@ class WorkerPool:
         self._promote()
 
     def _promote(self) -> None:
-        """Give available slots to the oldest waiters, in FIFO order."""
-        while self._waiters:
-            avail = self._available()
-            if not avail:
-                return
-            fut = self._waiters[0]
+        """Give available slots to waiters, oldest first, each on a worker it accepts."""
+        if not self._waiters:
+            return
+        kept: deque[tuple[asyncio.Future[NodeRecord], Eligible | None]] = deque()
+        for fut, eligible in self._waiters:
             if fut.done():  # cancelled/timed-out (or already resolved) -> discard
-                self._waiters.popleft()
                 continue
-            record = self._take(self._rng.choice(avail))
-            self._waiters.popleft()
-            fut.set_result(record)
+            avail = self._available(eligible)
+            if avail:
+                fut.set_result(self._take(self._rng.choice(avail)))
+            else:
+                kept.append((fut, eligible))
+        self._waiters = kept
 
     async def run_promoter(self, interval: float = _PROMOTE_INTERVAL_S) -> None:
         """Periodically retry the queue so capacity that appears via a newly-SERVING
@@ -225,6 +241,13 @@ class WorkerPool:
                     self._promote()
         except asyncio.CancelledError:
             pass
+
+
+def _model_error(status: int, code: str, message: str) -> JSONResponse:
+    """An OpenAI-shaped error about the request's `model`, so SDKs surface it properly."""
+    kind = "invalid_request_error" if status < 500 else "server_error"
+    return JSONResponse(status_code=status, content={
+        "error": {"message": message, "type": kind, "param": "model", "code": code}})
 
 
 def _filter_request_headers(headers) -> dict[str, str]:
@@ -275,6 +298,8 @@ def create_router_app(
     tunnels: TunnelRegistry | None = None,
     auth_store: AuthStore | None = None,
     client_auth: bool = False,
+    catalog: FleetCatalog | None = None,
+    fleet_agent_defaults: dict[str, float | None] | None = None,
 ) -> FastAPI:
     """Build the data-plane FastAPI app that proxies to healthy worker vLLMs.
 
@@ -282,15 +307,45 @@ def create_router_app(
     worker's backend API key) enable routing to `tunnel` workers; without them only
     `direct` workers are routable. `client_auth` requires a client API key from
     `auth_store` on the inference endpoints.
+
+    Routing is by model id (= catalog profile id; see the module docstring). `catalog`
+    supplies the allowed ids and each profile's caps and client timeouts; `node_spec`
+    (the fleet default) covers workers registered without a profile.
+    `agent_defaults` are the default profile's timeouts, `fleet_agent_defaults` the
+    manager's own `agent:` block (for profiles without one).
     """
     if client_auth and auth_store is None:
         raise ValueError("client_auth needs an auth_store holding the client API keys")
     default_capacity = node_spec.max_concurrent_requests if node_spec else 4
     vllm_port = node_spec.port if node_spec else None
-    fleet_model = node_spec.model if node_spec else None  # authoritative model name
-    # Capability caps (None = off). Fleet knowledge: only the manager knows the model.
-    max_audio_seconds = node_spec.max_audio_seconds if node_spec else None
-    max_output_tokens = node_spec.max_output_tokens if node_spec else None
+    default_served = node_spec.served_name if node_spec else None
+    no_limits = {"turn_timeout": None, "stall_timeout": None}
+
+    def _served(record: NodeRecord) -> str | None:
+        """The model id a worker answers to (a pre-0.5 worker: the fleet default's)."""
+        return record.served_name or default_served
+
+    def _profile(model_id: str | None) -> Profile | None:
+        return catalog.get(model_id) if catalog is not None and model_id else None
+
+    def _caps(record: NodeRecord) -> tuple[float | None, int | None]:
+        """(max_audio_seconds, max_output_tokens) for the worker's model; None = off."""
+        profile = _profile(record.profile)
+        if profile is not None:
+            return profile.caps.max_audio_seconds, profile.caps.max_output_tokens
+        if node_spec is not None:
+            return node_spec.max_audio_seconds, node_spec.max_output_tokens
+        return None, None
+
+    def _known() -> set[str]:
+        """Model ids this fleet answers for: allowed profiles plus whatever registered
+        workers serve (an open fleet has no catalog)."""
+        ids = set(catalog.profiles) if catalog is not None else set()
+        ids.update(m for m in (_served(r) for r in registry.list()) if m)
+        if default_served:
+            ids.add(default_served)
+        return ids
+
     pool = WorkerPool(registry, default_capacity, queue_timeout, tunnels=tunnels)
     timeout = httpx.Timeout(600.0, connect=10.0)
 
@@ -326,9 +381,32 @@ def create_router_app(
     authed = [Depends(require_client)]
 
     async def _forward(request: Request, method: str, path: str) -> Response:
+        # The body names the model, which decides the eligible workers, so it is read
+        # and parsed before a worker is chosen. Non-JSON / non-dict bodies pass through
+        # untouched and may go to any worker.
+        body = await request.body()
+        payload = None
+        if body:
+            try:
+                payload = json.loads(body)
+            except (ValueError, TypeError):
+                payload = None
+        requested = payload.get("model") if isinstance(payload, dict) else None
+        eligible: Eligible | None = None
+        if requested not in (None, "", ANY_MODEL):
+            if requested not in _known():
+                return _model_error(
+                    404, "model_not_found",
+                    f"model {requested!r} is not served by this fleet; served: "
+                    f"{', '.join(sorted(_known())) or 'none'} (or {ANY_MODEL})")
+            eligible = lambda r: _served(r) == requested  # noqa: E731
+
         try:
-            record = await pool.acquire()
+            record = await pool.acquire(eligible)
         except NoWorkersAvailable:
+            if eligible is not None:
+                return _model_error(503, "model_unavailable",
+                                    f"model {requested!r} has no ready worker right now")
             raise HTTPException(503, "no healthy (SERVING) workers available") from None
         except asyncio.TimeoutError:
             raise HTTPException(503, "all workers saturated; request queue timed out") from None
@@ -347,7 +425,6 @@ def create_router_app(
             port = record.port if record.port is not None else vllm_port
             if port is None:
                 raise HTTPException(503, "no model configured; workers have no vLLM to route to")
-            body = await request.body()
             headers = _filter_request_headers(request.headers)  # drops content-length; httpx recomputes
             if client_auth:
                 # The client's API key was checked above; it never leaves the manager.
@@ -366,32 +443,28 @@ def create_router_app(
                 url = f"http://{record.address}:{port}" + path
                 client = request.app.state.client
 
-            # Parse the body once: detect streaming AND overwrite the client's `model`
-            # with the fleet's real model name (spec: the client's value is ignored, the
-            # manager is authoritative). Non-JSON / non-dict bodies pass through untouched.
+            # Name the chosen worker's model (needed for `any-model`; a no-op for a
+            # request that named it), then apply that model's caps.
             streaming = False
             extra_headers: dict[str, str] = {}
-            if body:
-                try:
-                    payload = json.loads(body)
-                except (ValueError, TypeError):
-                    payload = None
-                if isinstance(payload, dict):
-                    streaming = bool(payload.get("stream"))
-                    mutated = False
-                    if fleet_model is not None:
-                        payload["model"] = fleet_model
+            if isinstance(payload, dict):
+                streaming = bool(payload.get("stream"))
+                mutated = False
+                served = _served(record)
+                if served is not None and payload.get("model") != served:
+                    payload["model"] = served
+                    mutated = True
+                max_audio_seconds, max_output_tokens = _caps(record)
+                if path == CHAT_PATH:
+                    # Capability caps: trim audio the model cannot use, and bound the
+                    # reply so a degenerate generation can't hold the slot forever.
+                    shaping = cap_audio(payload, max_audio_seconds)
+                    if shaping.trimmed:
+                        extra_headers = shaping_headers(shaping)
                         mutated = True
-                    if path == CHAT_PATH:
-                        # Capability caps: trim audio the model cannot use, and bound the
-                        # reply so a degenerate generation can't hold the slot forever.
-                        shaping = cap_audio(payload, max_audio_seconds)
-                        if shaping.trimmed:
-                            extra_headers = shaping_headers(shaping)
-                            mutated = True
-                        mutated |= clamp_output_tokens(payload, max_output_tokens)
-                    if mutated:
-                        body = json.dumps(payload).encode()
+                    mutated |= clamp_output_tokens(payload, max_output_tokens)
+                if mutated:
+                    body = json.dumps(payload).encode()
 
             # A tunnel connection can die while parked (worker restart, NAT drop). Nothing
             # reached the backend if sending failed, so one retry on a fresh connection is
@@ -446,14 +519,42 @@ def create_router_app(
         return await _forward(request, "POST", "/v1/completions")
 
     @app.get("/v1/models", dependencies=authed)
-    async def models(request: Request) -> Response:
-        """list the model(s) served by the fleet"""
-        return await _forward(request, "GET", "/v1/models")
+    async def models() -> dict:
+        """list the models with a serving worker, plus any-model"""
+        serving: dict[str, list[NodeRecord]] = defaultdict(list)
+        for record in pool.serving():
+            served = _served(record)
+            if served:
+                serving[served].append(record)
+        data = [{"id": ANY_MODEL, "object": "model", "owned_by": "oumigo"}]
+        for model_id in sorted(serving):
+            records = serving[model_id]
+            profile = _profile(model_id)
+            weights = profile.model if profile else (records[0].model or model_id)
+            if profile is not None:
+                max_len = profile.engine.max_model_len
+            elif node_spec is not None and model_id == default_served:
+                max_len = node_spec.max_model_len
+            else:
+                max_len = None
+            data.append({
+                "id": model_id,
+                "object": "model",
+                "owned_by": weights.split("/", 1)[0] if "/" in weights else "oumigo",
+                "oumigo": {"weights": weights, "max_model_len": max_len,
+                           "serving": len(records)},
+            })
+        return {"object": "list", "data": data}
 
     @app.get("/agent-defaults", dependencies=authed)
-    async def agent_defaults_() -> dict:
-        """client-side defaults the fleet declares (see `manager.yaml` `agent:`)"""
-        return dict(agent_defaults or {"turn_timeout": None, "stall_timeout": None})
+    async def agent_defaults_(model: str | None = None) -> dict:
+        """client-side defaults for a model (default: the fleet default's)"""
+        profile = _profile(model) if model != ANY_MODEL else None
+        if profile is None:
+            return dict(agent_defaults or no_limits)
+        if profile.agent is not None:
+            return profile.agent.model_dump()
+        return dict(fleet_agent_defaults or no_limits)
 
     @app.get("/healthz")
     async def healthz() -> dict:

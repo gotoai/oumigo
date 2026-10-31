@@ -127,6 +127,11 @@ def get_agent_defaults(config: dict, profile: Profile | None = None) -> dict[str
         profile = get_catalog(config).default_profile
     if profile is not None and profile.agent is not None:
         return profile.agent.model_dump()
+    return get_fleet_agent_defaults(config)
+
+
+def get_fleet_agent_defaults(config: dict) -> dict[str, float | None]:
+    """The manager's own `agent:` block: the fallback for profiles without `agent:`."""
     block = config.get("agent") or {}
     return {
         "turn_timeout": _opt_seconds(block.get("turn_timeout"), "agent.turn_timeout"),

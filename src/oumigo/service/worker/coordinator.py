@@ -26,6 +26,7 @@ from pathlib import Path
 import httpx
 
 from oumigo import discovery
+from oumigo.config.catalog import context_label
 from oumigo.config.spec import NodeSpec
 from oumigo.protocol.messages import (
     HeartbeatRequest,
@@ -40,7 +41,7 @@ from oumigo.protocol.states import NodeState, RunState
 from oumigo.providers.static import CUSTOM
 from oumigo.service.worker import client
 from oumigo.service.worker.identity import resolve_worker_identity
-from oumigo.service.worker.metrics import MetricsCollector, probe_gpu0_name
+from oumigo.service.worker.metrics import MetricsCollector, probe_gpu0_name, probe_gpu0_vram_gib
 from oumigo.service.worker.tunnel import TunnelClient
 from oumigo.service.worker.supervisor import (
     HFProcess,
@@ -58,6 +59,7 @@ BACKEND_TRANSFORMER = "transformer"
 BACKENDS = (BACKEND_VLLM, BACKEND_TRANSFORMER)
 
 ENV_BACKEND_API_KEY = "VLLM_API_KEY"  # read by vLLM and by the HF server
+ENV_MODEL_PROFILE = "OUMIGO_MODEL_PROFILE"  # the catalog profile this worker runs
 
 
 class WorkerCoordinator:
@@ -426,13 +428,18 @@ class WorkerCoordinator:
 
 
 def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
-    """Overlay the negotiable env/.env settings onto the manager's spec (env wins).
+    """Overlay the node's own env/.env settings onto the manager's spec.
 
-    The model the manager hands out is negotiable per worker: `MODEL_NAME`,
-    `MAX_MODEL_LEN` and `MODEL_STORAGE_LOCATION` override `model` / `max_model_len` /
-    `storage_location`, and `HF_HOME` (with `~`/`$VARS` expanded) + `HF_TOKEN` (blank ->
-    anonymous) are normalized in `os.environ` so the spawned backend child inherits them.
-    When the manager configured no model at all, `MODEL_NAME` alone is enough to serve.
+    A **catalog profile** (`spec.profile` set) fixes every start-time setting: it is its
+    own model, so `MAX_MODEL_LEN` may not change it (a different context is a different
+    profile). Only node properties apply: `MODEL_STORAGE_LOCATION` (where this node keeps
+    the weights), `HF_HOME` (with `~`/`$VARS` expanded) and `HF_TOKEN` (blank ->
+    anonymous), normalized in `os.environ` so the spawned backend child inherits them.
+
+    Without a profile — an open fleet with no model, or a pre-0.5 manager — the old
+    negotiation applies: `MODEL_NAME` and `MAX_MODEL_LEN` override `model` /
+    `max_model_len`, and `MODEL_NAME` alone is enough when the manager has no model. In
+    an open fleet the worker then names its own profile id (`<repo-name>@<context>`).
 
     `storage_location` is negotiable for a reason: whether a node has the weights on
     disk is a property of *that node*, not of the fleet. A worker can point at its own
@@ -457,19 +464,40 @@ def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
     if not os.environ.get("HF_TOKEN", "").strip():
         os.environ.pop("HF_TOKEN", None)  # empty token -> anonymous, not a blank credential
 
+    if spec is not None and spec.profile is not None:
+        model = spec.model
+        updates: dict = {}
+        max_len = os.environ.get("MAX_MODEL_LEN")
+        if max_len and max_len.strip() != str(spec.max_model_len):
+            raise SystemExit(
+                f"MAX_MODEL_LEN={max_len} conflicts with profile {spec.profile} "
+                f"(max_model_len {spec.max_model_len}): context length is part of the "
+                "profile. Choose a profile with that context (OUMIGO_MODEL_PROFILE), or "
+                "unset MAX_MODEL_LEN.")
+        return _with_storage_override(spec, model, updates)
+
     model = os.environ.get("MODEL_NAME") or (spec.model if spec else None)
     if not model:
         raise SystemExit(
-            "no model to serve: set MODEL_NAME in the environment/.env, or configure "
-            "model.name on the manager"
+            "no model to serve: set OUMIGO_MODEL_PROFILE, or MODEL_NAME when the manager "
+            "has no catalog"
         )
-    updates: dict = {"model": model}
+    updates = {"model": model}
     max_len = os.environ.get("MAX_MODEL_LEN")
     if max_len:
         try:
             updates["max_model_len"] = int(max_len)
         except ValueError:
             raise SystemExit(f"MAX_MODEL_LEN must be an integer, got {max_len!r}")
+    if spec is None:
+        # Open fleet (no catalog): name our own profile id, so the router can route to it.
+        updates["profile"] = (f"{model.rsplit('/', 1)[-1]}@"
+                              f"{context_label(updates.get('max_model_len'))}")
+    return _with_storage_override(spec, model, updates)
+
+
+def _with_storage_override(spec: NodeSpec | None, model: str, updates: dict) -> NodeSpec:
+    """Apply MODEL_STORAGE_LOCATION (a node property) and check local weights."""
     storage = os.environ.get("MODEL_STORAGE_LOCATION")
     if storage is not None:
         # Validated (and "none" -> None) by NodeSpec. Re-validating through the model
@@ -486,6 +514,46 @@ def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
     resolved = base.model_copy(update=updates)
     _check_local_weights(resolved)
     return resolved
+
+
+def _vram_gb() -> float | None:
+    vram = probe_gpu0_vram_gib()
+    return round(vram, 1) if vram is not None else None
+
+
+def _check_requirements(spec: NodeSpec, backend: str) -> None:
+    """Exit before loading anything when this node can't meet the profile's `requires`.
+
+    A clear "needs 44 GiB, this GPU has 16" now beats an out-of-memory error from the
+    backend minutes later. A requirement that can't be checked here (no NVML /
+    nvidia-smi, no `packaging`) is logged and skipped rather than guessed.
+    """
+    if spec.min_vram_gib is not None:
+        vram = probe_gpu0_vram_gib()
+        if vram is None:
+            log.warning("cannot read this GPU's VRAM; skipping the profile's %.0f GiB check",
+                        spec.min_vram_gib)
+        elif vram < spec.min_vram_gib:
+            raise SystemExit(
+                f"profile {spec.served_name} needs a GPU with at least {spec.min_vram_gib:g} "
+                f"GiB; GPU 0 has {vram:.1f} GiB. Choose a smaller profile with "
+                "OUMIGO_MODEL_PROFILE.")
+    if spec.requires_vllm and backend == BACKEND_VLLM:
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+
+            from packaging.specifiers import SpecifierSet
+        except ImportError:
+            log.warning("cannot check the profile's vLLM %s requirement", spec.requires_vllm)
+            return
+        try:
+            installed = version("vllm")
+        except PackageNotFoundError:
+            raise SystemExit(f"profile {spec.served_name} needs vLLM {spec.requires_vllm}, "
+                             "but vLLM is not installed") from None
+        if installed not in SpecifierSet(spec.requires_vllm, prereleases=True):
+            raise SystemExit(f"profile {spec.served_name} needs vLLM {spec.requires_vllm}; "
+                             f"this worker has {installed}")
 
 
 def _check_local_weights(spec: NodeSpec) -> None:
@@ -543,11 +611,16 @@ def run_worker(
             )
         log.info("discovered manager at %s", manager_url)
 
-    # 1) Fetch the fleet spec (for the preferred port + model), then overlay env overrides.
-    #    A manager without a model is fine as long as MODEL_NAME is set in the environment.
+    # 1) Fetch the spec of the profile we chose (or the fleet default), then overlay this
+    #    node's own settings. MODEL_NAME is the deprecated way to choose: the manager maps
+    #    it to the one allowed profile of those weights.
     client.configure_tls()  # system CAs, plus $OUMIGO_MANAGER_CA_FILE for a private cert
+    choice = os.environ.get(ENV_MODEL_PROFILE, "").strip() or None
+    legacy_model = None if choice else (os.environ.get("MODEL_NAME", "").strip() or None)
+    if legacy_model:
+        log.warning("MODEL_NAME is deprecated: set %s to a profile id instead", ENV_MODEL_PROFILE)
     try:
-        spec, provider = client.fetch_spec(manager_url, token)
+        spec, provider = client.fetch_spec(manager_url, token, profile=choice, model=legacy_model)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code == 401:
@@ -561,7 +634,11 @@ def run_worker(
         raise SystemExit(
             f"manager {manager_url} runs provider CUSTOM, which requires TLS: "
             "use its https:// URL")
+    if choice and spec is not None and spec.profile != choice:
+        log.warning("manager %s does not know model profiles (pre-0.5): %s=%s is ignored, "
+                    "serving %s", manager_url, ENV_MODEL_PROFILE, choice, spec.model)
     spec = _apply_env_overrides(spec)
+    _check_requirements(spec, backend)
     if transport == Transport.TUNNEL.value:
         # Nothing dials a tunnel worker: its backend binds loopback, reachable only
         # through the tunnel (and by the local supervisor's health/metrics polls).
@@ -576,7 +653,7 @@ def run_worker(
     node_id, incarnation, path = resolve_worker_identity(port, state_dir)
     log.info(
         "worker identity %s (incarnation %d) at %s:%d, backend=%s, model=%s [%s]",
-        node_id, incarnation, address, port, backend, spec.model, path,
+        node_id, incarnation, address, port, backend, spec.served_name, path,
     )
 
     register_req = RegisterRequest(
@@ -584,11 +661,12 @@ def run_worker(
         address=address,
         transport=Transport(transport),
         vllm_port=port,
-        model=spec.model,  # effective model (after env negotiation) for the manager to display
-        backend=backend,   # which inference backend this worker runs
+        model=spec.model,      # the weights it loads
+        profile=spec.profile,  # the model id it serves (the router routes by it)
+        backend=backend,       # which inference backend this worker runs
         incarnation=incarnation,
         state=NodeState.REGISTERING,
-        capabilities=NodeCapabilities(gpu=probe_gpu0_name()),
+        capabilities=NodeCapabilities(gpu=probe_gpu0_name(), vram_gb=_vram_gb()),
     )
     WorkerCoordinator(
         manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend,

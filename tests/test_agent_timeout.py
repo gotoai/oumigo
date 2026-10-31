@@ -106,18 +106,19 @@ def test_nonsense_values_are_rejected_at_load() -> None:
 
 
 def test_unset_timeouts_are_fetched_from_the_fleet(monkeypatch) -> None:
-    asked: list[str] = []
+    asked: list[tuple[str, dict]] = []
 
-    def fake_get(url, *, headers=None, timeout=None):
-        asked.append(url)
+    def fake_get(url, *, params=None, headers=None, timeout=None):
+        asked.append((url, params))
         return _Resp({"turn_timeout": 90.0, "stall_timeout": 45.0})
 
     monkeypatch.setattr(agent_mod.httpx, "get", fake_get)
-    agent = OumiGoAgent(data_url="http://d:7012")
+    agent = OumiGoAgent(data_url="http://d:7012", model="small-model@32k")
 
     assert agent.turn_timeout == 90.0
     assert agent.stall_timeout == 45.0
-    assert asked == ["http://d:7012/agent-defaults"]
+    # The defaults are the agent's model's.
+    assert asked == [("http://d:7012/agent-defaults", {"model": "small-model@32k"})]
 
     agent.turn_timeout, agent.stall_timeout      # cached: asked exactly once
     assert len(asked) == 1
@@ -140,7 +141,7 @@ def test_explicit_none_means_no_timeout_not_ask_the_fleet(monkeypatch) -> None:
 
 
 def test_unreachable_manager_falls_back_to_no_timeout(monkeypatch) -> None:
-    def fake_get(url, *, headers=None, timeout=None):
+    def fake_get(url, *, params=None, headers=None, timeout=None):
         raise httpx.ConnectError("no route")
 
     monkeypatch.setattr(agent_mod.httpx, "get", fake_get)

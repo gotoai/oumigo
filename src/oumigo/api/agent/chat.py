@@ -49,10 +49,6 @@ if TYPE_CHECKING:  # avoid a runtime import cycle: agent.py imports this module
 
 log = logging.getLogger("oumigo.api.agent.chat")
 
-# The router overwrites the request's `model` with the fleet's real model name, so the
-# value we send is a placeholder that only has to satisfy the OpenAI schema.
-_MODEL_PLACEHOLDER = "oumigo"
-
 # Connect is always capped; the read side comes from the fleet's `agent:` block (see
 # OumiGoAgent.turn_timeout / .stall_timeout). Unset means no read timeout at all — a long
 # generation is not cut off, which is the behavior from before timeouts existed.
@@ -498,7 +494,7 @@ class OumiGoChat:
         rewrites them in place before the call). This stays a pure body builder.
         """
         body: dict[str, Any] = {
-            "model": _MODEL_PLACEHOLDER,
+            "model": self._agent.model,  # a model id, or any-model
             "messages": messages,
             "stream": stream,
         }

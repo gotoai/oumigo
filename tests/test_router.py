@@ -182,23 +182,34 @@ def test_forward_chat_completion(upstream) -> None:
     assert resp.json() == {"echo_model": "acme/mock", "path": "/v1/chat/completions"}
 
 
-def test_router_overwrites_client_model_with_fleet_model(upstream) -> None:
-    # Client asks for a bogus model; the router must overwrite it with the fleet's
-    # real model name (NodeSpec.model) before forwarding, so vLLM never 404s.
-    with TestClient(_router_app(upstream)) as client:  # fleet model = "acme/mock"
+def test_unknown_model_is_404_in_openai_shape(upstream) -> None:
+    with TestClient(_router_app(upstream)) as client:  # serves "acme/mock"
         resp = client.post(
             "/v1/chat/completions",
             json={"model": "client/whatever", "messages": [{"role": "user", "content": "hi"}]},
         )
+    assert resp.status_code == 404
+    error = resp.json()["error"]
+    assert (error["code"], error["param"]) == ("model_not_found", "model")
+    assert "acme/mock" in error["message"] and "any-model" in error["message"]
+
+
+@pytest.mark.parametrize("model", ["any-model", None])
+def test_any_model_or_none_is_routed_and_named(upstream, model) -> None:
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    if model is not None:
+        body["model"] = model
+    with TestClient(_router_app(upstream)) as client:
+        resp = client.post("/v1/chat/completions", json=body)
     assert resp.status_code == 200
-    assert resp.json()["echo_model"] == "acme/mock"  # upstream saw the fleet model, not the client's
+    assert resp.json()["echo_model"] == "acme/mock"  # the chosen worker's model id
 
 
-def test_forward_models(upstream) -> None:
+def test_models_are_listed_by_the_router(upstream) -> None:
     with TestClient(_router_app(upstream)) as client:
         resp = client.get("/v1/models")
     assert resp.status_code == 200
-    assert resp.json()["data"][0]["id"] == "acme/mock"
+    assert [m["id"] for m in resp.json()["data"]] == ["any-model", "acme/mock"]
 
 
 def test_503_when_no_healthy_workers() -> None:
@@ -213,7 +224,7 @@ def test_503_when_no_model_configured(upstream) -> None:
     _register(reg, "w1", upstream[0], NodeState.SERVING)
     app = create_router_app(reg, node_spec=None)  # no vLLM port to route to
     with TestClient(app) as client:
-        resp = client.get("/v1/models")
+        resp = client.post("/v1/chat/completions", json={"messages": []})
     assert resp.status_code == 503
 
 

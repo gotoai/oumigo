@@ -48,9 +48,10 @@ _ENV_HF_HOME = "HF_HOME"
 _ENV_HF_TOKEN = "HF_TOKEN"
 _ENV_VLLM_CACHE = "VLLM_CACHE_ROOT"
 _ENV_MODEL_NAME = "MODEL_NAME"
+_ENV_MODEL_PROFILE = "OUMIGO_MODEL_PROFILE"
 
-# Default model block for the manager to hand workers. Mirrors the manager.yaml
-# `model:` schema read by oumigo.service.manager.settings.build_node_spec.
+# Default model block for the manager to hand workers: a legacy single-model `model:`
+# block, which the manager turns into a one-profile catalog (oumigo.config.catalog).
 DEFAULT_MODEL: dict[str, Any] = {
     "name": "google/gemma-4-E2B",
     "port": 7001,
@@ -190,6 +191,7 @@ def oumigo_create_worker(
     hf_token: str | None = None,
     model_name: str | None = None,
     *,
+    profile: str | None = None,
     manager: OumiGoManager | None = None,
     backend: str = "vllm",
     manager_url: str | None = None,
@@ -217,10 +219,12 @@ def oumigo_create_worker(
     inside a Jupyter notebook and ambiguous when several managers advertise. A passed
     ``manager`` also supplies its ``bearer_token`` when one isn't given here.
 
-    ``hf_home`` / ``vllm_cache_root`` / ``hf_token`` / ``model_name`` are passed to the
-    replica via the child's environment (``HF_HOME`` / ``VLLM_CACHE_ROOT`` / ``HF_TOKEN``
-    / ``MODEL_NAME``). When ``model_name`` is None the worker serves whatever model the
-    manager configured.
+    ``profile`` is the catalog profile the worker runs (``OUMIGO_MODEL_PROFILE``); None
+    takes the fleet's default. ``model_name`` (``MODEL_NAME``) is the deprecated way to
+    choose: the manager maps it to the one allowed profile of those weights, or, in a
+    fleet without a catalog, the worker serves it as is. ``hf_home`` /
+    ``vllm_cache_root`` / ``hf_token`` reach the replica via the child's environment
+    (``HF_HOME`` / ``VLLM_CACHE_ROOT`` / ``HF_TOKEN``).
     """
     if manager is None:
         manager = _last_manager  # reuse the manager this process created/attached
@@ -247,6 +251,8 @@ def oumigo_create_worker(
     env[_ENV_VLLM_CACHE] = os.path.expanduser(os.path.expandvars(vllm_cache_root))
     if hf_token:
         env[_ENV_HF_TOKEN] = hf_token
+    if profile:
+        env[_ENV_MODEL_PROFILE] = profile
     if model_name:
         env[_ENV_MODEL_NAME] = model_name
     if bearer_token:

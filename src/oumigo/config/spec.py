@@ -1,9 +1,9 @@
 """Typed configuration schemas — the validated specs everything resolves to.
 
 `NodeSpec` describes one vLLM replica (the concrete args for one server). It is
-also the wire payload the manager hands a worker at registration, so the worker
-knows exactly what `vllm serve` to run — a homogeneous fleet means every worker
-gets the same spec.
+also the wire payload the manager hands a worker before registration, so the worker
+knows exactly what `vllm serve` to run. It is resolved from the worker's chosen
+catalog profile (`oumigo.config.catalog`), whose id is also the name it serves under.
 
 `ClusterSpec` describes the desired fleet; the manager expands it into NodeSpecs.
 """
@@ -26,8 +26,13 @@ class NodeSpec(BaseModel):
 
     model: str = Field(
         ...,
-        description="Canonical model id (e.g. `google/gemma-4-12B-it`). Also the name "
-                    "clients address: the router rewrites every request's `model` to it.",
+        description="Weights to load: the vendor's Hub repo (e.g. `google/gemma-4-12B-it`).",
+    )
+    profile: str | None = Field(
+        default=None,
+        description="Catalog profile id, e.g. `gemma-4-12B-it@128k`: the model id clients "
+                    "request and the name the backend serves under. None only for a spec "
+                    "from a pre-0.5 manager.",
     )
     storage_location: str | None = Field(
         default=None,
@@ -80,6 +85,12 @@ class NodeSpec(BaseModel):
         default_factory=list, description="Verbatim extra `vllm serve` flags (escape hatch)."
     )
 
+    # The profile's requirements, checked by the worker before the backend starts.
+    min_vram_gib: float | None = Field(
+        default=None, gt=0, description="Smallest GPU (total VRAM per GPU) the profile fits.")
+    requires_vllm: str | None = Field(
+        default=None, description="vLLM version specifier the profile needs, e.g. `>=0.28`.")
+
 
     @field_validator("storage_location", mode="before")
     @classmethod
@@ -120,12 +131,17 @@ class NodeSpec(BaseModel):
         return Path(unquote(urlparse(self.storage_location).path))
 
     @property
+    def served_name(self) -> str:
+        """The model id the backend answers to: the profile id, else the Hub id."""
+        return self.profile or self.model
+
+    @property
     def model_ref(self) -> str:
         """What the backend is actually pointed at: a local directory, or the Hub id.
 
-        Kept distinct from `model`, which stays the canonical *name* — the router
-        rewrites client requests to it, so a backend serving from disk must still
-        answer to it (see `--served-model-name` in the worker's argv builders).
+        Kept distinct from `served_name`, the id the router routes by: a backend serving
+        from disk or under a profile id must still answer to that id (see
+        `--served-model-name` in the worker's argv builders).
         """
         path = self.local_path
         return str(path) if path is not None else self.model

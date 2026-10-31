@@ -178,12 +178,12 @@ def test_registration_hands_out_tunnel_settings(fleet: Fleet) -> None:
 
 def test_non_streaming_request_through_the_tunnel(fleet: Fleet) -> None:
     resp = httpx.post(f"{fleet.router_url}/v1/chat/completions",
-                      json={"model": "whatever", "messages": [], "pad": 300_000},
+                      json={"model": "any-model", "messages": [], "pad": 300_000},
                       headers={"Authorization": "Bearer client-secret"}, timeout=10)
     assert resp.status_code == 200
     assert resp.json()["choices"][0]["message"]["content"] == "hello"
     assert len(resp.json()["big"]) == 300_000  # larger than one WebSocket message
-    assert fleet.events["models"] == [MODEL]  # router still rewrites the model
+    assert fleet.events["models"] == [MODEL]  # any-model -> the chosen worker's model id
 
 
 def test_streaming_requests_run_concurrently(fleet: Fleet) -> None:

@@ -37,7 +37,7 @@ ANY_MODEL = "any-model"  # the wildcard model id: accepts any served model
 
 # `<repo-name>@<context>[-<variant>...]`; context like 32k / 128k / 256k, or `default`
 # for a legacy `model:` block without max_model_len.
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@(?:[0-9]+k|default)(?:-[A-Za-z0-9._]+)*$")
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@(?:[0-9]+k?|default)(?:-[A-Za-z0-9._]+)*$")
 
 
 class CatalogError(ValueError):
@@ -114,6 +114,7 @@ class Profile(_Strict):
         e = self.engine
         return NodeSpec(
             model=self.model,
+            profile=self.id,
             storage_location=self.storage_location,
             port=port,
             dtype=e.dtype,
@@ -125,14 +126,18 @@ class Profile(_Strict):
             max_output_tokens=self.caps.max_output_tokens,
             download_dir=self.download_dir,
             extra_args=list(e.extra_args),
+            min_vram_gib=self.requires.min_vram_gib,
+            requires_vllm=self.requires.vllm,
         )
 
 
 def context_label(max_model_len: int | None) -> str:
-    """The `@<context>` part of an id: 131072 -> `128k`, None -> `default`."""
+    """The `@<context>` part of an id: 131072 -> `128k`, 512 -> `512`, None -> `default`."""
     if max_model_len is None:
         return "default"
-    return f"{round(max_model_len / 1024)}k"
+    if max_model_len % 1024:
+        return str(max_model_len)
+    return f"{max_model_len // 1024}k"
 
 
 def load_profile(path: Path) -> Profile:

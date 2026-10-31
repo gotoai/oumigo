@@ -46,13 +46,23 @@ def _headers(token: str | None) -> dict[str, str]:
 
 
 def fetch_spec(
-    manager_url: str, token: str | None = None, timeout: float = 10.0
+    manager_url: str,
+    token: str | None = None,
+    timeout: float = 10.0,
+    profile: str | None = None,
+    model: str | None = None,
 ) -> tuple[NodeSpec | None, str | None]:
-    """GET the fleet's vLLM spec (None when the manager has no model configured yet) and
-    the manager's provider (`LAN` / `CUSTOM`; None from a pre-0.4 manager), so the worker
-    can preflight its port and enforce the provider's posture before it registers."""
+    """GET the vLLM spec of the catalog profile this worker chose (`profile`), of the one
+    profile its deprecated MODEL_NAME names (`model`), or the fleet default — None when
+    the manager has no model at all — and the manager's provider (`LAN` / `CUSTOM`; None
+    from a pre-0.4 manager), so the worker can preflight its port and enforce the
+    provider's posture before it registers. A choice the fleet doesn't allow is a 403.
+    A pre-0.5 manager ignores the choice and returns its one model (`spec.profile` None).
+    """
+    params = {k: v for k, v in (("profile", profile), ("model", model)) if v}
     resp = httpx.get(
         f"{manager_url.rstrip('/')}/spec",
+        params=params,
         headers=_headers(token),
         timeout=timeout,
         verify=_verify,
@@ -67,7 +77,7 @@ def fetch_spec(
 def fetch_node_spec(
     manager_url: str, token: str | None = None, timeout: float = 10.0
 ) -> NodeSpec | None:
-    """The fleet's vLLM spec only (see `fetch_spec`)."""
+    """The fleet default's vLLM spec only (see `fetch_spec`)."""
     return fetch_spec(manager_url, token, timeout)[0]
 
 

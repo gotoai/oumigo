@@ -53,7 +53,8 @@ class RegisterRequest(BaseModel):
     address: str                       # LAN address the worker reports (dialed only for direct)
     transport: Transport = Transport.DIRECT
     vllm_port: int | None = None       # actual (preflight-selected) vLLM port; part of node_id
-    model: str | None = None           # effective model the worker serves (env-negotiable)
+    model: str | None = None           # weights the worker loads (Hub repo)
+    profile: str | None = None         # catalog profile it runs = the model id it serves
     backend: str | None = None         # inference backend in use ("vllm" | "transformer")
     incarnation: int = 0               # bumped each worker start; same identity
     state: NodeState = NodeState.REGISTERING
