@@ -70,7 +70,7 @@ model:
   dtype: auto                        # auto | bfloat16 | float16
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.90
-  max_model_len: 65536  # 64k        # null = model default
+  max_model_len: 131072  # 128k        # null = model default
   max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
 
   # --- Router-side capability caps (enforced by the manager, never sent to vLLM) ---

@@ -71,6 +71,40 @@ def test_worker_run_loads_env_before_starting(tmp_path, monkeypatch):
     assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "0"  # .env applied to environ
 
 
+def test_worker_options_come_from_the_env_file(tmp_path, monkeypatch):
+    # typer reads `envvar=` before the env file is loaded; the documented worker setup
+    # (OUMIGO_MANAGER_URL / OUMIGO_TRANSPORT in .env) must still reach run_worker.
+    from typer.testing import CliRunner
+
+    import oumigo.service.worker.coordinator as coordinator
+    from oumigo.cli.main import app
+
+    names = ("OUMIGO_MANAGER_URL", "OUMIGO_TRANSPORT", "OUMIGO_DISCOVER_TIMEOUT")
+    for name in names:
+        monkeypatch.setenv(name, "")   # registers the original state, so teardown restores it
+        monkeypatch.delenv(name)       # and the env file's values loaded below don't leak
+    envf = tmp_path / ".env"
+    envf.write_text("OUMIGO_MANAGER_URL=https://m.example\nOUMIGO_TRANSPORT=tunnel\n"
+                    "OUMIGO_DISCOVER_TIMEOUT=5\n")
+    called = {}
+    monkeypatch.setattr(coordinator, "run_worker", lambda **kw: called.update(kw))
+
+    result = CliRunner().invoke(app, ["worker", "run", "--env-file", str(envf)])
+    assert result.exit_code == 0, result.output
+    assert (called["manager_url"], called["transport"], called["discover_timeout"]) == (
+        "https://m.example", "tunnel", 5.0)
+
+    # A flag still beats the env file; with nothing set, the defaults apply.
+    result = CliRunner().invoke(app, ["worker", "run", "--env-file", str(envf),
+                                      "--transport", "direct"])
+    assert called["transport"] == "direct"
+    for name in names:
+        monkeypatch.delenv(name)
+    result = CliRunner().invoke(app, ["worker", "run", "--env-file", str(tmp_path / "none")])
+    assert (called["manager_url"], called["transport"], called["discover_timeout"]) == (
+        None, "direct", 60.0)
+
+
 def test_flashinfer_sampler_defaults_to_off(monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides

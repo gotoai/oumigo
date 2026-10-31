@@ -1,6 +1,7 @@
-"""Worker credentials: join tokens, per-node tokens, and backend API keys.
+"""Manager credentials: worker join tokens, per-node tokens, backend API keys, and
+client API keys.
 
-Three credentials, each with one job:
+Four credentials, each with one job:
 
 - **Join token** — what an operator gives a new worker (`OUMIGO_JOIN_TOKEN`). Either the
   *reusable* fleet token (`OUMIGO_MANAGER_TOKEN` / `auth.token_file`, the v1 shared
@@ -13,8 +14,11 @@ Three credentials, each with one job:
   node is revoked (`oumigo manager node revoke`).
 - **Backend API key** — what a tunnel worker's vLLM requires (`VLLM_API_KEY`); also
   derived from the secret, so the router can recompute it per node.
+- **Client API key** — what an inference client (e.g. Kari) presents to the router
+  (`oumigo manager apikey create`). Named and revocable one by one; stored only as a
+  SHA-256 hash, like minted join tokens.
 
-The state (signing secret, minted tokens, revoked nodes) lives in a small SQLite file in
+The state (signing secret, minted tokens, client keys, revoked nodes) lives in a small SQLite file in
 the manager's state directory. The CLI writes to the same file on the manager host —
 filesystem permissions are the admin auth — and the manager reads it per request, so a
 token minted or a node revoked while the manager runs takes effect immediately.
@@ -34,6 +38,7 @@ from pathlib import Path
 AUTH_DB_FILE = "manager_auth.db"
 JOIN_PREFIX = "oumigo-join-"
 NODE_PREFIX = "oumigo-node."
+KEY_PREFIX = "oumigo-key-"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -47,6 +52,13 @@ CREATE TABLE IF NOT EXISTS join_tokens (
     revoked INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS revoked_nodes (node_id TEXT PRIMARY KEY, revoked_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    key_hash TEXT NOT NULL UNIQUE,
+    label TEXT,
+    created_at REAL NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -80,6 +92,14 @@ class JoinToken:
         if self.expires_at is not None and self.expires_at <= time.time():
             return False
         return self.uses_left is None or self.uses_left > 0
+
+
+@dataclass
+class ApiKey:
+    id: str
+    label: str | None
+    created_at: float
+    revoked: bool
 
 
 class AuthStore:
@@ -186,6 +206,44 @@ class AuthStore:
                 f"SELECT 1 FROM join_tokens WHERE {usable}", (_hash(token), now)
             ).fetchone()
         return row is not None
+
+    # --- client API keys -------------------------------------------------------
+
+    def create_api_key(self, label: str | None = None) -> tuple[str, str]:
+        """Create a client API key. Returns (id, key); the key itself is never stored."""
+        key = KEY_PREFIX + secrets.token_urlsafe(32)
+        key_id = secrets.token_hex(4)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO api_keys (id, key_hash, label, created_at) VALUES (?, ?, ?, ?)",
+                (key_id, _hash(key), label, time.time()),
+            )
+            self._conn.commit()
+        return key_id, key
+
+    def list_api_keys(self) -> list[ApiKey]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, label, created_at, revoked FROM api_keys ORDER BY created_at"
+            ).fetchall()
+        return [ApiKey(r[0], r[1], r[2], bool(r[3])) for r in rows]
+
+    def revoke_api_key(self, key_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("UPDATE api_keys SET revoked=1 WHERE id=?", (key_id,))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def check_api_key(self, key: str | None) -> str | None:
+        """The id of a valid, unrevoked client API key (else None). Read per request, so a
+        key created or revoked through the CLI takes effect on the running manager at once."""
+        if not key or not key.startswith(KEY_PREFIX):
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM api_keys WHERE key_hash=? AND revoked=0", (_hash(key),)
+            ).fetchone()
+        return row[0] if row else None
 
     # --- nodes -----------------------------------------------------------------
 

@@ -316,3 +316,82 @@ def test_agent_defaults_are_served_to_clients(upstream) -> None:
                             agent_defaults={"turn_timeout": 90.0, "stall_timeout": 45.0})
     with TestClient(app) as client:
         assert client.get("/agent-defaults").json()["turn_timeout"] == 90.0
+
+
+# --- client auth (API keys) ----------------------------------------------------
+
+
+class _HeaderEcho(_MockVLLM):
+    seen_authorization: str | None = "unset"
+
+    def do_POST(self):  # noqa: N802
+        _HeaderEcho.seen_authorization = self.headers.get("Authorization")
+        super().do_POST()
+
+
+@pytest.fixture
+def header_upstream():
+    srv = HTTPServer(("127.0.0.1", 0), _HeaderEcho)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv.server_address
+    srv.shutdown()
+
+
+def _authed_router(upstream_addr):
+    from oumigo.service.manager.credentials import AuthStore
+
+    host, port = upstream_addr
+    reg = Registry()
+    _register(reg, "w1", host, NodeState.SERVING)
+    store = AuthStore()
+    app = create_router_app(reg, NodeSpec(model="acme/mock", port=port),
+                            auth_store=store, client_auth=True)
+    return app, store
+
+
+_CHAT = {"messages": [{"role": "user", "content": "hi"}]}
+
+
+def test_client_auth_refuses_missing_wrong_and_revoked_keys(upstream) -> None:
+    app, store = _authed_router(upstream)
+    key_id, key = store.create_api_key("t")
+    with TestClient(app) as client:
+        for headers in ({}, {"Authorization": "Bearer oumigo-key-wrong"},
+                        {"Authorization": key}):   # no Bearer scheme
+            resp = client.post("/v1/chat/completions", json=_CHAT, headers=headers)
+            assert resp.status_code == 401
+            assert resp.headers["www-authenticate"] == "Bearer"
+        good = {"Authorization": f"Bearer {key}"}
+        assert client.post("/v1/chat/completions", json=_CHAT, headers=good).status_code == 200
+        assert client.get("/v1/models", headers=good).status_code == 200
+        store.revoke_api_key(key_id)
+        assert client.post("/v1/chat/completions", json=_CHAT, headers=good).status_code == 401
+
+
+def test_client_auth_covers_metadata_but_not_health(upstream) -> None:
+    app, _ = _authed_router(upstream)
+    with TestClient(app) as client:
+        for path in ("/v1/models", "/agent-defaults", "/list"):
+            assert client.get(path).status_code == 401, path
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/version").status_code == 200
+
+
+def test_client_key_is_not_forwarded_to_direct_workers(header_upstream) -> None:
+    app, store = _authed_router(header_upstream)
+    _, key = store.create_api_key()
+    with TestClient(app) as client:
+        resp = client.post("/v1/chat/completions", json=_CHAT,
+                           headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+    assert _HeaderEcho.seen_authorization is None
+
+
+def test_client_auth_off_keeps_the_open_lan_router(upstream) -> None:
+    with TestClient(_router_app(upstream)) as client:
+        assert client.post("/v1/chat/completions", json=_CHAT).status_code == 200
+
+
+def test_client_auth_needs_a_store() -> None:
+    with pytest.raises(ValueError):
+        create_router_app(Registry(), NodeSpec(model="m", port=1), client_auth=True)

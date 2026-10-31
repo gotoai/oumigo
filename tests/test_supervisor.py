@@ -78,7 +78,7 @@ def test_stop_reaps_whole_process_group(tmp_path) -> None:
 
 def test_build_argv_minimal() -> None:
     argv = build_argv(NodeSpec(model="acme/tiny"))
-    assert argv[:3] == ["vllm", "serve", "acme/tiny"]
+    assert argv[:5] == [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", "acme/tiny"]
     assert "--host" in argv and "0.0.0.0" in argv
     assert argv[argv.index("--port") + 1] == "7001"
     assert argv[argv.index("--tensor-parallel-size") + 1] == "1"
@@ -204,7 +204,7 @@ def test_build_argv_serves_local_weights_under_the_fleet_name() -> None:
     backend must still answer to that name."""
     spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
     argv = build_argv(spec)
-    assert argv[:3] == ["vllm", "serve", "/srv/models/tiny"]
+    assert argv[:5] == [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", "/srv/models/tiny"]
     assert argv[argv.index("--served-model-name") + 1] == "acme/tiny"
 
 
@@ -234,3 +234,4 @@ def test_build_node_spec_reads_storage_location() -> None:
     # the documented "off" value round-trips to None rather than erroring
     off = build_node_spec({"model": {"name": "acme/tiny", "storage_location": "none"}})
     assert off is not None and off.storage_location is None
+

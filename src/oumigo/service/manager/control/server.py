@@ -43,6 +43,7 @@ from oumigo.service.manager.settings import (
     build_node_spec,
     get_agent_defaults,
     get_auth_state_dir,
+    get_client_auth,
     get_control_tls,
     get_dashboard,
     get_data_plane,
@@ -386,6 +387,8 @@ def run_server(
     auth = Authenticator(auth_store, token, wan=provider_name == CUSTOM)
     log.info("auth state in %s (worker auth %s)", auth_store.path,
              "enforced" if auth.enforced else "DISABLED")
+    client_auth = get_client_auth(manager_config)
+    log.info("router client auth %s", "REQUIRED (client API keys)" if client_auth else "off")
     allowlist = get_worker_allowlist(manager_config)
     if allowlist is not None:
         log.info("worker_allowlist ON: %s", ", ".join(allowlist) or "(empty: no worker allowed)")
@@ -411,7 +414,8 @@ def run_server(
     )
     router_app = create_router_app(registry, node_spec,
                                    agent_defaults=get_agent_defaults(manager_config),
-                                   tunnels=tunnels, auth_store=auth_store)
+                                   tunnels=tunnels, auth_store=auth_store,
+                                   client_auth=client_auth)
 
     log.info(
         "manager control plane on %s:%d | data plane on %s:%d "

@@ -31,7 +31,10 @@ app.add_typer(cluster_app, name="cluster")
 token_app = typer.Typer(help="Worker join tokens (run on the manager host).", no_args_is_help=True)
 node_app = typer.Typer(help="Registered worker nodes (run on the manager host).", no_args_is_help=True)
 manager_app.add_typer(token_app, name="token")
+apikey_app = typer.Typer(help="Client API keys for the router (run on the manager host).",
+                         no_args_is_help=True)
 manager_app.add_typer(node_app, name="node")
+manager_app.add_typer(apikey_app, name="apikey")
 
 
 @app.command("version")
@@ -54,18 +57,20 @@ def worker_run(
     state_dir: Optional[Path] = typer.Option(
         None, "--state-dir", help="Directory holding the persisted node identity."
     ),
-    transport: str = typer.Option(
-        "direct",
+    transport: Optional[str] = typer.Option(
+        None,
         "--transport",
         envvar="OUMIGO_TRANSPORT",
         help="How the router reaches this worker: 'direct' (router dials this host; LAN) or "
-        "'tunnel' (this worker dials out to the manager; no inbound port needed).",
+        "'tunnel' (this worker dials out to the manager; no inbound port needed). "
+        "Default: direct.",
     ),
-    discover_timeout: float = typer.Option(
-        60.0,
+    discover_timeout: Optional[float] = typer.Option(
+        None,
         "--discover-timeout",
         envvar="OUMIGO_DISCOVER_TIMEOUT",
-        help="Seconds to wait for mDNS discovery of the manager (when no --manager-url).",
+        help="Seconds to wait for mDNS discovery of the manager (when no --manager-url). "
+        "Default: 60.",
     ),
     env_file: Optional[Path] = typer.Option(
         Path(".env"),
@@ -102,6 +107,16 @@ def worker_run(
 
     if env_file is not None:
         load_env_file(env_file)
+    # typer resolves `envvar=` while parsing, before the env file is loaded: fill the
+    # options a flag or the real environment left unset from the env file's values.
+    manager_url = manager_url or os.environ.get("OUMIGO_MANAGER_URL", "").strip() or None
+    transport = transport or os.environ.get("OUMIGO_TRANSPORT", "").strip() or "direct"
+    if discover_timeout is None:
+        try:
+            discover_timeout = float(os.environ.get("OUMIGO_DISCOVER_TIMEOUT") or 60.0)
+        except ValueError:
+            typer.echo("error: OUMIGO_DISCOVER_TIMEOUT must be a number of seconds.", err=True)
+            raise typer.Exit(2)
 
     if transport not in ("direct", "tunnel"):
         typer.echo(f"error: unknown --transport {transport!r}; choose direct or tunnel.", err=True)
@@ -168,7 +183,12 @@ def _resolve_manager_runtime(
     # CUSTOM assumes an untrusted WAN: refuse bind layouts that would expose an
     # unauthenticated or plain-HTTP surface (see oumigo.service.manager.posture).
     from oumigo.service.manager.posture import check_posture
-    from oumigo.service.manager.settings import get_control_tls, get_dashboard, get_data_plane
+    from oumigo.service.manager.settings import (
+        get_client_auth,
+        get_control_tls,
+        get_dashboard,
+        get_data_plane,
+    )
 
     try:
         control_tls = get_control_tls(manager_config)
@@ -182,6 +202,7 @@ def _resolve_manager_runtime(
         control_host=bind_host,
         control_tls=control_tls is not None,
         data_host=data_host,
+        client_auth=get_client_auth(manager_config),
         dashboard_enabled=dash_enabled,
         dashboard_host=dash_host,
     )
@@ -420,6 +441,39 @@ def node_unrevoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) ->
         typer.echo(f"error: node {node_id} is not revoked", err=True)
         raise typer.Exit(1)
     typer.echo(f"node {node_id} may register again")
+
+
+@apikey_app.command("create")
+def apikey_create(
+    label: Optional[str] = typer.Option(None, "--label", help="Who holds it (e.g. kari-dev)."),
+    config_file: Optional[Path] = _CONFIG_OPTION,
+) -> None:
+    """Create a client API key (clients send it as `Authorization: Bearer <key>`)."""
+    key_id, key = _auth_store(config_file).create_api_key(label=label)
+    typer.echo(f"id: {key_id}", err=True)
+    typer.echo(key)  # stdout carries only the key, so it can be captured by scripts
+
+
+@apikey_app.command("list")
+def apikey_list(config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+    """List client API keys (the keys themselves are not stored)."""
+    keys = _auth_store(config_file).list_api_keys()
+    if not keys:
+        typer.echo("no client API keys.")
+        return
+    typer.echo(f"{'ID':<10}{'STATUS':<10}{'CREATED (UTC)':<21}LABEL")
+    for k in keys:
+        created = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(k.created_at))
+        typer.echo(f"{k.id:<10}{'revoked' if k.revoked else 'active':<10}{created:<21}{k.label or ''}")
+
+
+@apikey_app.command("revoke")
+def apikey_revoke(key_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+    """Revoke a client API key. The running manager refuses it from the next request on."""
+    if not _auth_store(config_file).revoke_api_key(key_id):
+        typer.echo(f"error: no client API key with id {key_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"revoked client API key {key_id}")
 
 
 def main() -> None:

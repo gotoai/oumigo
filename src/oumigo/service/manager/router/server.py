@@ -31,6 +31,12 @@ Endpoints are a thin passthrough of the vLLM OpenAI API (`/v1/chat/completions`,
 `/v1/completions`, `/v1/models`), including **SSE streaming** — the upstream response
 is relayed chunk-by-chunk.
 
+Client auth: with `client_auth` on (always under provider CUSTOM, opt-in under LAN),
+`/v1/*`, `/agent-defaults` and `/list` require `Authorization: Bearer <client API key>`
+(`oumigo manager apikey create`); `/healthz` and `/version` stay open. The client's key
+is checked here and never forwarded: it is dropped before the request goes to any
+worker, `direct` or `tunnel`.
+
 Model field: a client **may** send a `model` in the request body, but the router
 **always ignores and overwrites it** with the fleet's real model name (the model the
 manager configured, handed to every worker at registration). The homogeneous fleet
@@ -57,14 +63,14 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 
 from oumigo import __version__
 from oumigo.config.spec import NodeSpec
 from oumigo.service.manager.control.registry import NodeRecord, Registry
-from oumigo.service.manager.credentials import AuthStore
+from oumigo.service.manager.credentials import AuthStore, bearer
 from oumigo.service.manager.router.shaping import (
     cap_audio,
     clamp_output_tokens,
@@ -268,13 +274,17 @@ def create_router_app(
     agent_defaults: dict[str, float | None] | None = None,
     tunnels: TunnelRegistry | None = None,
     auth_store: AuthStore | None = None,
+    client_auth: bool = False,
 ) -> FastAPI:
     """Build the data-plane FastAPI app that proxies to healthy worker vLLMs.
 
     `tunnels` (shared with the control plane) and `auth_store` (to derive each tunnel
     worker's backend API key) enable routing to `tunnel` workers; without them only
-    `direct` workers are routable.
+    `direct` workers are routable. `client_auth` requires a client API key from
+    `auth_store` on the inference endpoints.
     """
+    if client_auth and auth_store is None:
+        raise ValueError("client_auth needs an auth_store holding the client API keys")
     default_capacity = node_spec.max_concurrent_requests if node_spec else 4
     vllm_port = node_spec.port if node_spec else None
     fleet_model = node_spec.model if node_spec else None  # authoritative model name
@@ -304,6 +314,17 @@ def create_router_app(
 
     app = FastAPI(title="OumiGo data plane (router)", lifespan=lifespan)
 
+    def require_client(request: Request) -> None:
+        """Refuse a request without a valid client API key (when client auth is on)."""
+        if not client_auth:
+            return
+        if auth_store.check_api_key(bearer(request.headers.get("authorization"))) is None:
+            raise HTTPException(
+                401, "missing or invalid API key", headers={"WWW-Authenticate": "Bearer"}
+            )
+
+    authed = [Depends(require_client)]
+
     async def _forward(request: Request, method: str, path: str) -> Response:
         try:
             record = await pool.acquire()
@@ -328,6 +349,9 @@ def create_router_app(
                 raise HTTPException(503, "no model configured; workers have no vLLM to route to")
             body = await request.body()
             headers = _filter_request_headers(request.headers)  # drops content-length; httpx recomputes
+            if client_auth:
+                # The client's API key was checked above; it never leaves the manager.
+                headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
             tunneled = record.transport == Transport.TUNNEL.value
             if tunneled:
                 if auth_store is None:
@@ -411,22 +435,22 @@ def create_router_app(
             _release()
             raise
 
-    @app.post(CHAT_PATH)
+    @app.post(CHAT_PATH, dependencies=authed)
     async def chat_completions(request: Request) -> Response:
         """proxy an OpenAI chat completion to a healthy worker vLLM"""
         return await _forward(request, "POST", CHAT_PATH)
 
-    @app.post("/v1/completions")
+    @app.post("/v1/completions", dependencies=authed)
     async def completions(request: Request) -> Response:
         """proxy an OpenAI text completion to a healthy worker vLLM"""
         return await _forward(request, "POST", "/v1/completions")
 
-    @app.get("/v1/models")
+    @app.get("/v1/models", dependencies=authed)
     async def models(request: Request) -> Response:
         """list the model(s) served by the fleet"""
         return await _forward(request, "GET", "/v1/models")
 
-    @app.get("/agent-defaults")
+    @app.get("/agent-defaults", dependencies=authed)
     async def agent_defaults_() -> dict:
         """client-side defaults the fleet declares (see `manager.yaml` `agent:`)"""
         return dict(agent_defaults or {"turn_timeout": None, "stall_timeout": None})
@@ -442,7 +466,7 @@ def create_router_app(
         """show the package version"""
         return {"version": __version__}
 
-    @app.get("/list")
+    @app.get("/list", dependencies=authed)
     async def list_commands() -> dict:
         """show the supported API commands"""
         paths: dict[str, dict] = {}

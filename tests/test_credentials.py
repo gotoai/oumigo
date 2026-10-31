@@ -66,6 +66,22 @@ def test_secret_and_tokens_survive_reopen(tmp_path) -> None:
     assert (tmp_path / "manager_auth.db").stat().st_mode & 0o777 == 0o600
 
 
+def test_client_api_keys_check_revoke_and_survive_reopen(tmp_path) -> None:
+    store = AuthStore(tmp_path / "auth.db")
+    key_id, key = store.create_api_key(label="kari-dev")
+    assert store.check_api_key(key) == key_id
+    for bad in (None, "", "oumigo-key-nope", key + "x", store.node_token("n1")):
+        assert store.check_api_key(bad) is None
+    assert key not in (tmp_path / "auth.db").read_bytes().decode("latin-1")  # hash only
+
+    reopened = AuthStore(tmp_path / "auth.db")      # e.g. the CLI's own connection
+    assert reopened.check_api_key(key) == key_id
+    assert reopened.revoke_api_key(key_id) and not reopened.revoke_api_key("missing")
+    assert store.check_api_key(key) is None         # the running manager sees it at once
+    [listed] = store.list_api_keys()
+    assert (listed.id, listed.label, listed.revoked) == (key_id, "kari-dev", True)
+
+
 def test_bearer_parsing() -> None:
     assert bearer("Bearer abc") == "abc"
     assert bearer("bearer  abc ") == "abc"

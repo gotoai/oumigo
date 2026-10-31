@@ -59,8 +59,15 @@ def find_free_port(host: str, preferred: int, max_tries: int = 64) -> int:
     )
 
 
+VLLM_CLI_MODULE = "vllm.entrypoints.cli.main"  # what the `vllm` console script runs
+
+
 def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     """Translate a NodeSpec into an exact `vllm serve` argv. Pure function.
+
+    vLLM runs under this worker's own interpreter (``python -m`` on the module behind the
+    `vllm` console script), so it is the vLLM installed with the worker, found without
+    $PATH — a worker started as `.venv/bin/oumigo` needn't activate the venv.
 
     ``port`` overrides ``spec.port`` — the coordinator may pick a different free port
     when the preferred one is taken on the host. Defaults to ``spec.port``.
@@ -69,7 +76,9 @@ def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     carries a ``storage_location``, otherwise the Hub id.
     """
     argv = [
-        "vllm",
+        sys.executable,
+        "-m",
+        VLLM_CLI_MODULE,
         "serve",
         spec.model_ref,
         "--host",

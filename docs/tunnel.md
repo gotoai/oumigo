@@ -37,7 +37,9 @@ round trip to the time to first token, the same as any other transport.
 |---|---|---|
 | mDNS advertising | on | off. Workers need `OUMIGO_MANAGER_URL` |
 | Control plane bind | anything | `127.0.0.1` behind nginx, or built-in TLS (`control_plane.tls_*`) |
-| Router (`data_plane`) and dashboard bind | anything | `127.0.0.1` only. There is no client auth yet, so only apps on the same host may use them |
+| Router (`data_plane`) bind | anything | `127.0.0.1` only. Remote clients reach it through nginx |
+| Router client auth (`data_plane.client_auth`) | off unless set | **always on**. Clients send a client API key |
+| Dashboard bind | anything | `127.0.0.1` only. View it through an SSH tunnel |
 | Worker auth with no reusable token | disabled (warning) | **enforced**. Workers join with minted tokens |
 | Manager URL a worker accepts | `http://` or `https://` | `https://` only |
 
@@ -56,8 +58,9 @@ control_plane:
   trusted_proxies: [127.0.0.1]   # whose X-Forwarded-For is believed (nginx)
 
 data_plane:
-  host: 127.0.0.1            # router: same-host apps only (e.g. oumi-gateway)
+  host: 127.0.0.1            # router: nginx forwards /v1/ here for remote clients
   port: 7012
+  # client_auth: true        # always on under CUSTOM; clients need an API key
 
 dashboard:
   host: 127.0.0.1            # view through an SSH tunnel
@@ -83,21 +86,23 @@ See `config_examples/manager_CUSTOM_vps.yaml` for a complete file.
 
 ### 2. nginx
 
-Forward only the worker-facing paths. The read-only endpoints (`/workers`, `/status`,
-`/metrics/latest`, `/metrics/since`), the router and the dashboard stay unexposed.
+Forward the worker-facing paths to the control plane and the inference paths to the
+router. The read-only endpoints (`/workers`, `/status`, `/metrics/latest`,
+`/metrics/since`) and the dashboard stay unexposed.
 
 ```nginx
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 
 server {
     listen 443 ssl;
-    http2 on;
     server_name oumigo.example.net;
     ssl_certificate     /etc/letsencrypt/live/oumigo.example.net/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/oumigo.example.net/privkey.pem;
 
     location ~ ^/(spec|register|heartbeat|tunnel)$ { include oumigo_proxy.conf; }
     location = /metrics                            { include oumigo_proxy.conf; }
+    location /v1/                                  { include oumigo_router.conf; }
+    location = /agent-defaults                     { include oumigo_router.conf; }
     location / { return 404; }
 }
 ```
@@ -114,6 +119,19 @@ proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $scheme;
 proxy_read_timeout 300s;                              # tunnels ping every 20 s
 proxy_send_timeout 300s;
+```
+
+`oumigo_router.conf` (the router checks the client API key itself):
+
+```nginx
+proxy_pass http://127.0.0.1:7012;
+proxy_http_version 1.1;
+proxy_set_header Host              $host;
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_buffering off;                                  # stream SSE tokens as they come
+proxy_read_timeout 600s;                              # long generations
+client_max_body_size 64m;                             # audio/image payloads
 ```
 
 - Certificates come from certbot / Let's Encrypt. `nginx -s reload` after a renewal is
@@ -149,7 +167,22 @@ Then run `oumigo worker run` as usual.
 - A pod whose disk is wiped on restart can keep its identity with `OUMIGO_HOST_ID=<any
   stable string>`. Otherwise it registers as a new node.
 
-### 4. Remove a worker
+### 4. Give a client an API key
+
+On the manager host, create one key per client:
+
+```bash
+oumigo manager apikey create --label kari-dev    # prints the key
+oumigo manager apikey list
+oumigo manager apikey revoke <id>                # refused from the next request on
+```
+
+The client calls `https://oumigo.example.net/v1/...` with `Authorization: Bearer <key>`.
+Any OpenAI-compatible client works with its `api_key` setting. For the oumigo Python
+client, pass the key as the agent's `token`. Keys are stored only as hashes, next to the
+join tokens.
+
+### 5. Remove a worker
 
 ```bash
 oumigo manager node revoke <node_id>     # node_id: see `workers` in the console
@@ -182,8 +215,9 @@ control_plane:
 | Join token (`OUMIGO_JOIN_TOKEN`) | Operator → worker | Minted: TTL and use count. Reusable: until rotated |
 | Node token | Issued at registration, held by the worker | Until the node is revoked |
 | Backend API key | Derived per node; the worker's backend requires it | Same as the node |
+| Client API key | Operator → inference client; the router requires it | Until revoked |
 
-Minted tokens are stored only as hashes, in `<state_dir>/manager_auth.db` (mode 0600),
+Minted tokens and client API keys are stored only as hashes, in `<state_dir>/manager_auth.db` (mode 0600),
 next to the signing secret. Treat anything on a rented pod as readable by the host
 operator. That is why tokens are per pod, short-lived, and revocable per node.
 
@@ -210,3 +244,5 @@ they age out.
 | Worker exits: `requires TLS: use its https:// URL` | `CUSTOM` manager reached over `http://` |
 | Worker SERVING but `tunnel 0/0` in the console | nginx missing the WebSocket `Upgrade` lines, or `tunnel.enabled: false` |
 | `tunnel slot N refused by manager (HTTP 403)` briefly after a manager restart | Normal: tunnels redial before the worker re-registers |
+| Client gets `401 missing or invalid API key` | No `Authorization: Bearer <key>`, a mistyped key, or the key was revoked (`oumigo manager apikey list`) |
+| Streamed tokens arrive all at once through nginx | `proxy_buffering off` missing from the router location |

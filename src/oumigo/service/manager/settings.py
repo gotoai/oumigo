@@ -49,6 +49,19 @@ def get_data_plane(config: dict) -> tuple[str, int]:
     )
 
 
+def get_client_auth(config: dict) -> bool:
+    """Whether the router requires a client API key (`data_plane.client_auth`).
+
+    Default: on under provider CUSTOM, off under LAN. CUSTOM cannot turn it off — the
+    manager can't see whether a proxy exposes the router (see `posture.check_posture`).
+    """
+    dp = config.get("data_plane") or {}
+    value = dp.get("client_auth")
+    if value is None:
+        return get_provider_name(config).upper() == "CUSTOM"
+    return bool(value)
+
+
 def get_control_tls(config: dict) -> tuple[str, str] | None:
     """Built-in TLS for the control plane: (cert_file, key_file), or None (plain HTTP).
 

@@ -7,8 +7,10 @@ of it, so it insists on a shape that is safe either way:
 
 - the **control plane** binds loopback (nginx terminates TLS and forwards to it), or
   serves TLS itself (`control_plane.tls_cert_file` / `tls_key_file`);
-- the **router** and the **dashboard** bind loopback: neither has client auth yet, so
-  only apps on the same host may use them;
+- the **router** binds loopback (it serves plain HTTP; nginx terminates TLS for remote
+  clients) and requires client API keys (`data_plane.client_auth`), because a loopback
+  bind does not prove that no proxy exposes it;
+- the **dashboard** binds loopback: it has no auth, so view it through an SSH tunnel;
 - worker auth is never disabled (see `oumigo.service.manager.auth`).
 
 `check_posture` returns human-readable violations; the CLI refuses to start on any.
@@ -37,6 +39,7 @@ def check_posture(
     control_host: str,
     control_tls: bool,
     data_host: str,
+    client_auth: bool,
     dashboard_enabled: bool,
     dashboard_host: str,
 ) -> list[str]:
@@ -53,7 +56,13 @@ def check_posture(
     if not is_loopback(data_host):
         problems.append(
             f"data_plane.host is {data_host!r}: under provider CUSTOM the router must bind "
-            "127.0.0.1 — it has no client auth yet, so only apps on this host may use it"
+            "127.0.0.1 — it serves plain HTTP, so expose it through a TLS reverse proxy "
+            "such as nginx"
+        )
+    if not client_auth:
+        problems.append(
+            "data_plane.client_auth is off: under provider CUSTOM the router always requires "
+            "client API keys (create one with `oumigo manager apikey create`)"
         )
     if dashboard_enabled and not is_loopback(dashboard_host):
         problems.append(

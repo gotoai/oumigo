@@ -1,6 +1,6 @@
 # oumigo manager configuration — CUSTOM provider on a VPS behind nginx (0.4.0+).
 #
-# Workers run anywhere (RunPod, Vast.ai, other clouds, other on-prem sites) and reach
+# Workers run anywhere (clouds other on-prem sites) and reach
 # this manager through nginx at https://oumigo.example.net. See docs/tunnel.md for the
 # nginx config and the worker-side settings.
 #
@@ -20,10 +20,11 @@ control_plane:
   # tls_cert_file: /etc/oumigo/tls/fullchain.pem
   # tls_key_file:  /etc/oumigo/tls/privkey.pem
 
-# --- Data plane: the router. No client auth yet, so same-host apps only. ---
+# --- Data plane: the router. nginx forwards /v1/ here for remote clients. ---
 data_plane:
   host: 127.0.0.1
   port: 7012
+  # client_auth: true           # always on under CUSTOM: `oumigo manager apikey create`
 
 # --- Reporting plane: view through an SSH tunnel (ssh -L 7080:127.0.0.1:7080 vps) ---
 dashboard:
@@ -42,6 +43,8 @@ heartbeat:
 
 # --- Worker auth ---
 # Per-pod join tokens: `oumigo manager token create --ttl 1h --uses 1 -c <this file>`.
+# For a worker that restarts often (a laptop, a container image), create a long-lived one
+# instead: `--ttl never --uses 0 --label <name>`, revocable with `token revoke <id>`.
 # A reusable token (token_file or $OUMIGO_MANAGER_TOKEN) is optional.
 auth:
   token_file: null
@@ -54,27 +57,57 @@ worker_allowlist:
 
 replicas: 1
 
+# --- Inference-client defaults, served to clients at GET /agent-defaults ---------
+# These bind `oumigo.api.agent` (the Python client), not the manager or the workers.
+# They live here because "how long may one turn take against this model?" is fleet
+# policy. A client that passes its own values ignores these; a client that cannot
+# reach the manager falls back to no timeout at all. Both are seconds; null = no limit.
+agent:
+  # Wall clock for ONE request(), spanning every tool-loop round-trip and tool call.
+  # This is the number an end user experiences, which is why it is the primary control:
+  # a per-request timeout would silently multiply by max_iterations (default 5).
+  turn_timeout: 90.0
+  # How long one round-trip may return NO bytes before it is abandoned. Secondary —
+  # it catches a dead connection or a stalled worker inside the turn budget.
+  # NOTE: a value above turn_timeout can never fire, since the turn deadline always
+  # bites first. Set it below turn_timeout for it to mean anything on its own.
+  stall_timeout: 120.0
+
 model:
-  name: Qwen/Qwen3.5-9B              # vendor repo — mandatory. Fits only via --quantization below.
+  name: google/gemma-4-12B-it-qat-w4a16-ct  # vendor repo — mandatory. Fits a 16 GB GPU.
   # Where the weights come from. Unset / null / `none` -> download `name` from the
   # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
   # (each worker checks its own disk; a node without the files can opt out with
   # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
-  storage_location: none            # e.g. file:///srv/models/qwen3.5-9b
+  storage_location: none            # e.g. file:///srv/models/gemma-4-12b
   port: 7001                         # vLLM server port on each worker (data plane routes here)
-  dtype: auto                        # auto | bfloat16 | float16  (auto -> bfloat16 per config.json)
+  dtype: auto                        # auto | bfloat16 | float16
   tensor_parallel_size: 1
+  # Fleet-wide: workers can't override it. On a 16 GB laptop GPU (RTX 3080 Ti) 0.95 runs
+  # out of memory while capturing CUDA graphs; 0.90 leaves ~170k tokens of KV cache.
   gpu_memory_utilization: 0.90
-  max_model_len: 32768  # 32k        # null = model default (262144 — far too large for this GPU)
+  max_model_len: 131072  # 128k        # null = model default
   max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
+
+  # --- Router-side capability caps (enforced by the manager, never sent to vLLM) ---
+  # Measured on this checkpoint: one audio item is hard-capped by the processor at
+  # audio_seq_length (750 tokens x 40 ms = 30 s) and anything longer is silently dropped,
+  # so clients must chunk. Total audio is the limit that actually bites: past ~8 minutes
+  # the model stops emitting new text and repeats a block until it hits the output
+  # ceiling. The collapse is stochastic (24 clips came back clean while 20 did not), so
+  # 6 minutes is the shipped value and 8 the highest that was ever trusted.
+  # Audio past the cap is trimmed whole-clip, the model is told in the prompt, and the
+  # response carries x-oumigo-audio-* headers.
+  max_audio_seconds: 360             # 6 min. null / omitted = no cap.
+  # Bounds the repetition loop directly: without it a degenerate generation runs to the
+  # server ceiling and holds the worker slot, which a client cannot distinguish from a
+  # hang. Also applied when the client sends no max_tokens at all — that is exactly the
+  # shape of request that ran away. Matches oumi-gateway's own clamp.
+  max_output_tokens: 4096            # null / omitted = no clamp.
+
   extra_args: #[]
-    - --quantization
-    - bitsandbytes
     - --enable-auto-tool-choice
     - --tool-call-parser
-    - qwen3_xml                      # chat template emits <tool_call><function=..><parameter=..> XML
+    - gemma4
     - --reasoning-parser
-    - qwen3                          # <think> ... </think>
-    - --max-num-seqs
-    - "2"
-    - --language-model-only
+    - gemma4
