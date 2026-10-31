@@ -1,4 +1,4 @@
-# oumigo manager configuration — CUSTOM provider on a VPS behind nginx (0.4.0+).
+# oumigo manager configuration — CUSTOM provider on a VPS behind nginx (0.5.0+).
 #
 # Workers run anywhere (clouds other on-prem sites) and reach
 # this manager through nginx at https://oumigo.example.net. See docs/tunnel.md for the
@@ -57,57 +57,28 @@ worker_allowlist:
 
 replicas: 1
 
+# --- Model catalog: which profiles this fleet's workers may run ---
+# A profile is one model with every start-time setting fixed (context length, memory
+# share, concurrency, vLLM flags), and its id is the model id clients request. Shipped
+# profiles: src/oumigo/catalog/. A worker picks one with OUMIGO_MODEL_PROFILE, or gets
+# the default.
+catalog:
+  # dirs: [/etc/oumigo/catalog]   # your own profiles; an id here overrides a shipped one
+  allow:
+    - gemma-4-12B-it-qat-w4a16-ct@128k
+    - gemma-4-31B-it-qat-w4a16-ct@64k
+  default: gemma-4-12B-it-qat-w4a16-ct@128k
+
+worker:
+  vllm_port: 7001               # backend port workers prefer (each picks a free one)
+
 # --- Inference-client defaults, served to clients at GET /agent-defaults ---------
-# These bind `oumigo.api.agent` (the Python client), not the manager or the workers.
-# They live here because "how long may one turn take against this model?" is fleet
-# policy. A client that passes its own values ignores these; a client that cannot
-# reach the manager falls back to no timeout at all. Both are seconds; null = no limit.
+# Fleet-wide fallback for profiles without their own `agent:` block. These bind
+# `oumigo.api.agent` (the Python client), not the manager or the workers. Both are
+# seconds; null = no limit.
 agent:
   # Wall clock for ONE request(), spanning every tool-loop round-trip and tool call.
-  # This is the number an end user experiences, which is why it is the primary control:
-  # a per-request timeout would silently multiply by max_iterations (default 5).
   turn_timeout: 90.0
-  # How long one round-trip may return NO bytes before it is abandoned. Secondary —
-  # it catches a dead connection or a stalled worker inside the turn budget.
-  # NOTE: a value above turn_timeout can never fire, since the turn deadline always
-  # bites first. Set it below turn_timeout for it to mean anything on its own.
+  # How long one round-trip may return NO bytes before it is abandoned. Set it below
+  # turn_timeout for it to mean anything on its own.
   stall_timeout: 120.0
-
-model:
-  name: google/gemma-4-12B-it-qat-w4a16-ct  # vendor repo — mandatory. Fits a 16 GB GPU.
-  # Where the weights come from. Unset / null / `none` -> download `name` from the
-  # Hugging Face Hub. A `file://` URI -> load from that directory on the *worker*
-  # (each worker checks its own disk; a node without the files can opt out with
-  # MODEL_STORAGE_LOCATION=none in its .env). Only file:// is supported for now.
-  storage_location: none            # e.g. file:///srv/models/gemma-4-12b
-  port: 7001                         # vLLM server port on each worker (data plane routes here)
-  dtype: auto                        # auto | bfloat16 | float16
-  tensor_parallel_size: 1
-  # Fleet-wide: workers can't override it. On a 16 GB laptop GPU (RTX 3080 Ti) 0.95 runs
-  # out of memory while capturing CUDA graphs; 0.90 leaves ~170k tokens of KV cache.
-  gpu_memory_utilization: 0.90
-  max_model_len: 131072  # 128k        # null = model default
-  max_concurrent_requests: 1         # maximum requests that can be processed simultaneously
-
-  # --- Router-side capability caps (enforced by the manager, never sent to vLLM) ---
-  # Measured on this checkpoint: one audio item is hard-capped by the processor at
-  # audio_seq_length (750 tokens x 40 ms = 30 s) and anything longer is silently dropped,
-  # so clients must chunk. Total audio is the limit that actually bites: past ~8 minutes
-  # the model stops emitting new text and repeats a block until it hits the output
-  # ceiling. The collapse is stochastic (24 clips came back clean while 20 did not), so
-  # 6 minutes is the shipped value and 8 the highest that was ever trusted.
-  # Audio past the cap is trimmed whole-clip, the model is told in the prompt, and the
-  # response carries x-oumigo-audio-* headers.
-  max_audio_seconds: 360             # 6 min. null / omitted = no cap.
-  # Bounds the repetition loop directly: without it a degenerate generation runs to the
-  # server ceiling and holds the worker slot, which a client cannot distinguish from a
-  # hang. Also applied when the client sends no max_tokens at all — that is exactly the
-  # shape of request that ran away. Matches oumi-gateway's own clamp.
-  max_output_tokens: 4096            # null / omitted = no clamp.
-
-  extra_args: #[]
-    - --enable-auto-tool-choice
-    - --tool-call-parser
-    - gemma4
-    - --reasoning-parser
-    - gemma4

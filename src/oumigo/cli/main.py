@@ -211,11 +211,19 @@ def _resolve_manager_runtime(
             typer.echo(f"error: {problem}", err=True)
         raise typer.Exit(1)
 
+    # The catalog (profiles + allow/default) is validated here, so a typo in a profile
+    # stops the manager at once instead of reaching a worker minutes later.
+    try:
+        node_spec = build_node_spec(manager_config)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
     return {
         "config_file": config_file,
         "token": token,
         "provider": provider,
-        "node_spec": build_node_spec(manager_config),
+        "node_spec": node_spec,
         "bind_host": bind_host,
         "control_tls": control_tls is not None,
         "bind_port": port or int(control_plane.get("port", 7014)),

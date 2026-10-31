@@ -1,0 +1,58 @@
+# oumigo manager configuration — LAN provider (0.5.0+).
+#
+# Workers on the same trusted local network find this manager over mDNS and register
+# themselves. For workers elsewhere (clouds, other sites), see manager_CUSTOM_vps.yaml.
+#
+# This is a config file, resolved in precedence order:
+#   --config-file <file>  >  $OUMIGO_CONFIG_FILE  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+#
+# Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
+# or supply them via environment variables / a local .env file.
+
+provider: LAN
+
+# --- Control plane: manager <-> worker coordination (registration, heartbeat) ---
+control_plane:
+  host: 0.0.0.0          # bind on all interfaces so LAN workers can reach it
+  port: 7014
+
+# --- Data plane: client inference requests routed to healthy workers ---
+data_plane:
+  host: 0.0.0.0
+  port: 7012
+  # client_auth: true    # optional under LAN: require `oumigo manager apikey` keys
+
+# --- Worker liveness / registry retention ---
+heartbeat:
+  interval_s: 10         # expected worker heartbeat period
+  timeout_s: 30          # mark a worker dead after this long without a heartbeat
+  forget_after_seconds: 3600  # drop a long-absent node's identity from the registry
+
+# --- Worker authentication ---
+auth:
+  # File holding a shared join token. $OUMIGO_MANAGER_TOKEN overrides it. If neither is
+  # set, worker authentication is DISABLED under LAN and the manager warns.
+  token_file: null       # e.g. ./token  or  /etc/oumigo/token
+
+# --- Model catalog: which profiles this fleet's workers may run ---
+# A profile is one model with every start-time setting fixed (context length, memory
+# share, concurrency, vLLM flags), and its id is the model id clients request. Shipped
+# profiles: src/oumigo/catalog/; templates to adapt: config_examples/catalog/. A worker
+# picks one with OUMIGO_MODEL_PROFILE, or gets the default.
+catalog:
+  # dirs: [~/.config/oumigo/catalog]   # your own profiles; an id here overrides a shipped one
+  allow:
+    - gemma-4-12B-it-qat-w4a16-ct@128k
+  default: gemma-4-12B-it-qat-w4a16-ct@128k
+
+worker:
+  vllm_port: 7001        # backend port workers prefer (each picks a free one)
+
+# --- Inference-client defaults, served to clients at GET /agent-defaults ---
+# Fleet-wide fallback for profiles without their own `agent:` block (seconds; null =
+# no limit). Bind `oumigo.api.agent`, not the manager or the workers.
+agent:
+  turn_timeout: 90.0     # wall clock for one request(), across tool-loop round-trips
+  stall_timeout: 120.0   # one round-trip with no bytes; set below turn_timeout to matter
+
+replicas: 1

@@ -12,11 +12,13 @@ from pathlib import Path
 
 import yaml
 
+from oumigo.config.catalog import FleetCatalog, Profile
 from oumigo.config.spec import NodeSpec
 
 DEFAULT_PROVIDER = "LAN"
 DEFAULT_DATA_PLANE_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so LAN clients reach the router
 DEFAULT_DATA_PLANE_PORT = 7012
+DEFAULT_VLLM_PORT = 7001
 
 DEFAULT_DASHBOARD_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so the LAN can view it
 DEFAULT_DASHBOARD_PORT = 7080  # 7070 is commonly taken (AnyDesk); reporting plane uses 7080
@@ -109,8 +111,9 @@ def get_auth_state_dir(config: dict) -> Path | None:
     return Path(path).expanduser() if path else None
 
 
-def get_agent_defaults(config: dict) -> dict[str, float | None]:
-    """Client-side agent defaults from the `agent:` block, served to clients.
+def get_agent_defaults(config: dict, profile: Profile | None = None) -> dict[str, float | None]:
+    """Client-side agent defaults, served to clients: the profile's `agent:` if it has
+    one, else the manager's `agent:` block. `profile` defaults to the fleet's default.
 
     These bind the *inference client* (`oumigo.api.agent`), not the manager or the
     workers — but they are fleet policy ("how long may one turn take against this
@@ -120,6 +123,10 @@ def get_agent_defaults(config: dict) -> dict[str, float | None]:
 
     Both are seconds; absent or `null` means no limit.
     """
+    if profile is None:
+        profile = get_catalog(config).default_profile
+    if profile is not None and profile.agent is not None:
+        return profile.agent.model_dump()
     block = config.get("agent") or {}
     return {
         "turn_timeout": _opt_seconds(block.get("turn_timeout"), "agent.turn_timeout"),
@@ -153,30 +160,28 @@ def get_dashboard(config: dict) -> tuple[bool, str, int]:
     )
 
 
-def build_node_spec(config: dict) -> NodeSpec | None:
-    """Build the vLLM NodeSpec handed to workers from the `model` block.
+def get_catalog(config: dict) -> FleetCatalog:
+    """The profiles this fleet allows and its default (`catalog:`, or a legacy `model:`).
 
-    Returns None if no model is configured (``model.name`` unset) — the manager
-    then has nothing to tell workers to serve, and registration returns no spec.
-    Local-only concerns (cache dirs) are intentionally excluded; those come from
-    each worker's own environment.
+    Raises `CatalogError` (a ValueError) for an invalid profile or `catalog:` block.
     """
-    model = config.get("model") or {}
-    name = model.get("name")
-    if not name:
-        return None
+    return FleetCatalog.from_config(config)
 
-    return NodeSpec(
-        model=str(name),
-        storage_location=model.get("storage_location"),
-        port=int(model.get("port", 7001)),
-        max_concurrent_requests=int(model.get("max_concurrent_requests", 4)),
-        dtype=str(model.get("dtype", "auto")),
-        tensor_parallel_size=int(model.get("tensor_parallel_size", 1)),
-        gpu_memory_utilization=float(model.get("gpu_memory_utilization", 0.80)),
-        max_model_len=model.get("max_model_len"),
-        max_audio_seconds=model.get("max_audio_seconds"),
-        max_output_tokens=model.get("max_output_tokens"),
-        download_dir=model.get("download_dir"),
-        extra_args=list(model.get("extra_args") or []),
-    )
+
+def get_vllm_port(config: dict) -> int:
+    """The backend port workers prefer: `worker.vllm_port`, else a legacy `model.port`."""
+    worker = config.get("worker") or {}
+    if worker.get("vllm_port") is not None:
+        return int(worker["vllm_port"])
+    return int((config.get("model") or {}).get("port", DEFAULT_VLLM_PORT))
+
+
+def build_node_spec(config: dict) -> NodeSpec | None:
+    """The NodeSpec of the fleet's default profile, handed to workers that choose none.
+
+    Returns None if the fleet has no default (no `catalog.default` and no legacy
+    `model:` block): registration then returns no spec. Local-only concerns (cache
+    dirs) are excluded; those come from each worker's own environment.
+    """
+    profile = get_catalog(config).default_profile
+    return profile.node_spec(get_vllm_port(config)) if profile else None

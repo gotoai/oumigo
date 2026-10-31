@@ -1,0 +1,17 @@
+id: Qwen3.8-27B-W8A16@128k-c10
+model: GotoAI-Inc/Qwen3.8-27B-W8A16
+description: Qwen 3.8 27B, W8A16 (GotoAI-Inc quantization; no official W8A16), 128k context, 10 concurrent
+  requests
+engine:
+  max_model_len: 131072
+  gpu_memory_utilization: 0.95
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 10
+  extra_args:
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - qwen3_xml
+  - --reasoning-parser
+  - qwen3
+tested: maintainer-tested; hardware not recorded

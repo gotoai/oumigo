@@ -1,0 +1,17 @@
+id: EXAONE-4.5-33B-W4A16@64k
+model: GotoAI-Inc/EXAONE-4.5-33B-W4A16
+description: 'Untested template: copy into your catalog.dirs and verify before use'
+engine:
+  max_model_len: 65536
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 1
+  extra_args:
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - hermes
+  - --reasoning-parser
+  - qwen3
+  - --limit-mm-per-prompt
+  - '{"image": 64}'

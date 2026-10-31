@@ -1,0 +1,21 @@
+id: Qwen3.5-9B@32k-bnb4
+model: Qwen/Qwen3.5-9B
+description: Qwen 3.5 9B, quantized in flight with bitsandbytes 4-bit, 32k context, text only
+engine:
+  max_model_len: 32768
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 1
+  extra_args:
+  - --quantization
+  - bitsandbytes
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - qwen3_xml
+  - --reasoning-parser
+  - qwen3
+  - --max-num-seqs
+  - '2'
+  - --language-model-only
+tested: maintainer-tested; hardware not recorded

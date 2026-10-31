@@ -1,0 +1,24 @@
+id: gemma-4-12B-it-qat-w4a16-ct@128k
+model: google/gemma-4-12B-it-qat-w4a16-ct
+description: Gemma 4 12B instruct, Google QAT W4A16, 128k context, one request at a time
+engine:
+  max_model_len: 131072
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 1
+  extra_args:
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - gemma4
+  - --reasoning-parser
+  - gemma4
+caps:
+  max_output_tokens: 4096
+  max_audio_seconds: 360
+agent:
+  turn_timeout: 90.0
+  stall_timeout: 120.0
+requires:
+  min_vram_gib: 15
+tested: RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0

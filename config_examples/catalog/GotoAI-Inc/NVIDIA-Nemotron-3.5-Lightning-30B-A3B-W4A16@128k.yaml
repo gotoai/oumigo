@@ -1,0 +1,17 @@
+id: NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W4A16@128k
+model: GotoAI-Inc/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W4A16
+description: 'Untested template: copy into your catalog.dirs and verify before use'
+engine:
+  max_model_len: 131072
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 1
+  extra_args:
+  - --mamba-backend
+  - flashinfer
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - qwen3_coder
+  - --reasoning-parser
+  - nemotron_v3

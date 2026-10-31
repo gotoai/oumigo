@@ -1,0 +1,47 @@
+id: NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@256k-c8
+model: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+description: NVIDIA Nemotron 3.5 Super VL 120B-A12B, NVIDIA NVFP4, 256k context, 8 concurrent requests,
+  MTP speculative decoding
+engine:
+  max_model_len: 262144
+  gpu_memory_utilization: 0.89
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 8
+  extra_args:
+  - --trust-remote-code
+  - --max-num-seqs
+  - '32'
+  - --max-num-batched-tokens
+  - '16384'
+  - --block-size
+  - '64'
+  - --prefix-match-unit
+  - '64'
+  - --mamba-backend
+  - flashinfer
+  - --mamba-ssm-cache-dtype
+  - float16
+  - --enable-mamba-cache-stochastic-rounding
+  - --mamba-cache-philox-rounds
+  - '5'
+  - --enable-mamba-shared-prefix-checkpoint
+  - --mamba-cache-mode
+  - align
+  - --speculative-config.method
+  - mtp
+  - --speculative-config.num_speculative_tokens
+  - '3'
+  - --video-pruning-rate
+  - '0.5'
+  - --media-io-kwargs
+  - '{"video": {"fps": 2, "num_frames": 256}}'
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - qwen3_coder
+  - --reasoning-parser
+  - nemotron_v3
+requires:
+  min_vram_gib: 90
+  vllm: '>=0.32'
+tested: RTX PRO 6000 Blackwell 96 GB, vLLM 0.32.0
