@@ -11,7 +11,7 @@ This guide sets up a complete OumiGo fleet across the internet:
 It is a step-by-step recipe. For the concepts behind it (how the tunnel works, the
 `CUSTOM` rules, the credentials), see [tunnel.md](tunnel.md).
 
-Requires OumiGo **0.4.0** or later on the manager and every worker.
+Requires OumiGo **0.5.0** or later on the manager and every worker.
 
 ## Architecture
 
@@ -99,10 +99,9 @@ sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 
 ### 1.4 Manager config
 
-Create `/etc/oumigo/manager.yaml`. The infrastructure part is below. For the `model:`
-and `agent:` blocks, start from
+Create `/etc/oumigo/manager.yaml`, starting from
 [config_examples/manager_CUSTOM_vps.yaml](../config_examples/manager_CUSTOM_vps.yaml),
-which is a complete file.
+which is a complete file. The important parts:
 
 ```yaml
 provider: CUSTOM               # WAN posture: mDNS off, auth enforced, safe binds checked
@@ -129,22 +128,26 @@ auth:
   token_file: null             # no shared token: workers join with created tokens
   state_dir: /var/lib/oumigo   # signing secret, join tokens, API keys (keep it safe)
 
-model:
-  name: google/gemma-4-12B-it-qat-w4a16-ct
-  gpu_memory_utilization: 0.90
-  max_model_len: 131072
-  max_concurrent_requests: 1
-  # ... see config_examples/ for the full block
+catalog:                       # the models (profiles) workers may run in this fleet
+  allow:
+    - gemma-4-12B-it-qat-w4a16-ct@128k
+    - gemma-4-31B-it-qat-w4a16-ct@64k
+  default: gemma-4-12B-it-qat-w4a16-ct@128k
+
+worker:
+  vllm_port: 7001
 ```
 
 Under `CUSTOM` the manager refuses to start if the control plane, the router or the
 dashboard would be reachable unsafely, or if router client auth is off.
 
-**The `model:` block is fleet-wide.** Every worker receives it at registration and
-starts vLLM with it. A worker may override only `MODEL_NAME`, `MAX_MODEL_LEN` and
-`MODEL_STORAGE_LOCATION` (in its own `.env`). So size `gpu_memory_utilization` and
-`max_model_len` for the **smallest** GPU in the fleet. If vLLM runs out of memory while
-"Capturing CUDA graphs", lower `gpu_memory_utilization` (e.g. 0.95 → 0.90).
+**Models are profiles.** Each allowed profile is one model with every start-time setting
+fixed (context length, memory share, concurrency, vLLM flags), and its id is the model id
+clients request. Each worker picks the profile that fits its GPU (`OUMIGO_MODEL_PROFILE`,
+see [2.2](#22-configure)), or gets the default. OumiGo ships tested profiles; to add your
+own, or a variant with another context length, see [model-catalog.md](model-catalog.md).
+If vLLM runs out of memory while "Capturing CUDA graphs", the profile's
+`gpu_memory_utilization` is too high for that GPU: use or create a profile with a lower one.
 
 ### 1.5 Run it as a service
 
@@ -314,7 +317,12 @@ Create `~/oumigo-worker/.env` (mode 0600; it holds a secret):
 OUMIGO_MANAGER_URL=https://oumigo.example.com
 OUMIGO_TRANSPORT=tunnel
 OUMIGO_JOIN_TOKEN=oumigo-join-...
+OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@64k
 ```
+
+`OUMIGO_MODEL_PROFILE` picks the model this worker runs, from the fleet's allowed list.
+Leave it out to get the fleet's default. Everything else about the model (context length,
+memory share, vLLM flags) comes from the profile on the manager.
 
 Optional settings, in the same file:
 
@@ -322,7 +330,6 @@ Optional settings, in the same file:
 |---|---|
 | `HF_TOKEN` | The model is gated on Hugging Face, or to avoid download rate limits |
 | `HF_HOME` | Keep the Hugging Face cache on a large or shared disk |
-| `MAX_MODEL_LEN` | This GPU can't hold the fleet's context length |
 | `MODEL_STORAGE_LOCATION` | Weights are on local disk (`file:///path`), or `none` to download despite the fleet's setting |
 | `OUMIGO_HOST_ID` | Containers whose disk is wiped on restart: any stable string keeps the same node identity |
 | `OUMIGO_MANAGER_CA_FILE` | The manager uses a private or self-signed certificate (see [tunnel.md](tunnel.md#without-nginx-built-in-tls)) |
@@ -375,8 +382,9 @@ Any OpenAI-compatible client works. Give it the base URL and an API key from
 from openai import OpenAI
 
 client = OpenAI(base_url="https://oumigo.example.com/v1", api_key="oumigo-key-...")
+print([m.id for m in client.models.list()])   # any-model + the models being served
 resp = client.chat.completions.create(
-    model="any",       # the router replaces it with the fleet's model
+    model="gemma-4-12B-it-qat-w4a16-ct@128k",     # a model id, or "any-model"
     messages=[{"role": "user", "content": "Hello"}],
     stream=True,
 )
@@ -384,13 +392,18 @@ for chunk in resp:
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-With the OumiGo Python client, pass the server root (without `/v1`) and the key as the
-token:
+A model id the fleet doesn't serve answers `404 model_not_found`; a served model whose
+workers are all down answers `503 model_unavailable`.
+
+With the OumiGo Python client, pass the server root (without `/v1`), the key as the
+token, and the model id (default `any-model`):
 
 ```python
-from oumigo.api.agent import Agent
+from oumigo.api import OumiGoAgent
 
-agent = Agent(data_url="https://oumigo.example.com", token="oumigo-key-...")
+agent = OumiGoAgent(data_url="https://oumigo.example.com", token="oumigo-key-...",
+                    model="gemma-4-12B-it-qat-w4a16-ct@128k")
+reply = agent.create_chat().request("Hello")
 ```
 
 Keep keys out of source code and out of git: read them from the environment or a
@@ -408,7 +421,7 @@ it as shared by everyone who has the app.
 | Retire a join token | `om token revoke <id>`. Workers that already joined keep working |
 | See workers | The dashboard ([2.4](#24-watch-the-fleet)), or `curl -s 127.0.0.1:7014/workers` on the manager host |
 | Upgrade the manager | `pip install -U` in `/opt/oumigo/venv`, then `systemctl restart oumigo-manager`. Workers reconnect on their own; node tokens survive the restart |
-| Change the model | Edit `model:` and restart the manager; then restart each worker so it loads the new model |
+| Add or change a model | Edit `catalog:` (or a profile) and restart the manager; then start or restart the workers that should run it, with `OUMIGO_MODEL_PROFILE` |
 | Back up | `/var/lib/oumigo` (signing secret, tokens, keys) and `/etc/oumigo/manager.yaml`. Losing the state directory invalidates every node token and API key |
 
 Keep the manager and the workers on the same OumiGo release. In particular, 0.3.x workers
@@ -423,7 +436,10 @@ cannot join a 0.4.x manager.
 | Worker exits: `rejected the join token (401)` | Token expired, revoked, already used, or mistyped |
 | Worker exits: `certificate verify failed` | The certificate doesn't match the URL's host name, or a private certificate without `OUMIGO_MANAGER_CA_FILE` |
 | Worker SERVING, but clients get `503` and the console shows `tunnel 0/0` | nginx is missing the `Upgrade` / `Connection` lines for `/tunnel` |
-| vLLM: `CUDA out of memory` while capturing CUDA graphs | `gpu_memory_utilization` too high for this GPU: lower it in the manager config |
+| vLLM: `CUDA out of memory` while capturing CUDA graphs | The profile's `gpu_memory_utilization` is too high for this GPU: use or create a profile with a lower one |
+| Worker exits: `profile … is not allowed in this fleet` | `OUMIGO_MODEL_PROFILE` names a profile missing from `catalog.allow`; the message lists the allowed ones |
+| Worker exits: `needs a GPU with at least … GiB` | The profile's `requires.min_vram_gib` is larger than this GPU: pick a smaller profile |
+| Client gets `404 model_not_found` | The request's `model` isn't a served model id: see `GET /v1/models`, or send `any-model` |
 | Client gets `401 missing or invalid API key` | No `Authorization: Bearer <key>`, a mistyped key, or a revoked key |
 | Client gets `503 no healthy (SERVING) workers` | No worker connected, or still loading the model |
 | Streamed tokens arrive all at once | `proxy_buffering off` missing from the router location |

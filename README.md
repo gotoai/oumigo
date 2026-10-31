@@ -9,14 +9,16 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an OumiGo fleet (as of v0.4.0):
+Key functions provided by an OumiGo fleet (as of v0.5.0):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
-3. Performance monitoring
-4. Remote workers on any vendor or site (RunPod, Vast.ai, other clouds, other on-prem
+3. Several models in one fleet: each worker runs a catalog profile that fits its GPU,
+   and clients choose a model by id
+4. Performance monitoring
+5. Remote workers on any vendor or site (RunPod, Vast.ai, other clouds, other on-prem
    sites) through a worker-initiated tunnel — no inbound ports or VPN on the GPU side
-4. Vertical integration of administration and programming interfaces:
+6. Vertical integration of administration and programming interfaces:
     - Command line interface (CLI) administration
     - Python API function with built-in Agent loop, supporting Agent chat, tool call usage
     - Python API interface for guardrail extension development
@@ -31,7 +33,7 @@ Two roles:
 
 - **Manager** (`oumigo.service.manager`): coordinates the fleet, split into sub-layers:
   - **data plane / router** (`manager.router`): forwards client inference calls to
-    healthy workers — on the hot path of every request. Exposes an **OpenAI-compatible**
+    healthy workers of the model each request names — on the hot path of every request. Exposes an **OpenAI-compatible**
     HTTP surface (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, including SSE
     streaming), so any OpenAI-API client can talk to the fleet through a single endpoint.
   - **control plane** (`manager.control`): tracks worker registrations and state,
@@ -47,6 +49,9 @@ Two roles:
   - **transport** (per worker): `direct` (the router dials the worker) or `tunnel` (the
     worker dials out to the manager's `/tunnel` and the router borrows those
     connections) — see [docs/tunnel.md](docs/tunnel.md).
+  - **model catalog** (`oumigo.config.catalog`): static profiles, one per model with all
+    its start-time settings; the fleet allows some, each worker runs one — see
+    [docs/model-catalog.md](docs/model-catalog.md).
 
   
 - **Worker** (`oumigo.service.worker`): a long-lived *coordinator* supervises a LLM server
@@ -75,8 +80,9 @@ manager's router and it addresses the whole fleet through one endpoint:
 
 ```
 Base URL:  http://<manager-host>:<router-port>/v1
-Model:     <a model id from GET /v1/models>
-API key:   any non-empty string (the data plane does not check it; clients still require one)
+Model:     a model id from GET /v1/models, or any-model
+API key:   a client API key (`oumigo manager apikey create`) when client auth is on, which
+           it always is under provider CUSTOM; otherwise any non-empty string
 ```
 
 This has been verified with other editing or coding assistant agents, and works the same
@@ -119,3 +125,4 @@ oumigo version
 - [docs/worker-node-states.md](docs/worker-node-states.md) — worker node state machine.
 - [docs/tunnel.md](docs/tunnel.md) — remote workers: CUSTOM provider, tunnel transport, nginx deployment, join tokens.
 - [docs/deploy-custom-providers-with-tunnel.md](docs/deploy-custom-providers-with-tunnel.md) — step by step: manager on a VPS, GPU workers behind NAT, clients with API keys.
+- [docs/model-catalog.md](docs/model-catalog.md) — several models in one fleet: profiles, the catalog, choosing a model (worker and client), upgrading from 0.4.

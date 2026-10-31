@@ -78,8 +78,9 @@ worker_allowlist:
   enabled: false
   addresses: []              # e.g. ["203.0.113.7", "198.51.100.0/24"]
 
-model:
-  # ... as in config_examples/
+catalog:                     # the models workers may run: see model-catalog.md
+  allow: [gemma-4-12B-it-qat-w4a16-ct@128k]
+  default: gemma-4-12B-it-qat-w4a16-ct@128k
 ```
 
 See `config_examples/manager_CUSTOM_vps.yaml` for a complete file.

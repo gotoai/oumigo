@@ -239,9 +239,15 @@ def create_app(
         if not auth.may_read_spec(authorization):
             raise _deny(request, req.node_id)
         if _closed():
-            # A pre-0.5 worker sends no profile: it gets the profile of the weights it
-            # loads (if exactly one is allowed), else the default.
-            resolved = _resolve_spec(req.profile, None if req.profile else req.model)
+            # Every 0.5 worker registers with the profile /spec gave it. A pre-0.5 worker
+            # sends none and would serve under its repo name, which the router never
+            # routes to (it routes by profile id) — refuse it clearly instead.
+            if not req.profile:
+                raise HTTPException(
+                    403, "this manager runs a model catalog (oumigo 0.5+): upgrade the "
+                         "worker to oumigo 0.5 and choose a profile with OUMIGO_MODEL_PROFILE "
+                         f"(or none for the default); allowed: {_allowed_list()}")
+            resolved = _resolve_spec(req.profile, None)
             if req.model is not None and resolved.model != req.model:
                 raise HTTPException(403, f"worker loads {req.model!r}, but profile "
                                          f"{resolved.profile!r} needs {resolved.model!r}")

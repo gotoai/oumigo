@@ -78,12 +78,11 @@ def test_register_records_the_profile_and_returns_its_spec() -> None:
     assert registry.get("n1").profile == BIG and registry.get("n1").served_name == BIG
 
 
-def test_pre_05_worker_gets_the_profile_of_its_weights_or_the_default() -> None:
+def test_a_pre_05_worker_is_refused_with_an_upgrade_hint() -> None:
     client, registry, _ = _manager()
-    client.post("/register", json=_reg("old", model="acme/big-model"))      # no profile field
-    assert registry.get("old").profile == BIG
-    client.post("/register", json=_reg("bare"))                             # nothing at all
-    assert registry.get("bare").profile == SMALL
+    resp = client.post("/register", json=_reg("old", model="acme/big-model"))  # no profile field
+    assert resp.status_code == 403 and "upgrade the worker to oumigo 0.5" in resp.json()["detail"]
+    assert registry.get("old") is None
 
 
 def test_register_refuses_a_profile_whose_weights_differ() -> None:
@@ -96,8 +95,9 @@ def test_a_refused_profile_does_not_spend_a_single_use_join_token() -> None:
     client, registry, store = _manager(enforced=True)
     _, token = store.create_join_token(uses=1)
     auth = {"Authorization": f"Bearer {token}"}
-    refused = client.post("/register", json=_reg(profile="other@8k"), headers=auth)
-    assert refused.status_code == 403 and registry.get("n1") is None
+    for body in (_reg(profile="other@8k"), _reg()):          # not allowed / pre-0.5 worker
+        refused = client.post("/register", json=body, headers=auth)
+        assert refused.status_code == 403 and registry.get("n1") is None
     ok = client.post("/register", json=_reg(model="acme/small-model", profile=SMALL), headers=auth)
     assert ok.status_code == 200 and ok.json()["accepted"]
 

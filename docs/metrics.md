@@ -167,8 +167,8 @@ gap, not fatal.
 The full V1 metric set vLLM exposes (authoritative source: `vllm/v1/metrics/
 loggers.py`). Stored under the `vllm:` domain. Counters are emitted with a
 `_total` suffix in the Prometheus text format; histograms expose `_bucket` /
-`_sum` / `_count`. Every series carries a `model_name` label — constant for our
-homogeneous fleet. Metrics marked **(situational)** only appear when that feature
+`_sum` / `_count`. Every series carries a `model_name` label — the worker's model id
+(its catalog profile id), constant per worker. Metrics marked **(situational)** only appear when that feature
 is enabled (LoRA, multi-modal, speculative decode, external KV connector, KV-block
 residency tracking).
 

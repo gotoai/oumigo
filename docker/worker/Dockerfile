@@ -4,13 +4,13 @@
 # container's environment at start. Model weights are downloaded on first start, never
 # baked in. See docs/docker-worker.md.
 #
-#   docker build --build-arg VLLM_VERSION=0.28.0 --build-arg OUMIGO_VERSION=0.4.0 \
-#       -t ghcr.io/<owner>/oumigo-worker:0.4.0-vllm0.28.0 docker/worker
+#   docker build --build-arg VLLM_VERSION=0.28.0 --build-arg OUMIGO_VERSION=0.5.0 \
+#       -t ghcr.io/<owner>/oumigo-worker:0.5.0-vllm0.28.0 docker/worker
 
 ARG VLLM_VERSION=0.28.0
 FROM vllm/vllm-openai:v${VLLM_VERSION}
 
-ARG OUMIGO_VERSION=0.4.0
+ARG OUMIGO_VERSION=0.5.0
 
 # tini as PID 1: forwards the platform's stop signal (SIGTERM) to the worker, which
 # drains, stops vLLM's whole process group and releases VRAM.

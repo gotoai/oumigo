@@ -5,8 +5,9 @@
 #   OUMIGO_JOIN_TOKEN    required (unless the manager runs without worker auth)
 #   OUMIGO_TRANSPORT     default: tunnel
 #   OUMIGO_HOST_ID       stable node identity; default: $RUNPOD_POD_ID when set
+#   OUMIGO_MODEL_PROFILE the catalog profile (= model id) to run; default: the fleet's
 #   HF_TOKEN             for gated models
-#   MODEL_NAME / MAX_MODEL_LEN / MODEL_STORAGE_LOCATION   optional per-worker overrides
+#   MODEL_STORAGE_LOCATION  optional: weights already on this node's disk (file:///...)
 #
 # Extra arguments are passed to `oumigo worker run` (e.g. --backend transformer).
 set -eu

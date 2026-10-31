@@ -92,10 +92,14 @@ Spawn a worker child on this host and block until its vLLM/HF replica is `SERVIN
 oumigo_create_worker(
     bearer_token=None, hf_home="~/.hf_cache", vllm_cache_root="~/.vllm_cache",
     hf_token=None, model_name=None,
-    *, manager=None, backend="vllm", manager_url=None,
+    *, profile=None, manager=None, backend="vllm", manager_url=None,
     discover_timeout=10.0, serving_timeout=None, poll_interval=2.0,
 ) -> OumiGoWorker
 ```
+
+`profile` is the catalog profile the worker runs (a model id such as
+`gemma-4-12B-it-qat-w4a16-ct@128k`; see [model-catalog.md](model-catalog.md)); `None`
+takes the fleet's default. `model_name` is the deprecated way to choose.
 
 The manager is resolved as: `manager` handle > `manager_url` > the last manager created in
 this process > mDNS. `serving_timeout=None` waits **indefinitely** (you own the give-up
@@ -141,6 +145,7 @@ manager.create_agent(
     tools=None,
     *, max_iterations=5,
     temperature=None, max_tokens=None, top_p=None, stop=None,
+    profile=None, model="any-model",
 ) -> OumiGoAgent
 ```
 
@@ -152,6 +157,10 @@ sampling defaults shared by every chat it spawns.
 - `max_iterations` — cap on model round-trips per request (the runaway tool-loop guard;
   default 5). On the cap, the response's `finish_reason` is `"max_iterations"`.
 - Sampling defaults apply to every chat/request; override individually later as needed.
+- `profile` — an optional `oumigo.guard.GuardProfile`: the guardrails every chat inherits.
+- `model` — the model id every request names (one of `GET /v1/models`), or `"any-model"`
+  for whichever model the fleet serves. An id the fleet doesn't serve fails with
+  `404 model_not_found`. See [model-catalog.md](model-catalog.md).
 
 The system prompt and tools are **server-owned** — they come from your code here, never
 from a client. (See [Security & the trust boundary](#security--the-trust-boundary).)
@@ -331,23 +340,23 @@ Two caveats:
 
 ## Fleet configuration notes (vLLM)
 
-Behavior of the inference layer depends on how each worker's vLLM was launched. Pass extra
-flags through the `model.extra_args` list in `manager.yaml`; they are appended verbatim to
-`vllm serve`.
+Behavior of the inference layer depends on how each worker's vLLM was launched, which is
+set by the worker's **catalog profile** (see [model-catalog.md](model-catalog.md)). Pass
+extra flags through the profile's `engine.extra_args` list; they are appended verbatim to
+`vllm serve`. The snippets below are profile fragments.
 
-**Local weights** — by default `model.name` is downloaded from the Hugging Face Hub. To
-serve weights already on disk (a checkpoint you quantized yourself, an air-gapped node, a
-shared NFS mount), set `model.storage_location` to a `file://` URI:
+**Local weights** — by default a profile's `model` is downloaded from the Hugging Face
+Hub. To serve weights already on disk (a checkpoint you quantized yourself, an
+air-gapped node, a shared NFS mount), set `storage_location` to a `file://` URI:
 
 ```yaml
-model:
-  name: acme/gemma-4-12B-W4A16          # canonical name clients keep using
-  storage_location: file:///srv/models/gemma-4-12B-W4A16
+id: gemma-4-12B-W4A16@64k
+model: acme/gemma-4-12B-W4A16
+storage_location: file:///srv/models/gemma-4-12B-W4A16
 ```
 
-`name` stays the model's identity — the router rewrites every request's `model` to it, and
-the worker passes `--served-model-name` so the backend answers to it despite being loaded
-from a path. Unset, `null` and the literal `none` all mean "use the Hub"; only `file://`
+The profile id stays the model's identity: the worker passes `--served-model-name <id>`,
+so the backend answers to it despite being loaded from a path. Unset, `null` and the literal `none` all mean "use the Hub"; only `file://`
 is supported so far, and any other scheme is rejected at config load.
 
 The path is checked on the **worker**, not the manager — it is that node's filesystem, so
@@ -361,8 +370,7 @@ Hub.
 request carrying `tools` fails with HTTP 400:
 
 ```yaml
-model:
-  name: google/gemma-4-12B-it-qat-w4a16-ct
+engine:
   extra_args:
     - --enable-auto-tool-choice
     - --tool-call-parser
@@ -380,7 +388,7 @@ control tokens leak into `content`. Add:
 With the reasoning parser on, `resp.text` is the clean answer and `resp.reasoning` holds
 the thinking; without it, `resp.reasoning` is `""`.
 
-> `extra_args` flows `manager.yaml` → `NodeSpec` → the worker's `vllm serve`. The worker
+> `extra_args` flows profile → `NodeSpec` → the worker's `vllm serve`. The worker
 > fetches its spec from the manager at startup, so a change requires **restarting the
 > manager and the worker**.
 
@@ -390,8 +398,9 @@ audio fails with HTTP 500 `Please install vllm[audio] for audio support` — and
 missing modules are bound as placeholders at import time, installing them under a running
 worker changes nothing until it restarts.
 
-**Client timeouts** are declared in a top-level `agent:` block and served to clients at
-`GET /agent-defaults` on the data plane:
+**Client timeouts** are declared in a profile's `agent:` block, or for profiles without
+one in the manager's top-level `agent:` block, and served to clients at
+`GET /agent-defaults?model=<id>` on the data plane:
 
 ```yaml
 agent:
@@ -401,7 +410,7 @@ agent:
 
 These bind `oumigo.api.agent`, not the manager or the workers — but "how long may one
 turn take against this model?" is fleet policy, so the fleet declares it. An
-`OumiGoAgent` fetches them once, lazily, on its first chat; values passed to the
+`OumiGoAgent` fetches them once (for its `model`), lazily, on its first chat; values passed to the
 constructor win and skip the lookup, and an unreachable manager falls back to no timeout
 (the behavior from before timeouts existed), because an optional config endpoint must
 never break inference.
@@ -419,18 +428,18 @@ One gap to know about: a tool callback is plain Python with no deadline of its o
 the budget is only observed *between* tool calls — a single blocking tool can still
 overrun it.
 
-**Capability caps** are two optional `model:` keys enforced by the *router*, not by vLLM.
-They are off unless set:
+**Capability caps** are two optional profile keys enforced by the *router*, not by vLLM.
+They are off unless set, and apply to requests routed to workers of that profile:
 
 ```yaml
-model:
+caps:
   max_audio_seconds: 360     # total audio per request; over-long audio is trimmed
   max_output_tokens: 4096    # ceiling on max_tokens, also applied when the client sends none
 ```
 
 They exist because a model's real limits are fleet knowledge — the router is the only
-component that knows which model the fleet serves — and because tripping them produces no
-usable error from vLLM. On `google/gemma-4-12B-it-qat-w4a16-ct`, one audio item is capped
+component that knows which model each worker serves — and because tripping them produces
+no usable error from vLLM. On `google/gemma-4-12B-it-qat-w4a16-ct`, one audio item is capped
 by the processor at 30 s (`audio_seq_length` 750 × 40 ms) and anything longer is dropped
 **silently**, so clients chunk; past roughly 8 minutes of total audio the model stops
 producing new text and repeats a block until it hits the output ceiling, which from the

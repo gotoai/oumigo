@@ -160,6 +160,16 @@ class StubWorker:
 
     async def register(self, client: httpx.AsyncClient) -> None:
         """Register (retrying until the manager answers), learning preferred port + cadence."""
+        if self.profile is None:
+            # Like a real worker: ask /spec for the fleet's default profile (none in an
+            # open fleet, or from a pre-0.5 manager).
+            try:
+                spec = await client.get(f"{self.manager_url}/spec", headers=self._headers,
+                                        timeout=10.0)
+                if spec.status_code == 200:
+                    self.profile = spec.json().get("profile")
+            except httpx.HTTPError as exc:
+                log.warning("worker %d could not read /spec (%s)", self.index, exc)
         req = RegisterRequest(
             node_id=self.node_id,
             address=self.host,
