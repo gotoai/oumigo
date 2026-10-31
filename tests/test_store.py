@@ -8,15 +8,20 @@ from oumigo.service.manager.control.store import MetricStore
 from oumigo.protocol.messages import MetricPoint
 
 
+# "Now" for tests whose points are dated 2026-07-19: the store prunes anything older than
+# 24 h, so without a pinned clock these fixtures expire as the calendar moves on.
+NOW = datetime(2026, 7, 19, 0, 1, 0, tzinfo=timezone.utc)
+
+
 def _pt(ts: str, metric: str, value: float) -> MetricPoint:
     return MetricPoint(timestamp=ts, metric=metric, value=value)
 
 
 def test_ingest_and_latest_per_node() -> None:
     store = MetricStore()
-    store.ingest("nodeA", [_pt("2026-07-19 00:00:05", "worker:cpu_util_pct", 10.0)])
-    store.ingest("nodeA", [_pt("2026-07-19 00:00:10", "worker:cpu_util_pct", 20.0)])
-    store.ingest("nodeB", [_pt("2026-07-19 00:00:05", "worker:cpu_util_pct", 5.0)])
+    store.ingest("nodeA", [_pt("2026-07-19 00:00:05", "worker:cpu_util_pct", 10.0)], now=NOW)
+    store.ingest("nodeA", [_pt("2026-07-19 00:00:10", "worker:cpu_util_pct", 20.0)], now=NOW)
+    store.ingest("nodeB", [_pt("2026-07-19 00:00:05", "worker:cpu_util_pct", 5.0)], now=NOW)
 
     latest = store.latest_per_node()
     assert [r["node_id"] for r in latest] == ["nodeA", "nodeB"]  # ordered by node_id
@@ -29,8 +34,8 @@ def test_ingest_and_latest_per_node() -> None:
 def test_ingest_is_idempotent_upsert() -> None:
     store = MetricStore()
     key = ("2026-07-19 00:00:05", "worker:cpu_util_pct")
-    store.ingest("nodeA", [_pt(*key, 10.0)])
-    store.ingest("nodeA", [_pt(*key, 42.0)])  # same (node, metric, ts) -> overwrite
+    store.ingest("nodeA", [_pt(*key, 10.0)], now=NOW)
+    store.ingest("nodeA", [_pt(*key, 42.0)], now=NOW)  # same (node, metric, ts) -> overwrite
     assert store.count() == 1
     assert store.latest_per_node()[0]["metrics"]["worker:cpu_util_pct"] == 42.0
 
@@ -56,6 +61,7 @@ def test_latest_per_node_returns_all_metrics_of_the_slot() -> None:
             _pt(ts, "worker:mem_used_bytes", 1000.0),
             _pt(ts, "worker:mem_used_pct", 3.0),
         ],
+        now=NOW,
     )
     metrics = store.latest_per_node()[0]["metrics"]
     assert set(metrics) == {"worker:cpu_util_pct", "worker:mem_used_bytes", "worker:mem_used_pct"}

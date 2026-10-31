@@ -118,3 +118,4 @@ oumigo version
 - [docs/metrics.md](docs/metrics.md) — performance monitoring and metrics.
 - [docs/worker-node-states.md](docs/worker-node-states.md) — worker node state machine.
 - [docs/tunnel.md](docs/tunnel.md) — remote workers: CUSTOM provider, tunnel transport, nginx deployment, join tokens.
+- [docs/deploy-custom-providers-with-tunnel.md](docs/deploy-custom-providers-with-tunnel.md) — step by step: manager on a VPS, GPU workers behind NAT, clients with API keys.

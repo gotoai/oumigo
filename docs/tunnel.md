@@ -178,7 +178,7 @@ oumigo manager apikey revoke <id>                # refused from the next request
 ```
 
 The client calls `https://oumigo.example.net/v1/...` with `Authorization: Bearer <key>`.
-Any OpenAI-compatible client works with its `api_key` setting. For the oumigo Python
+Any OpenAI-compatible client works with its `api_key` setting. For the OumiGo Python
 client, pass the key as the agent's `token`. Keys are stored only as hashes, next to the
 join tokens.
 
