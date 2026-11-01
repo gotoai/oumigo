@@ -9,7 +9,7 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an OumiGo fleet (as of v0.5.2):
+Key functions provided by an OumiGo fleet (as of v0.5.3):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
