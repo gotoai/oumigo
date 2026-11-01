@@ -176,12 +176,14 @@ class WorkerPool:
     def healthy_count(self, eligible: Eligible | None = None) -> int:
         return len(self.serving(eligible))
 
-    async def acquire(self, eligible: Eligible | None = None) -> NodeRecord:
+    async def acquire(self, eligible: Eligible | None = None,
+                      timeout: float | None = None) -> NodeRecord:
         """Return a worker (among `eligible`) with a free slot, waiting FIFO if all are
         saturated.
 
         Raises `NoWorkersAvailable` when no eligible worker is serving (nothing to wait
-        for) and `asyncio.TimeoutError` if the queue wait exceeds `queue_timeout`.
+        for) and `asyncio.TimeoutError` if the queue wait exceeds `timeout` (default:
+        the pool's `queue_timeout`).
         """
         # Earlier waiters first: whatever they can use goes to them. A free slot that is
         # left over is ours if we accept that worker.
@@ -196,7 +198,7 @@ class WorkerPool:
         fut: asyncio.Future[NodeRecord] = asyncio.get_running_loop().create_future()
         self._waiters.append((fut, eligible))
         try:
-            return await asyncio.wait_for(fut, self.queue_timeout)
+            return await asyncio.wait_for(fut, timeout or self.queue_timeout)
         except BaseException:
             # Timed out, or the client disconnected while queued. Drop our waiter; if a
             # slot was handed to us in the race window, give it back.
@@ -337,6 +339,24 @@ def create_router_app(
             return node_spec.max_audio_seconds, node_spec.max_output_tokens
         return None, None
 
+    def _queue_seconds(model_id: str | None) -> float:
+        """How long a request for `model_id` may queue; `any-model` (None) may take any
+        serving worker, so it gets the longest wait among the models being served."""
+        if model_id is None:
+            served = {_served(r) for r in pool.serving()} - {None}
+            return max((_queue_seconds(m) for m in served), default=queue_timeout)
+        profile = _profile(model_id)
+        return (profile.caps.max_queue_seconds if profile else None) or queue_timeout
+
+    def _agent(model_id: str | None) -> dict[str, float | None]:
+        """Client timeouts for one model id."""
+        profile = _profile(model_id)
+        if profile is None:
+            return dict(agent_defaults or no_limits)
+        if profile.agent is not None:
+            return profile.agent.model_dump()
+        return dict(fleet_agent_defaults or no_limits)
+
     def _known() -> set[str]:
         """Model ids this fleet answers for: allowed profiles plus whatever registered
         workers serve (an open fleet has no catalog)."""
@@ -402,7 +422,7 @@ def create_router_app(
             eligible = lambda r: _served(r) == requested  # noqa: E731
 
         try:
-            record = await pool.acquire(eligible)
+            record = await pool.acquire(eligible, _queue_seconds(requested if eligible else None))
         except NoWorkersAvailable:
             if eligible is not None:
                 return _model_error(503, "model_unavailable",
@@ -548,13 +568,20 @@ def create_router_app(
 
     @app.get("/agent-defaults", dependencies=authed)
     async def agent_defaults_(model: str | None = None) -> dict:
-        """client-side defaults for a model (default: the fleet default's)"""
-        profile = _profile(model) if model != ANY_MODEL else None
-        if profile is None:
+        """client-side defaults for a model; for any-model, the longest of those served"""
+        if model not in (None, "", ANY_MODEL):
+            return _agent(model)
+        # Any serving model may answer, so the client must be prepared to wait as long as
+        # the slowest one needs. None (no limit) outranks every number.
+        served = sorted({_served(r) for r in pool.serving()} - {None})
+        if not served:
             return dict(agent_defaults or no_limits)
-        if profile.agent is not None:
-            return profile.agent.model_dump()
-        return dict(fleet_agent_defaults or no_limits)
+        merged: dict[str, float | None] = {}
+        for limits in map(_agent, served):
+            for key, value in limits.items():
+                current = merged.get(key, 0.0)
+                merged[key] = None if value is None or current is None else max(current, value)
+        return merged
 
     @app.get("/healthz")
     async def healthz() -> dict:

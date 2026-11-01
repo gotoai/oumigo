@@ -131,7 +131,7 @@ auth:
 catalog:                       # the models (profiles) workers may run in this fleet
   allow:
     - gemma-4-12B-it-qat-w4a16-ct@128k
-    - gemma-4-31B-it-qat-w4a16-ct@64k
+    - gemma-4-31B-it-qat-w4a16-ct@128k
   default: gemma-4-12B-it-qat-w4a16-ct@128k
 
 worker:
@@ -317,7 +317,7 @@ Create `~/oumigo-worker/.env` (mode 0600; it holds a secret):
 OUMIGO_MANAGER_URL=https://oumigo.example.com
 OUMIGO_TRANSPORT=tunnel
 OUMIGO_JOIN_TOKEN=oumigo-join-...
-OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@64k
+OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
 ```
 
 `OUMIGO_MODEL_PROFILE` picks the model this worker runs, from the fleet's allowed list.

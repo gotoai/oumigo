@@ -64,6 +64,9 @@ class Caps(_Strict):
 
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_audio_seconds: float | None = Field(default=None, gt=0)
+    # How long a request may wait in the router's queue for a free slot on this model
+    # before it is refused (503). None = the router's default (300 s).
+    max_queue_seconds: float | None = Field(default=None, gt=0)
 
 
 class AgentDefaults(_Strict):

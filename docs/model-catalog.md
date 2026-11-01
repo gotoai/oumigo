@@ -35,11 +35,11 @@ running configuration, so it is **not** a model id.
 A profile is a YAML file named `<id>.yaml`:
 
 ```yaml
-id: gemma-4-31B-it-qat-w4a16-ct@64k         # must equal the file name
+id: gemma-4-31B-it-qat-w4a16-ct@128k        # must equal the file name
 model: google/gemma-4-31B-it-qat-w4a16-ct   # the weights: a Hugging Face repo
-description: Gemma 4 31B instruct, Google QAT W4A16, 64k context, one request at a time
+description: Gemma 4 31B instruct, Google QAT W4A16, 128k context, one request at a time
 engine:                                     # start-time settings → `vllm serve`
-  max_model_len: 65536
+  max_model_len: 131072
   gpu_memory_utilization: 0.90
   dtype: auto
   tensor_parallel_size: 1
@@ -53,9 +53,10 @@ engine:                                     # start-time settings → `vllm serv
 caps:                                       # enforced by the router, never sent to vLLM
   max_output_tokens: 4096                   # ceiling on max_tokens (also when none is sent)
   max_audio_seconds: null                   # total audio per request; null = no cap
+  max_queue_seconds: 1800                   # wait for a free slot; null = router default (300)
 agent:                                      # client timeouts served at /agent-defaults
-  turn_timeout: 90.0
-  stall_timeout: 120.0
+  turn_timeout: 1800.0
+  stall_timeout: 600.0
 requires:                                   # checked by the worker before it loads anything
   min_vram_gib: 44                          # total VRAM of GPU 0
   vllm: ">=0.28"                            # version specifier
@@ -77,7 +78,7 @@ OumiGo ships the profiles its maintainers have run, in `src/oumigo/catalog/<vend
 | Id | Weights |
 |---|---|
 | `gemma-4-12B-it-qat-w4a16-ct@128k` | `google/gemma-4-12B-it-qat-w4a16-ct` |
-| `gemma-4-31B-it-qat-w4a16-ct@64k` | `google/gemma-4-31B-it-qat-w4a16-ct` |
+| `gemma-4-31B-it-qat-w4a16-ct@128k` | `google/gemma-4-31B-it-qat-w4a16-ct` |
 | `Muse-Glimmer-30B-W8A16@128k-c10` | `GotoAI-Inc/Muse-Glimmer-30B-W8A16` |
 | `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W8A16@128k-c10` | `GotoAI-Inc/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-W8A16` |
 | `Qwen3.8-27B-W8A16@128k-c10` | `GotoAI-Inc/Qwen3.8-27B-W8A16` |
@@ -104,7 +105,7 @@ catalog:
   dirs: [/etc/oumigo/catalog]        # optional; shipped profiles are always available
   allow:                             # the profiles workers may run in this fleet
     - gemma-4-12B-it-qat-w4a16-ct@128k
-    - gemma-4-31B-it-qat-w4a16-ct@64k
+    - gemma-4-31B-it-qat-w4a16-ct@128k
   default: gemma-4-12B-it-qat-w4a16-ct@128k   # for workers that choose nothing
 
 worker:
@@ -131,7 +132,7 @@ development box, not for a shared fleet.
 ## Workers: choosing a profile
 
 ```bash
-OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@64k
+OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
 ```
 
 Unset, the worker gets the fleet's default. The worker asks the manager for that profile's
@@ -165,13 +166,13 @@ from openai import OpenAI
 client = OpenAI(base_url="https://oumigo.example.com/v1", api_key="oumigo-key-...")
 print([m.id for m in client.models.list()])     # any-model + the ids being served
 resp = client.chat.completions.create(
-    model="gemma-4-31B-it-qat-w4a16-ct@64k",
+    model="gemma-4-31B-it-qat-w4a16-ct@128k",
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp.model)                               # the id that answered
 ```
 
-With the OumiGo Python client: `manager.create_agent(model="gemma-4-31B-it-qat-w4a16-ct@64k")`,
+With the OumiGo Python client: `manager.create_agent(model="gemma-4-31B-it-qat-w4a16-ct@128k")`,
 or leave `model` out for `any-model`.
 
 | Request `model` | Goes to |
@@ -185,7 +186,7 @@ night) answers `503 model_unavailable`. Both errors use OpenAI's error format, s
 raise them with their message:
 
 ```json
-{"error": {"message": "model 'gemma-x' is not served by this fleet; served: gemma-4-12B-it-qat-w4a16-ct@128k, gemma-4-31B-it-qat-w4a16-ct@64k (or any-model)",
+{"error": {"message": "model 'gemma-x' is not served by this fleet; served: gemma-4-12B-it-qat-w4a16-ct@128k, gemma-4-31B-it-qat-w4a16-ct@128k (or any-model)",
            "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}
 ```
 
@@ -203,7 +204,9 @@ apps that fill a menu from this list never offer a model that would only time ou
 ]}
 ```
 
-`GET /agent-defaults?model=<id>` returns that model's client timeouts.
+`GET /agent-defaults?model=<id>` returns that model's client timeouts. For `any-model` (or
+no `model`), it returns the **longest** timeouts among the models being served, since any of
+them may answer; "no limit" outranks every number.
 
 ## Queueing
 
@@ -211,6 +214,11 @@ Each worker accepts up to its profile's `max_concurrent_requests`. When every wo
 model is busy, its requests wait in the router's queue. A slot that frees goes to the
 oldest waiting request that can use it, so a busy model never holds up requests for
 another model, and order is kept within each model.
+
+A request waits at most its model's `caps.max_queue_seconds` (default 300 s), then gets
+`503`. Raise it for a model whose requests are long, such as one 128k-context sequence at a
+time, and raise the model's `agent:` timeouts with it so clients wait as long. An
+`any-model` request waits as long as the longest limit among the models being served.
 
 ## Upgrading from 0.4
 

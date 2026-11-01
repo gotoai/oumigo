@@ -53,7 +53,7 @@ def test_shipped_catalog_is_the_tested_set() -> None:
         "Qwen3.5-9B@32k-bnb4",
         "Qwen3.8-27B-W8A16@128k-c10",
         "gemma-4-12B-it-qat-w4a16-ct@128k",
-        "gemma-4-31B-it-qat-w4a16-ct@64k",
+        "gemma-4-31B-it-qat-w4a16-ct@128k",
     ]
     assert all(p.tested for p in load_profiles().values())
 

@@ -66,7 +66,7 @@ catalog:
   # dirs: [/etc/oumigo/catalog]   # your own profiles; an id here overrides a shipped one
   allow:
     - gemma-4-12B-it-qat-w4a16-ct@128k
-    - gemma-4-31B-it-qat-w4a16-ct@64k
+    - gemma-4-31B-it-qat-w4a16-ct@128k
   default: gemma-4-12B-it-qat-w4a16-ct@128k
 
 worker:

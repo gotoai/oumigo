@@ -45,16 +45,18 @@ def upstreams():
         srv.shutdown()
 
 
-def _profile(pid: str, model: str, **caps) -> Profile:
-    return Profile(id=pid, model=model, caps=Caps(**caps))
+def _profile(pid: str, model: str, agent: dict | None = None, **caps) -> Profile:
+    return Profile(id=pid, model=model, caps=Caps(**caps), agent=agent)
 
 
-def _fleet(addrs, **router_kwargs):
+def _fleet(addrs, agents: dict | None = None, queue_caps: dict | None = None, **router_kwargs):
     """Two serving workers: SMALL (output cap 100) and BIG (no cap); IDLE has none."""
+    agents, queue_caps = agents or {}, queue_caps or {}
     catalog = FleetCatalog({p.id: p for p in (
-        _profile(SMALL, "acme/small-model", max_output_tokens=100),
-        _profile(BIG, "acme/big-model"),
-        _profile(IDLE, "acme/idle-model"),
+        _profile(pid, model, agents.get(pid), max_queue_seconds=queue_caps.get(pid), **caps)
+        for pid, model, caps in ((SMALL, "acme/small-model", {"max_output_tokens": 100}),
+                                 (BIG, "acme/big-model", {}),
+                                 (IDLE, "acme/idle-model", {}))
     )}, SMALL)
     reg = Registry()
     for node_id, (host, port), pid in (("small", addrs[0], SMALL), ("big", addrs[1], BIG)):
@@ -113,10 +115,56 @@ def test_agent_defaults_per_model(upstreams) -> None:
     app = _fleet(upstreams, agent_defaults={"turn_timeout": 90.0, "stall_timeout": None},
                  fleet_agent_defaults={"turn_timeout": 60.0, "stall_timeout": 30.0})
     with TestClient(app) as client:
-        assert client.get("/agent-defaults").json()["turn_timeout"] == 90.0  # the default's
         # BIG has no `agent:` of its own -> the manager's block.
         assert client.get(f"/agent-defaults?model={BIG}").json() == {
             "turn_timeout": 60.0, "stall_timeout": 30.0}
+
+
+def test_any_model_agent_defaults_are_the_longest_served(upstreams) -> None:
+    """Any serving model may answer an any-model request, so the client gets the longest
+    timeouts among them; None (no limit) beats any number. IDLE serves nothing."""
+    app = _fleet(upstreams, fleet_agent_defaults={"turn_timeout": 60.0, "stall_timeout": 30.0},
+                 agents={SMALL: {"turn_timeout": 1800.0, "stall_timeout": None},
+                         IDLE: {"turn_timeout": 9999.0, "stall_timeout": 9999.0}})
+    with TestClient(app) as client:
+        for query in ("", "?model=any-model"):
+            assert client.get(f"/agent-defaults{query}").json() == {
+                "turn_timeout": 1800.0, "stall_timeout": None}
+        assert client.get(f"/agent-defaults?model={IDLE}").json()["turn_timeout"] == 9999.0
+
+
+async def test_queue_wait_follows_the_models_max_queue_seconds() -> None:
+    reg = Registry()
+    reg.register("a", "10.0.0.1", NodeState.SERVING.value, 0, {}, profile=SMALL)
+    reg.heartbeat("a", NodeState.SERVING.value, max_concurrent_requests=1)
+    pool = WorkerPool(reg, 1, queue_timeout=0.05)
+    held = await pool.acquire()
+    with pytest.raises(asyncio.TimeoutError):           # the pool's default
+        await pool.acquire()
+    waiting = asyncio.create_task(pool.acquire(timeout=5.0))  # a longer per-model limit
+    await asyncio.sleep(0.2)
+    pool.release(held.node_id)
+    assert (await asyncio.wait_for(waiting, 1.0)).node_id == "a"
+
+
+def test_router_uses_the_profiles_queue_limit(upstreams) -> None:
+    seen = []
+    app = _fleet(upstreams, queue_caps={BIG: 1800.0})
+    original = WorkerPool.acquire
+
+    async def spy(self, eligible=None, timeout=None):
+        seen.append(timeout)
+        return await original(self, eligible, timeout)
+
+    WorkerPool.acquire = spy
+    try:
+        with TestClient(app) as client:
+            for model in (BIG, SMALL, "any-model"):
+                client.post("/v1/chat/completions", json={"model": model, "messages": []})
+    finally:
+        WorkerPool.acquire = original
+    # BIG: its own; SMALL: the router default; any-model: the longest served.
+    assert seen == [1800.0, 300.0, 1800.0]
 
 
 async def test_a_busy_model_does_not_block_another() -> None:

@@ -1,0 +1,27 @@
+id: gemma-4-31B-it-qat-w4a16-ct@128k
+model: google/gemma-4-31B-it-qat-w4a16-ct
+description: Gemma 4 31B instruct, Google QAT W4A16, 128k context, one request at a time (no audio input)
+engine:
+  max_model_len: 131072
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  tensor_parallel_size: 1
+  max_concurrent_requests: 1
+  extra_args:
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - gemma4
+  - --reasoning-parser
+  - gemma4
+# One 128k sequence at a time: a ~127k prompt takes ~3 min to prefill before its first
+# byte, and further chats queue behind it, so requests wait far longer than for 12B.
+caps:
+  max_output_tokens: 4096
+  max_queue_seconds: 1800
+agent:
+  turn_timeout: 1800.0
+  stall_timeout: 600.0
+requires:
+  min_vram_gib: 44
+  vllm: '>=0.28'
+tested: 'RTX 6000 Ada 48 GB (RunPod), vLLM 0.28.0: 127k-token prompt in ~3 min, 41 tok/s decode'

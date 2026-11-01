@@ -1,0 +1,30 @@
+# oumigo_runpod.py settings: one OumiGo worker pod on RunPod. No secrets here; those go
+# in the env file passed with --secrets (RUNPOD_API_KEY, HF_TOKEN), mode 0600.
+
+pod:
+  name: oumigo-48gb                        # also names the state file; one pod per name
+  image: ghcr.io/<owner>/oumigo-worker:0.5.1-vllm0.28.0-cu129
+  gpu_types:                               # RunPod GPU type ids, tried in this order;
+    - NVIDIA RTX A6000                     # list every card the profile fits, since
+    - NVIDIA A40                           # RunPod stock changes by the minute
+    - NVIDIA L40
+    - NVIDIA RTX 6000 Ada Generation
+    - NVIDIA L40S
+  gpu_count: 1
+  cloud_type: SECURE                       # SECURE | COMMUNITY
+  # min_cuda_version: "13.0"              # hosts with this CUDA or newer; default: from the
+                                           # image tag (-cu129 -> 12.9), else any host
+  container_disk_gb: 80                    # weights + caches; there is no volume
+  # data_centers: [EU-RO-1, US-WA-1]       # optional; tried per GPU type; default: any
+  # registry_auth_id: <id>                 # RunPod registry credential, for a private image
+
+worker:
+  manager_url: https://oumigo.example.com
+  profile: gemma-4-31B-it-qat-w4a16-ct@128k   # must be in the manager's catalog.allow
+  # env: {}                                # further variables for the worker container
+
+join_token:                                # minted per `up`, revoked by `down`
+  ttl: 13h
+  uses: 3                                  # first join plus a few container restarts
+
+manager_config: /etc/oumigo/manager.yaml   # locates the auth state and the control plane
