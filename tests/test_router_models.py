@@ -183,3 +183,79 @@ async def test_a_busy_model_does_not_block_another() -> None:
 
     pool.release(first.node_id)
     assert (await asyncio.wait_for(queued, 1.0)).node_id == "a"
+
+
+# --- not ready: errors an end user reads -------------------------------------------------
+
+
+def _router(*workers):
+    """A catalog fleet whose workers are (node_id, profile, state) with no backend."""
+    catalog = FleetCatalog({p.id: p for p in (
+        _profile(SMALL, "acme/small-model"), _profile(BIG, "acme/big-model"))}, SMALL)
+    reg = Registry()
+    for node_id, pid, state in workers:
+        reg.register(node_id, "10.0.0.9", state, 0, {}, port=7001, profile=pid)
+        reg.heartbeat(node_id, state)
+    return create_router_app(reg, catalog.default_profile.node_spec(7001), catalog=catalog,
+                             queue_timeout=0.05)
+
+
+@pytest.mark.parametrize("workers,model,code,message", [
+    ([], SMALL, "model_unavailable", f"{SMALL} is not available right now."),
+    ([], "any-model", "model_unavailable", "No model is available right now."),
+    ([("a", SMALL, NodeState.INITIALIZING.value)], SMALL, "model_loading",
+     f"{SMALL} is starting, retry shortly."),
+    ([("a", SMALL, NodeState.REGISTERING.value)], "any-model", "model_loading",
+     "A model is starting, retry shortly."),
+    ([("a", BIG, NodeState.INITIALIZING.value)], SMALL, "model_unavailable",   # another model
+     f"{SMALL} is not available right now."),
+    ([("a", SMALL, NodeState.LOST.value)], SMALL, "model_unavailable",
+     f"{SMALL} is not available right now."),
+])
+def test_not_ready_errors_say_what_the_user_needs(workers, model, code, message) -> None:
+    with TestClient(_router(*workers)) as client:
+        resp = client.post("/v1/chat/completions", json={"model": model, "messages": []})
+    assert resp.status_code == 503
+    assert resp.json()["error"] == {"message": message, "type": "server_error",
+                                    "param": "model", "code": code}
+    assert resp.headers.get("retry-after") == ("30" if code == "model_loading" else None)
+
+
+def test_a_serving_tunnel_worker_without_its_tunnel_yet_is_starting() -> None:
+    reg = Registry()
+    reg.register("t", "10.0.0.9", NodeState.SERVING.value, 0, {}, port=7001, profile=SMALL,
+                 transport="tunnel")
+    reg.heartbeat("t", NodeState.SERVING.value)
+    catalog = FleetCatalog({SMALL: _profile(SMALL, "acme/small-model")}, SMALL)
+    app = create_router_app(reg, catalog.default_profile.node_spec(7001), catalog=catalog)
+    with TestClient(app) as client:
+        resp = client.post("/v1/chat/completions", json={"model": SMALL, "messages": []})
+    assert resp.json()["error"]["code"] == "model_loading"
+
+
+async def test_queue_timeout_is_model_busy(upstreams) -> None:
+    import httpx
+
+    app = _fleet(upstreams, queue_timeout=0.05)
+    pool_holder = []
+    original = WorkerPool.acquire
+
+    async def hold_all(self, eligible=None, timeout=None):
+        pool_holder.append(self)
+        return await original(self, eligible, timeout)
+
+    WorkerPool.acquire = hold_all
+    try:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+                await client.post("/v1/chat/completions", json={"model": SMALL, "messages": []})
+                pool = pool_holder[0]
+                pool._inflight["small"] = 99            # SMALL's only worker is saturated
+                resp = await client.post("/v1/chat/completions",
+                                         json={"model": SMALL, "messages": []})
+    finally:
+        WorkerPool.acquire = original
+    assert resp.status_code == 503 and resp.headers["retry-after"] == "30"
+    assert resp.json()["error"]["code"] == "model_busy"
+    assert resp.json()["error"]["message"] == f"{SMALL} is busy, retry shortly."

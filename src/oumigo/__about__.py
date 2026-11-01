@@ -1,3 +1,3 @@
 """Single source of truth for the package version (read by hatch at build time)."""
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"

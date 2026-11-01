@@ -43,9 +43,12 @@ Model field: routing is **by model id**, and a model id is a catalog profile id
 A request naming an id goes only to workers running that profile; `any-model` (or no
 `model` at all) goes to any SERVING worker, and the router then names the chosen
 worker's id in the request, so the response says which model answered. An id the fleet
-doesn't know is `404 model_not_found`; a known id with no SERVING worker is
-`503 model_unavailable` (both in OpenAI's error shape). `/v1/models` is answered here,
-from the registry: `any-model` plus every id with a SERVING worker.
+doesn't know is `404 model_not_found`. With no SERVING worker for the request, it is
+`503 model_loading` (with `Retry-After`) while a matching worker is still starting, else
+`503 model_unavailable`; a request that queued too long behind busy workers is
+`503 model_busy`. All are in OpenAI's error shape, and their messages are written for
+the end user (the details go to the log). `/v1/models` is answered here, from the
+registry: `any-model` plus every id with a SERVING worker.
 
 Capability caps: on `/v1/chat/completions` the router may also trim over-long audio
 and clamp `max_tokens`, both **off unless the chosen worker's profile sets
@@ -111,6 +114,10 @@ UPSTREAM_LIMITS = httpx.Limits(max_connections=None, max_keepalive_connections=N
 _PROMOTE_INTERVAL_S = 0.2        # re-check the queue this often (catches newly-joined workers)
 
 
+RETRY_AFTER_S = 30  # advised to clients while a model is starting or busy
+_STARTING = {NodeState.REGISTERING.value, NodeState.INITIALIZING.value}
+
+
 class NoWorkersAvailable(RuntimeError):
     """Raised by `WorkerPool.acquire` when no eligible worker is SERVING at all."""
 
@@ -157,6 +164,10 @@ class WorkerPool:
     def _capacity(self, record: NodeRecord) -> int:
         cap = record.max_concurrent_requests
         return cap if cap is not None else self.default_capacity
+
+    def routable(self, record: NodeRecord) -> bool:
+        """SERVING, and (for a tunnel worker) with a tunnel connection up."""
+        return self._routable(record)
 
     def _routable(self, record: NodeRecord) -> bool:
         if record.state != NodeState.SERVING.value:
@@ -245,10 +256,15 @@ class WorkerPool:
             pass
 
 
-def _model_error(status: int, code: str, message: str) -> JSONResponse:
-    """An OpenAI-shaped error about the request's `model`, so SDKs surface it properly."""
+def _model_error(status: int, code: str, message: str,
+                 retry_after: int | None = None) -> JSONResponse:
+    """An OpenAI-shaped error about the request's `model`, so SDKs surface it properly.
+
+    `message` is shown to end users by client apps: say what they need, no internals.
+    """
     kind = "invalid_request_error" if status < 500 else "server_error"
-    return JSONResponse(status_code=status, content={
+    headers = {"Retry-After": str(retry_after)} if retry_after else None
+    return JSONResponse(status_code=status, headers=headers, content={
         "error": {"message": message, "type": kind, "param": "model", "code": code}})
 
 
@@ -357,6 +373,21 @@ def create_router_app(
             return profile.agent.model_dump()
         return dict(fleet_agent_defaults or no_limits)
 
+    def _not_ready(model_id: str | None, eligible: Eligible | None) -> JSONResponse:
+        """No SERVING worker for the request: is one on its way, or is there none?"""
+        records = [r for r in registry.list() if eligible is None or eligible(r)]
+        starting = [r for r in records if r.state in _STARTING
+                    or (r.state == NodeState.SERVING.value and not pool.routable(r))]
+        log.info("no routable worker for %s: %s", model_id or ANY_MODEL,
+                 ", ".join(f"{r.node_id}={r.state}" for r in records) or "none registered")
+        if starting:
+            message = (f"{model_id} is starting, retry shortly." if model_id
+                       else "A model is starting, retry shortly.")
+            return _model_error(503, "model_loading", message, retry_after=RETRY_AFTER_S)
+        message = (f"{model_id} is not available right now." if model_id
+                   else "No model is available right now.")
+        return _model_error(503, "model_unavailable", message)
+
     def _known() -> set[str]:
         """Model ids this fleet answers for: allowed profiles plus whatever registered
         workers serve (an open fleet has no catalog)."""
@@ -417,19 +448,19 @@ def create_router_app(
             if requested not in _known():
                 return _model_error(
                     404, "model_not_found",
-                    f"model {requested!r} is not served by this fleet; served: "
-                    f"{', '.join(sorted(_known())) or 'none'} (or {ANY_MODEL})")
+                    f"Model {requested!r} is not available. Available models: "
+                    f"{', '.join(sorted(_known()) + [ANY_MODEL])}.")
             eligible = lambda r: _served(r) == requested  # noqa: E731
 
         try:
             record = await pool.acquire(eligible, _queue_seconds(requested if eligible else None))
         except NoWorkersAvailable:
-            if eligible is not None:
-                return _model_error(503, "model_unavailable",
-                                    f"model {requested!r} has no ready worker right now")
-            raise HTTPException(503, "no healthy (SERVING) workers available") from None
+            return _not_ready(requested if eligible is not None else None, eligible)
         except asyncio.TimeoutError:
-            raise HTTPException(503, "all workers saturated; request queue timed out") from None
+            log.info("queue wait timed out for %s", requested or ANY_MODEL)
+            message = (f"{requested} is busy, retry shortly." if eligible is not None
+                       else "All models are busy, retry shortly.")
+            return _model_error(503, "model_busy", message, retry_after=RETRY_AFTER_S)
 
         released = False
 

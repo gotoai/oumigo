@@ -441,7 +441,8 @@ cannot join a 0.4.x manager.
 | Worker exits: `needs a GPU with at least … GiB` | The profile's `requires.min_vram_gib` is larger than this GPU: pick a smaller profile |
 | Client gets `404 model_not_found` | The request's `model` isn't a served model id: see `GET /v1/models`, or send `any-model` |
 | Client gets `401 missing or invalid API key` | No `Authorization: Bearer <key>`, a mistyped key, or a revoked key |
-| Client gets `503 no healthy (SERVING) workers` | No worker connected, or still loading the model |
+| Client gets `503 model_loading` ("… is starting") | A worker is still loading the model: wait, or watch it in the worker's log |
+| Client gets `503 model_unavailable` ("… is not available") | No worker runs that model, or it stopped responding: check `curl 127.0.0.1:7014/workers` on the manager |
 | Streamed tokens arrive all at once | `proxy_buffering off` missing from the router location |
 | `nginx: unknown directive "http2"` | nginx older than 1.25.1: remove `http2 on;` |
 | Manager refuses to start under `CUSTOM` | A bind or auth setting breaks the WAN rules; the error names the setting |

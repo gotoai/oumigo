@@ -9,7 +9,7 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an OumiGo fleet (as of v0.5.1):
+Key functions provided by an OumiGo fleet (as of v0.5.2):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
@@ -18,7 +18,7 @@ Key functions provided by an OumiGo fleet (as of v0.5.1):
 4. Performance monitoring
 5. Remote workers on any vendor or site (RunPod, Vast.ai, other clouds, other on-prem
    sites) through a worker-initiated tunnel — no inbound ports or VPN on the GPU side;
-   a ready worker image and a script that runs workers as RunPod pods
+   a ready worker image and a script that rents GPUs for workers on RunPod or Vast.ai
 6. Vertical integration of administration and programming interfaces:
     - Command line interface (CLI) administration
     - Python API function with built-in Agent loop, supporting Agent chat, tool call usage
@@ -127,4 +127,4 @@ oumigo version
 - [docs/tunnel.md](docs/tunnel.md) — remote workers: CUSTOM provider, tunnel transport, nginx deployment, join tokens.
 - [docs/deploy-custom-providers-with-tunnel.md](docs/deploy-custom-providers-with-tunnel.md) — step by step: manager on a VPS, GPU workers behind NAT, clients with API keys.
 - [docs/model-catalog.md](docs/model-catalog.md) — several models in one fleet: profiles, the catalog, choosing a model (worker and client), upgrading from 0.4.
-- [docs/runpod.md](docs/runpod.md) — the worker Docker image and running workers as RunPod pods, by hand or on a schedule.
+- [docs/gpu-pods.md](docs/gpu-pods.md) — the worker Docker image and running workers on rented GPUs (RunPod, Vast.ai), by hand or on a schedule.

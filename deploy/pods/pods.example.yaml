@@ -1,0 +1,48 @@
+# oumigo_pods.py settings: one OumiGo worker on a rented GPU. No secrets here; those go
+# in the env file passed with --secrets (RUNPOD_API_KEY, VAST_API_KEY, REGISTRY_TOKEN,
+# HF_TOKEN), mode 0600.
+
+name: oumigo-48gb                          # also names the state file; one pod per name
+image: ghcr.io/<owner>/oumigo-worker:0.5.1-vllm0.28.0-cu129
+gpu_count: 1
+disk_gb: 80                                # weights + caches; there is no volume
+# min_cuda_version: "13.0"                # hosts with this CUDA or newer; default: from the
+                                           # image tag (-cu129 -> 12.9), else any host
+
+search:                                    # `up` options override these
+  providers:                               # tried in this order (--providers)
+    - secure.runpod
+    - community.runpod
+    - vast.ai
+  max_price_per_hour: 0.60                 # USD for the whole pod (--max-price); 0: no bound
+  retry_interval: 30                       # seconds between searches when nothing fits
+  timeout: 1800                            # then give up; 0: search once
+
+runpod:                                    # secure.runpod and community.runpod
+  gpu_types:                               # RunPod GPU type ids, tried in this order;
+    - NVIDIA RTX A6000                     # list every card the profile fits, since
+    - NVIDIA A40                           # stock changes by the minute
+    - NVIDIA L40
+    - NVIDIA RTX 6000 Ada Generation
+    - NVIDIA L40S
+  # data_centers: [EU-RO-1, US-WA-1]       # optional; tried per GPU type; default: any
+  # registry_auth_id: <id>                 # RunPod registry credential, for a private image
+
+vast:                                      # vast.ai: cheapest fitting machine first
+  gpu_names: [RTX A6000, A40, L40, L40S, RTX 6000Ada]   # Vast.ai's names for the cards
+  min_gpu_ram_gb: 44
+  min_reliability: 0.98                    # the host's track record, 0..1
+  min_download_mbps: 500                   # the first start downloads ~40 GB
+  max_download_usd_per_tb: 10              # some hosts charge for downloads
+  # registry_user: <user>                  # for a private image, with REGISTRY_TOKEN
+
+worker:
+  manager_url: https://oumigo.example.com
+  profile: gemma-4-31B-it-qat-w4a16-ct@128k   # must be in the manager's catalog.allow
+  # env: {}                                # further variables for the worker container
+
+join_token:                                # minted per `up`, revoked by `down`
+  ttl: 13h
+  uses: 3                                  # first join plus a few container restarts
+
+manager_config: /etc/oumigo/manager.yaml   # locates the auth state and the control plane

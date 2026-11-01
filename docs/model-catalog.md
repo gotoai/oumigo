@@ -181,12 +181,24 @@ or leave `model` out for `any-model`.
 | `any-model`, or no `model` field | any serving worker; the response names the model that answered |
 | anything else, including a vendor repo name | nothing: `404 model_not_found` |
 
-A known id whose workers aren't serving right now (still loading, or switched off for the
-night) answers `503 model_unavailable`. Both errors use OpenAI's error format, so SDKs
-raise them with their message:
+When nothing can take the request right now, the router answers `503` with a `code` that
+says why:
+
+| `code` | When | Message (shown to end users) | `Retry-After` |
+|---|---|---|---|
+| `model_loading` | a worker for the model is still starting | `<model> is starting, retry shortly.` | 30 |
+| `model_unavailable` | no worker runs the model (or none responds) | `<model> is not available right now.` | — |
+| `model_busy` | its workers stayed busy past `caps.max_queue_seconds` | `<model> is busy, retry shortly.` | 30 |
+
+For `any-model` the messages read "A model is starting", "No model is available", "All
+models are busy". They are written for end users, since client apps show them as they
+are; what the router saw (which workers, in which state) goes to the manager's log.
+
+All errors use OpenAI's error format, so SDKs raise them with their message. The OpenAI
+SDKs also retry a `503` on their own, waiting `Retry-After` between attempts:
 
 ```json
-{"error": {"message": "model 'gemma-x' is not served by this fleet; served: gemma-4-12B-it-qat-w4a16-ct@128k, gemma-4-31B-it-qat-w4a16-ct@128k (or any-model)",
+{"error": {"message": "Model 'gemma-x' is not available. Available models: gemma-4-12B-it-qat-w4a16-ct@128k, gemma-4-31B-it-qat-w4a16-ct@128k, any-model.",
            "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}
 ```
 
