@@ -35,7 +35,8 @@ Run by hand or from a timer: the commands are the same. Settings come from a YAM
                          keeps its own registry credential)
     HF_TOKEN=...         read-only Hugging Face token, passed to the pod
 
-A provider whose API key is missing is skipped.
+A provider whose secrets are missing is skipped (on vast.ai, REGISTRY_TOKEN too when
+`vast.registry_user` is set).
 """
 
 from __future__ import annotations
@@ -178,10 +179,10 @@ def mint_join_token(s: Settings, label: str) -> tuple[str, str]:
 
 # --- providers -----------------------------------------------------------------------
 #
-# Each provider offers: `key` (None: skipped), `offers()` for --dry-run, `create(env)`
-# returning {"pod_id", "gpu", "where", "price"} or None when nothing fits, `get(pod_id)`
-# returning {"status", "state", "gpu", "price"} (state: starting | running | stopped)
-# or None once the pod is gone, and `delete(pod_id)`.
+# Each provider offers: `key`, `missing` (the secrets `up` needs but lacks: skipped),
+# `offers()` for --dry-run, `create(env)` returning {"pod_id", "gpu", "where", "price"}
+# or None when nothing fits, `get(pod_id)` returning {"status", "state", "gpu", "price"}
+# (state: starting | running | stopped) or None once the pod is gone, and `delete(pod_id)`.
 
 
 def _request(provider: str, method: str, url: str, key: str | None, **kwargs) -> httpx.Response:
@@ -217,6 +218,7 @@ class RunPod:
         self.gpu_types: list[str] = list(s.runpod.get("gpu_types") or [])
         self.data_centers: list[str] = list(s.runpod.get("data_centers") or [])
         self.registry_auth_id: str | None = s.runpod.get("registry_auth_id")
+        self.missing = [] if self.key else ["RUNPOD_API_KEY"]
 
     def _graphql(self, query: str, variables: dict | None = None) -> tuple[dict, str]:
         resp = _request(self.name, "POST", self.GRAPHQL, self.key,
@@ -329,6 +331,9 @@ class Vast:
         self.max_download_usd_per_tb = cfg.get("max_download_usd_per_tb", 10)
         self.registry_user: str | None = cfg.get("registry_user")
         self.registry_token = s.secrets.get("REGISTRY_TOKEN")
+        # Without the registry login a private image never pulls, and the rental bills on.
+        self.missing = ([] if self.key else ["VAST_API_KEY"]) + \
+            (["REGISTRY_TOKEN"] if self.registry_user and not self.registry_token else [])
 
     def offers(self, limit: int = 10) -> list[dict]:
         """Rentable machines that fit, cheapest first (prices include the disk)."""
@@ -403,11 +408,9 @@ class Vast:
             state = "stopped"
         else:
             state = "starting"         # created, loading (pulling the image), ...
-        status = actual or intended or "?"
-        if inst.get("status_msg"):
-            status += f" ({inst['status_msg'].strip()[:80]})"
-        return {"status": status, "state": state, "gpu": inst.get("gpu_name"),
-                "price": inst.get("dph_total")}
+        return {"status": actual or intended or "?", "state": state, "gpu": inst.get("gpu_name"),
+                "price": inst.get("dph_total"),
+                "detail": " ".join((inst.get("status_msg") or "").split())[:120]}
 
     def delete(self, pod_id: str) -> None:
         resp = _request(self.name, "DELETE", f"{self.API}/instances/{pod_id}/", self.key, json={})
@@ -453,7 +456,7 @@ def cmd_dry_run(s: Settings) -> None:
           f"at most {price(s.max_price) if s.max_price else 'any price'}")
     for name in s.providers:
         p = provider(s, name)
-        skipped = "" if p.key else " (its API key is not set: `up` skips it)"
+        skipped = f" ({' and '.join(p.missing)} not set: `up` skips it)" if p.missing else ""
         if isinstance(p, Vast):                  # Vast.ai's offer search needs no key
             offers = p.offers()
             print(f"{name}: {len(offers)} machine(s) fit, cheapest first{skipped}")
@@ -462,8 +465,8 @@ def cmd_dry_run(s: Settings) -> None:
                       f"CUDA {o.get('cuda_max_good')}, reliability {o.get('reliability', 0):.3f}, "
                       f"{o.get('inet_down', 0):.0f} Mb/s down at "
                       f"${(o.get('inet_down_cost') or 0) * 1024:.1f}/TB")
-        elif not p.key:
-            print(f"{name}: skipped, its API key is not set")
+        elif p.missing:
+            print(f"{name}: skipped, {' and '.join(p.missing)} not set")
         else:
             offers = p.offers()
             print(f"{name}: {len(offers)} GPU type(s) within the bound, tried in this order "
@@ -480,12 +483,12 @@ def cmd_up(s: Settings, wait: bool, wait_timeout: float) -> None:
     usable = []
     for name in s.providers:
         p = provider(s, name)
-        if p.key:
-            usable.append(p)
+        if p.missing:
+            log(f"{name}: skipped, {' and '.join(p.missing)} not set in the secrets file")
         else:
-            log(f"{name}: skipped, its API key is not set")
+            usable.append(p)
     if not usable:
-        raise Fail("no provider has an API key in the secrets file")
+        raise Fail("no provider has its secrets in the secrets file")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
     token_id, token = mint_join_token(s, label=f"pod {s.name} {stamp}")
@@ -553,8 +556,9 @@ def wait_serving(s: Settings, p, pod_id: str, node_id: str, timeout: float) -> N
         else:
             pod = p.get(pod_id)
             if pod is None or pod["state"] == "stopped":
+                detail = f": {pod['detail']}" if pod and pod.get("detail") else ""
                 raise Fail(f"pod {pod_id} is {pod['status'] if pod else 'gone'} "
-                           "before the worker joined")
+                           f"before the worker joined{detail}")
             state = f"not registered (pod {pod['status']})"
         if state != last:
             log(f"worker {node_id}: {state} (+{time.monotonic() - start:.0f}s)")
