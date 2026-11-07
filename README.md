@@ -95,8 +95,8 @@ OumiGo is published on [PyPI](https://pypi.org/project/oumigo/). Install the ext
 matches the node's role:
 
 ```bash
-pip install "oumigo[worker]"     # on a GPU worker box (pulls vLLM + Transformers)
 pip install "oumigo[manager]"    # on the manager box
+pip install "oumigo[worker]"     # on a GPU worker box (pulls vLLM + Transformers)
 oumigo version
 ```
 
