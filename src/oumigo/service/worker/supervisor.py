@@ -24,7 +24,7 @@ import sys
 import httpx
 
 from oumigo.common.proc import die_with_parent_preexec
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_EMBED, NodeSpec
 from oumigo.protocol.states import RunState
 
 log = logging.getLogger("oumigo.service.worker.vllm")
@@ -101,6 +101,9 @@ def build_argv(spec: NodeSpec, port: int | None = None) -> list[str]:
     # the model's id). Placed before extra_args so an operator can still override it.
     if spec.served_name != spec.model_ref:
         argv += ["--served-model-name", spec.served_name]
+    # An embedding model runs on vLLM's pooling runner, which serves /v1/embeddings.
+    if spec.task == TASK_EMBED:
+        argv += ["--runner", "pooling"]
     argv += list(spec.extra_args)
     return argv
 

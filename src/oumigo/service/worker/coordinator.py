@@ -26,8 +26,7 @@ from pathlib import Path
 import httpx
 
 from oumigo import discovery
-from oumigo.config.catalog import context_label
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_EMBED, NodeSpec
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -427,22 +426,16 @@ class WorkerCoordinator:
         signal.signal(signal.SIGTERM, handler)
 
 
-def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
+def _apply_env_overrides(spec: NodeSpec) -> NodeSpec:
     """Overlay the node's own env/.env settings onto the manager's spec.
 
-    A **catalog profile** (`spec.profile` set) fixes every start-time setting: it is its
-    own model, so `MAX_MODEL_LEN` may not change it (a different context is a different
-    profile). Only node properties apply: `MODEL_STORAGE_LOCATION` (where this node keeps
+    The spec is the manager's copy of a catalog profile, which fixes every start-time
+    setting. Only node properties apply: `MODEL_STORAGE_LOCATION` (where this node keeps
     the weights), `HF_HOME` (with `~`/`$VARS` expanded) and `HF_TOKEN` (blank ->
     anonymous), normalized in `os.environ` so the spawned backend child inherits them.
 
-    Without a profile — an open fleet with no model, or a pre-0.5 manager — the old
-    negotiation applies: `MODEL_NAME` and `MAX_MODEL_LEN` override `model` /
-    `max_model_len`, and `MODEL_NAME` alone is enough when the manager has no model. In
-    an open fleet the worker then names its own profile id (`<repo-name>@<context>`).
-
-    `storage_location` is negotiable for a reason: whether a node has the weights on
-    disk is a property of *that node*, not of the fleet. A worker can point at its own
+    `storage_location` is a node property for a reason: whether a node has the weights
+    on disk is a property of *that node*, not of the fleet. A worker can point at its own
     copy, or set `MODEL_STORAGE_LOCATION=none` to ignore a fleet-wide location it does
     not have and fall back to the Hub.
 
@@ -464,56 +457,34 @@ def _apply_env_overrides(spec: NodeSpec | None) -> NodeSpec:
     if not os.environ.get("HF_TOKEN", "").strip():
         os.environ.pop("HF_TOKEN", None)  # empty token -> anonymous, not a blank credential
 
-    if spec is not None and spec.profile is not None:
-        model = spec.model
-        updates: dict = {}
-        max_len = os.environ.get("MAX_MODEL_LEN")
-        if max_len and max_len.strip() != str(spec.max_model_len):
-            raise SystemExit(
-                f"MAX_MODEL_LEN={max_len} conflicts with profile {spec.profile} "
-                f"(max_model_len {spec.max_model_len}): context length is part of the "
-                "profile. Choose a profile with that context (OUMIGO_MODEL_PROFILE), or "
-                "unset MAX_MODEL_LEN.")
-        return _with_storage_override(spec, model, updates)
-
-    model = os.environ.get("MODEL_NAME") or (spec.model if spec else None)
-    if not model:
-        raise SystemExit(
-            "no model to serve: set OUMIGO_MODEL_PROFILE, or MODEL_NAME when the manager "
-            "has no catalog"
-        )
-    updates = {"model": model}
-    max_len = os.environ.get("MAX_MODEL_LEN")
-    if max_len:
-        try:
-            updates["max_model_len"] = int(max_len)
-        except ValueError:
-            raise SystemExit(f"MAX_MODEL_LEN must be an integer, got {max_len!r}")
-    if spec is None:
-        # Open fleet (no catalog): name our own profile id, so the router can route to it.
-        updates["profile"] = (f"{model.rsplit('/', 1)[-1]}@"
-                              f"{context_label(updates.get('max_model_len'))}")
-    return _with_storage_override(spec, model, updates)
-
-
-def _with_storage_override(spec: NodeSpec | None, model: str, updates: dict) -> NodeSpec:
-    """Apply MODEL_STORAGE_LOCATION (a node property) and check local weights."""
     storage = os.environ.get("MODEL_STORAGE_LOCATION")
     if storage is not None:
-        # Validated (and "none" -> None) by NodeSpec. Re-validating through the model
-        # keeps env and config on one code path; a pydantic traceback would be a poor
-        # way to report a typo in a .env file, so surface it as a clean exit.
+        # Re-validated through NodeSpec ("none" -> None), keeping env and config on one
+        # code path; a pydantic traceback would be a poor way to report a typo in a .env
+        # file, so surface it as a clean exit.
         try:
-            updates["storage_location"] = NodeSpec(
-                model=model, storage_location=storage
-            ).storage_location
+            spec = NodeSpec.model_validate({**spec.model_dump(), "storage_location": storage})
         except ValueError as exc:
             raise SystemExit(f"MODEL_STORAGE_LOCATION={storage!r} is invalid: {exc}")
+    _check_local_weights(spec)
+    return spec
 
-    base = spec or NodeSpec(model=model)  # manager has no model -> defaults + env model
-    resolved = base.model_copy(update=updates)
-    _check_local_weights(resolved)
-    return resolved
+
+# Variables that chose or reshaped the model before catalog profiles (removed in 0.5.5),
+# with what to do instead.
+_REMOVED_ENV = {
+    "MODEL_NAME": "choose a model with OUMIGO_MODEL_PROFILE",
+    "MAX_MODEL_LEN": "choose a profile with that context length (OUMIGO_MODEL_PROFILE)",
+}
+
+
+def _refuse_removed_env() -> None:
+    """Refuse the removed variables rather than ignore them: an old .env would otherwise
+    start the fleet default while its owner believes they chose another model."""
+    for name, instead in _REMOVED_ENV.items():
+        if os.environ.get(name, "").strip():
+            raise SystemExit(f"{name} is no longer supported (0.5.5); {instead}, and remove "
+                             f"{name} from the environment / .env")
 
 
 def _vram_gb() -> float | None:
@@ -528,6 +499,9 @@ def _check_requirements(spec: NodeSpec, backend: str) -> None:
     backend minutes later. A requirement that can't be checked here (no NVML /
     nvidia-smi, no `packaging`) is logged and skipped rather than guessed.
     """
+    if spec.task == TASK_EMBED and backend != BACKEND_VLLM:
+        raise SystemExit(f"profile {spec.served_name} is an embedding model and needs the "
+                         f"vLLM backend; this worker runs the {backend} backend")
     if spec.min_vram_gib is not None:
         vram = probe_gpu0_vram_gib()
         if vram is None:
@@ -600,6 +574,7 @@ def run_worker(
     the *actual* backend port, so the port must be chosen before we register."""
     if backend not in BACKENDS:
         raise SystemExit(f"unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}")
+    _refuse_removed_env()
 
     if not manager_url:
         log.info("no manager URL provided; discovering via mDNS (up to %.0fs) ...", discover_timeout)
@@ -612,15 +587,12 @@ def run_worker(
         log.info("discovered manager at %s", manager_url)
 
     # 1) Fetch the spec of the profile we chose (or the fleet default), then overlay this
-    #    node's own settings. MODEL_NAME is the deprecated way to choose: the manager maps
-    #    it to the one allowed profile of those weights.
+    #    node's own settings. The manager decides: a choice it doesn't allow, or no
+    #    choice and no default, is a 403 that says what to set.
     client.configure_tls()  # system CAs, plus $OUMIGO_MANAGER_CA_FILE for a private cert
     choice = os.environ.get(ENV_MODEL_PROFILE, "").strip() or None
-    legacy_model = None if choice else (os.environ.get("MODEL_NAME", "").strip() or None)
-    if legacy_model:
-        log.warning("MODEL_NAME is deprecated: set %s to a profile id instead", ENV_MODEL_PROFILE)
     try:
-        spec, provider = client.fetch_spec(manager_url, token, profile=choice, model=legacy_model)
+        spec, provider = client.fetch_spec(manager_url, token, profile=choice)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code == 401:
@@ -634,9 +606,9 @@ def run_worker(
         raise SystemExit(
             f"manager {manager_url} runs provider CUSTOM, which requires TLS: "
             "use its https:// URL")
-    if choice and spec is not None and spec.profile != choice:
-        log.warning("manager %s does not know model profiles (pre-0.5): %s=%s is ignored, "
-                    "serving %s", manager_url, ENV_MODEL_PROFILE, choice, spec.model)
+    if spec is None:
+        raise SystemExit(f"manager {manager_url} handed out no model profile; it needs "
+                         "oumigo 0.5.5 or later")
     spec = _apply_env_overrides(spec)
     _check_requirements(spec, backend)
     if transport == Transport.TUNNEL.value:
@@ -661,8 +633,7 @@ def run_worker(
         address=address,
         transport=Transport(transport),
         vllm_port=port,
-        model=spec.model,      # the weights it loads
-        profile=spec.profile,  # the model id it serves (the router routes by it)
+        profile=spec.profile,  # the model id it serves; the manager checks it again
         backend=backend,       # which inference backend this worker runs
         incarnation=incarnation,
         state=NodeState.REGISTERING,

@@ -13,10 +13,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 from starlette.testclient import TestClient
 
-from oumigo.config.spec import NodeSpec
+from oumigo.config.catalog import Caps
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.router.server import NoWorkersAvailable, WorkerPool, create_router_app
 from oumigo.protocol.states import NodeState, RunState
+from tests._fleet import PROFILE, WEIGHTS, one_profile_catalog
 
 
 def _register(
@@ -164,11 +165,19 @@ def upstream():
     srv.shutdown()
 
 
-def _router_app(upstream_addr, **spec_kwargs):
+def _serving_worker(upstream_addr) -> Registry:
+    """A registry with one SERVING worker of the test profile at `upstream_addr`."""
     host, port = upstream_addr
     reg = Registry()
-    _register(reg, "w1", host, NodeState.SERVING)
-    return create_router_app(reg, NodeSpec(model="acme/mock", port=port, **spec_kwargs))
+    reg.register("w1", host, NodeState.SERVING.value, 0, {}, port=port, model=WEIGHTS,
+                 profile=PROFILE)
+    reg.heartbeat("w1", NodeState.SERVING.value)
+    return reg
+
+
+def _router_app(upstream_addr, **caps):
+    """The test profile, with `caps` (e.g. max_output_tokens) in its profile."""
+    return create_router_app(_serving_worker(upstream_addr), one_profile_catalog(caps=Caps(**caps)))
 
 
 def test_forward_chat_completion(upstream) -> None:
@@ -176,14 +185,14 @@ def test_forward_chat_completion(upstream) -> None:
     with TestClient(_router_app(upstream)) as client:
         resp = client.post(
             "/v1/chat/completions",
-            json={"model": "acme/mock", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": PROFILE, "messages": [{"role": "user", "content": "hi"}]},
         )
     assert resp.status_code == 200
-    assert resp.json() == {"echo_model": "acme/mock", "path": "/v1/chat/completions"}
+    assert resp.json() == {"echo_model": PROFILE, "path": "/v1/chat/completions"}
 
 
 def test_unknown_model_is_404_in_openai_shape(upstream) -> None:
-    with TestClient(_router_app(upstream)) as client:  # serves "acme/mock"
+    with TestClient(_router_app(upstream)) as client:
         resp = client.post(
             "/v1/chat/completions",
             json={"model": "client/whatever", "messages": [{"role": "user", "content": "hi"}]},
@@ -191,7 +200,7 @@ def test_unknown_model_is_404_in_openai_shape(upstream) -> None:
     assert resp.status_code == 404
     error = resp.json()["error"]
     assert (error["code"], error["param"]) == ("model_not_found", "model")
-    assert "acme/mock" in error["message"] and "any-model" in error["message"]
+    assert PROFILE in error["message"] and "any-model" in error["message"]
 
 
 @pytest.mark.parametrize("model", ["any-model", None])
@@ -202,28 +211,28 @@ def test_any_model_or_none_is_routed_and_named(upstream, model) -> None:
     with TestClient(_router_app(upstream)) as client:
         resp = client.post("/v1/chat/completions", json=body)
     assert resp.status_code == 200
-    assert resp.json()["echo_model"] == "acme/mock"  # the chosen worker's model id
+    assert resp.json()["echo_model"] == PROFILE  # the chosen worker's model id
 
 
 def test_models_are_listed_by_the_router(upstream) -> None:
     with TestClient(_router_app(upstream)) as client:
         resp = client.get("/v1/models")
     assert resp.status_code == 200
-    assert [m["id"] for m in resp.json()["data"]] == ["any-model", "acme/mock"]
+    assert [m["id"] for m in resp.json()["data"]] == ["any-model", PROFILE]
 
 
 def test_503_when_no_healthy_workers() -> None:
-    app = create_router_app(Registry(), NodeSpec(model="acme/mock", port=9))
+    app = create_router_app(Registry(), one_profile_catalog())
     with TestClient(app) as client:
-        resp = client.post("/v1/chat/completions", json={"model": "acme/mock", "messages": []})
+        resp = client.post("/v1/chat/completions", json={"model": PROFILE, "messages": []})
     assert resp.status_code == 503
 
 
-def test_503_when_no_model_configured(upstream) -> None:
+def test_503_when_a_worker_has_not_reported_its_port(upstream) -> None:
     reg = Registry()
-    _register(reg, "w1", upstream[0], NodeState.SERVING)
-    app = create_router_app(reg, node_spec=None)  # no vLLM port to route to
-    with TestClient(app) as client:
+    reg.register("w1", upstream[0], NodeState.SERVING.value, 0, {}, profile=PROFILE)
+    reg.heartbeat("w1", NodeState.SERVING.value)
+    with TestClient(create_router_app(reg, one_profile_catalog())) as client:
         resp = client.post("/v1/chat/completions", json={"messages": []})
     assert resp.status_code == 503
 
@@ -265,7 +274,7 @@ def _forwarded_audio(body: dict) -> list:
 
 def test_caps_are_off_unless_configured(upstream) -> None:
     _MockVLLM.last_body = None
-    with TestClient(_router_app(upstream)) as client:      # no caps in the NodeSpec
+    with TestClient(_router_app(upstream)) as client:      # no caps in the profile
         resp = client.post("/v1/chat/completions", json=_audio_request(6))
     assert resp.status_code == 200
     assert len(_forwarded_audio(_MockVLLM.last_body)) == 6   # nothing trimmed
@@ -320,11 +329,9 @@ def test_agent_defaults_are_served_to_clients(upstream) -> None:
             "turn_timeout": None, "stall_timeout": None,
         }
 
-    host, port = upstream
-    reg = Registry()
-    _register(reg, "w1", host, NodeState.SERVING)
-    app = create_router_app(reg, NodeSpec(model="acme/mock", port=port),
-                            agent_defaults={"turn_timeout": 90.0, "stall_timeout": 45.0})
+    # The profile has no `agent:` block of its own, so the manager's applies.
+    app = create_router_app(_serving_worker(upstream), one_profile_catalog(),
+                            fleet_agent_defaults={"turn_timeout": 90.0, "stall_timeout": 45.0})
     with TestClient(app) as client:
         assert client.get("/agent-defaults").json()["turn_timeout"] == 90.0
 
@@ -351,11 +358,8 @@ def header_upstream():
 def _authed_router(upstream_addr):
     from oumigo.service.manager.credentials import AuthStore
 
-    host, port = upstream_addr
-    reg = Registry()
-    _register(reg, "w1", host, NodeState.SERVING)
     store = AuthStore()
-    app = create_router_app(reg, NodeSpec(model="acme/mock", port=port),
+    app = create_router_app(_serving_worker(upstream_addr), one_profile_catalog(),
                             auth_store=store, client_auth=True)
     return app, store
 
@@ -405,4 +409,4 @@ def test_client_auth_off_keeps_the_open_lan_router(upstream) -> None:
 
 def test_client_auth_needs_a_store() -> None:
     with pytest.raises(ValueError):
-        create_router_app(Registry(), NodeSpec(model="m", port=1), client_auth=True)
+        create_router_app(Registry(), one_profile_catalog(), client_auth=True)

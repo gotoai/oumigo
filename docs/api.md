@@ -70,13 +70,19 @@ when this process does). Blocks until the control plane is healthy.
 oumigo_get_or_create_manager(
     bearer_token=None, config_file=None,
     data_host=..., data_port=..., control_host=..., control_port=...,
-    provider=..., model=...,
+    provider=..., catalog=...,
     *, discover_timeout=3.0, startup_timeout=20.0,
 ) -> OumiGoManager
 ```
 
 Settings resolve **explicit arg > `config_file` (YAML) > built-in default**. A missing or
 unparseable `config_file` is ignored (a warning is logged).
+
+`catalog` is the manager's `catalog:` block as a dict, e.g.
+`{"allow": ["gemma-4-12B-it-qat-w4a16-ct@128k"], "default": "gemma-4-12B-it-qat-w4a16-ct@128k"}`
+(see [model-catalog.md](model-catalog.md)). A manager to spawn needs one, from the call or
+the `config_file`. Without one, or with an invalid one, `ValueError` is raised before
+anything is spawned.
 
 > **Discovery caveat:** if a manager is already advertising on the LAN, it is reused and
 > your `config_file` is **ignored** (the returned handle has `owned=False`). To guarantee
@@ -91,7 +97,7 @@ Spawn a worker child on this host and block until its vLLM/HF replica is `SERVIN
 ```python
 oumigo_create_worker(
     bearer_token=None, hf_home="~/.hf_cache", vllm_cache_root="~/.vllm_cache",
-    hf_token=None, model_name=None,
+    hf_token=None,
     *, profile=None, manager=None, backend="vllm", manager_url=None,
     discover_timeout=10.0, serving_timeout=None, poll_interval=2.0,
 ) -> OumiGoWorker
@@ -99,7 +105,7 @@ oumigo_create_worker(
 
 `profile` is the catalog profile the worker runs (a model id such as
 `gemma-4-12B-it-qat-w4a16-ct@128k`; see [model-catalog.md](model-catalog.md)); `None`
-takes the fleet's default. `model_name` is the deprecated way to choose.
+takes the fleet's default, and a fleet without one refuses the worker.
 
 The manager is resolved as: `manager` handle > `manager_url` > the last manager created in
 this process > mDNS. `serving_timeout=None` waits **indefinitely** (you own the give-up
@@ -471,3 +477,5 @@ depth for anything reaching the fleet without a gateway in front.
 - Every model call funnels through one internal seam (`OumiGoChat._payload`), reserved for
   a future guardrail interceptor chain — not yet wired.
 - Sampling defaults currently cover `temperature` / `max_tokens` / `top_p` / `stop`.
+- There is no embedding helper yet: call the fleet's `/v1/embeddings` with the OpenAI SDK
+  (`extra_body={"input_type": "query"}`); see [embeddings.md](embeddings.md).

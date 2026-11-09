@@ -9,10 +9,11 @@ from starlette.testclient import TestClient
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.control.server import create_app
 from oumigo.service.manager.credentials import Authenticator, AuthStore, bearer
+from tests._fleet import one_profile_catalog, register_body
 
 
 def _reg_body(node_id: str, transport: str = "direct") -> dict:
-    return {"node_id": node_id, "address": "10.0.0.5", "vllm_port": 7001, "transport": transport}
+    return register_body(node_id, transport=transport)
 
 
 def _hb_body(node_id: str) -> dict:
@@ -94,7 +95,8 @@ def test_bearer_parsing() -> None:
 def _client(provider: str, reusable: str | None = None) -> tuple[TestClient, AuthStore]:
     store = AuthStore()
     auth = Authenticator(store, reusable, wan=provider == "CUSTOM")
-    app = create_app(Registry(), reusable, auth=auth, provider_name=provider)
+    app = create_app(Registry(), reusable, auth=auth, provider_name=provider,
+                     catalog=one_profile_catalog())
     return TestClient(app), store
 
 
@@ -153,7 +155,7 @@ def test_refused_tunnel_registration_does_not_spend_the_token() -> None:
     store = AuthStore()
     auth = Authenticator(store, None, wan=True)
     client = TestClient(create_app(Registry(), None, auth=auth, provider_name="CUSTOM",
-                                   tunnel_enabled=False))
+                                   tunnel_enabled=False, catalog=one_profile_catalog()))
     _, join = store.create_join_token(uses=1)
     resp = client.post("/register", json=_reg_body("n1", "tunnel"), headers=_auth(join))
     assert resp.status_code == 400

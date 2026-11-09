@@ -27,11 +27,12 @@ class NodeRecord:
     run_state: str | None = None  # IDLE/EXECUTING while serving; None otherwise
     seq: int = 0  # 1-based order of first registration; drives the friendly name
     port: int | None = None  # worker's actual vLLM port (negotiated); None until reported
-    model: str | None = None  # weights the worker loads (Hub repo); None until reported
-    profile: str | None = None  # catalog profile id = the model id it serves; None: pre-0.5 worker
+    model: str | None = None  # weights the worker loads (Hub repo), from its profile
+    profile: str | None = None  # catalog profile id = the model id it serves
     backend: str | None = None  # inference backend in use ("vllm" | "transformer"); None until reported
-    # Worker's negotiated in-flight cap; None until reported (router falls back to the
-    # fleet default from node_spec.max_concurrent_requests).
+    task: str = "chat"  # what its model is for ("chat" | "embed"); the router keeps them apart
+    # In-flight cap the router keeps to: set from the profile at registration (1 for the
+    # transformer backend); a worker may report its own on heartbeat. None: unknown.
     max_concurrent_requests: int | None = None
     transport: str = "direct"  # "direct" (router dials address:port) | "tunnel" (worker dials out)
     tunnel_rtt_ms: float | None = None  # tunnel worker's last reported WebSocket ping RTT
@@ -39,7 +40,7 @@ class NodeRecord:
     @property
     def served_name(self) -> str | None:
         """The model id this worker answers to (what the router routes by)."""
-        return self.profile or self.model
+        return self.profile
 
     @property
     def name(self) -> str:
@@ -73,12 +74,14 @@ class Registry:
         backend: str | None = None,
         transport: str = "direct",
         profile: str | None = None,
+        task: str | None = None,
+        max_concurrent_requests: int | None = None,
     ) -> NodeRecord:
         """Idempotent: keyed on node_id, so a re-register updates in place.
 
-        `port` is the worker's actual vLLM port (part of its node_id) and `model` its
-        effective (env-negotiated) model; both are known at registration, but a
-        re-register that omits either keeps the last value.
+        `port` is the worker's actual vLLM port (part of its node_id); `model`, `task`
+        and `max_concurrent_requests` come from its profile. A re-register that omits
+        any of them keeps the last value.
         """
         now = time.time()
         with self._lock:
@@ -99,13 +102,14 @@ class Registry:
                 seq=seq,
                 # worker reports its actual port at registration; keep last known if omitted
                 port=port if port is not None else (existing.port if existing else None),
-                # worker reports its effective model at registration; keep last if omitted
                 model=model if model is not None else (existing.model if existing else None),
                 profile=profile if profile is not None else (existing.profile if existing else None),
                 # worker reports its backend at registration; keep last if omitted
                 backend=backend if backend is not None else (existing.backend if existing else None),
-                # keep negotiated in-flight cap across re-register
-                max_concurrent_requests=existing.max_concurrent_requests if existing else None,
+                task=task if task is not None else (existing.task if existing else "chat"),
+                max_concurrent_requests=(
+                    max_concurrent_requests if max_concurrent_requests is not None
+                    else (existing.max_concurrent_requests if existing else None)),
                 transport=transport,
             )
             self._nodes[node_id] = record

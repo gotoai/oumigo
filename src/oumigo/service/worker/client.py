@@ -50,19 +50,16 @@ def fetch_spec(
     token: str | None = None,
     timeout: float = 10.0,
     profile: str | None = None,
-    model: str | None = None,
 ) -> tuple[NodeSpec | None, str | None]:
-    """GET the vLLM spec of the catalog profile this worker chose (`profile`), of the one
-    profile its deprecated MODEL_NAME names (`model`), or the fleet default — None when
-    the manager has no model at all — and the manager's provider (`LAN` / `CUSTOM`; None
-    from a pre-0.4 manager), so the worker can preflight its port and enforce the
-    provider's posture before it registers. A choice the fleet doesn't allow is a 403.
-    A pre-0.5 manager ignores the choice and returns its one model (`spec.profile` None).
+    """GET the vLLM spec of the catalog profile this worker chose (`profile`), or of the
+    fleet default, and the manager's provider (`LAN` / `CUSTOM`), so the worker can
+    preflight its port and enforce the provider's posture before it registers. A choice
+    the fleet doesn't allow, or no choice and no default, is a 403. The spec is None
+    from a manager older than 0.5.5 that hands out no profile.
     """
-    params = {k: v for k, v in (("profile", profile), ("model", model)) if v}
     resp = httpx.get(
         f"{manager_url.rstrip('/')}/spec",
-        params=params,
+        params={"profile": profile} if profile else {},
         headers=_headers(token),
         timeout=timeout,
         verify=_verify,
@@ -70,15 +67,8 @@ def fetch_spec(
     resp.raise_for_status()
     body = resp.json()
     data = body.get("node_spec")
-    spec = NodeSpec.model_validate(data) if data is not None else None
+    spec = NodeSpec.model_validate(data) if data and data.get("profile") else None
     return spec, body.get("provider")
-
-
-def fetch_node_spec(
-    manager_url: str, token: str | None = None, timeout: float = 10.0
-) -> NodeSpec | None:
-    """The fleet default's vLLM spec only (see `fetch_spec`)."""
-    return fetch_spec(manager_url, token, timeout)[0]
 
 
 def register(

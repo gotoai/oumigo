@@ -137,8 +137,7 @@ class Settings:
         control = manager.get("control_plane") or {}
         host = control.get("host", "127.0.0.1")
         self.control_url = f"http://{'127.0.0.1' if host == '0.0.0.0' else host}:{control.get('port', 7014)}"
-        self.vllm_port = int((manager.get("worker") or {}).get("vllm_port")
-                             or (manager.get("model") or {}).get("port") or 7001)
+        self.vllm_port = int((manager.get("worker") or {}).get("vllm_port") or 7001)
         state_dir = Path((manager.get("auth") or {}).get("state_dir") or "/var/lib/oumigo")
         self.state_file = state_dir / "pods" / f"{self.name}.json"
 

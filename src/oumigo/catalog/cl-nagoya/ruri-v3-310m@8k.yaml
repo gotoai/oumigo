@@ -1,0 +1,26 @@
+id: ruri-v3-310m@8k
+model: cl-nagoya/ruri-v3-310m
+description: Ruri v3 310M, Japanese text embeddings (768-d), 8k context
+task: embed
+engine:
+  max_model_len: 8192
+  gpu_memory_utilization: 0.2
+  dtype: float16
+  tensor_parallel_size: 1
+  max_concurrent_requests: 8
+  extra_args:
+  # config.json says classifier_pooling: cls, but the model is trained and used with
+  # mean pooling (its sentence-transformers 1_Pooling); pin it.
+  - --pooler-config
+  - '{"seq_pooling_type":"MEAN"}'
+embed:
+  dimensions: 768
+  # The model card's prefixes; the model's sentence-transformers config defines none.
+  prompts:
+    query: '検索クエリ: '
+    document: '検索文書: '
+    topic: 'トピック: '
+requires:
+  vllm: '>=0.28'
+  min_vram_gib: 8
+tested: 'RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99999, fp16; bf16 only 0.9989), 1.5 GiB used'

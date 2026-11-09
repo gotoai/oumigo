@@ -13,9 +13,13 @@ with OumiGo live in `oumigo/catalog/<vendor>/`; an operator adds their own throu
 `catalog.dirs` in `manager.yaml`, and an operator profile overrides a shipped one with
 the same id.
 
+A profile's `task` says what clients use the model for: `chat` (the default) or `embed`.
+An embedding profile may add an `embed:` block with its vector size and its named
+prompts (`query`, `document`, ...), which the router applies for `input_type`.
+
 `manager.yaml` then names the profiles its fleet **allows** and the **default** a worker
-gets when it chooses none. A legacy single `model:` block still works: it becomes a
-one-profile catalog (see `FleetCatalog.from_config`).
+gets when it chooses none. Every fleet has this `catalog:` block: a model only ever comes
+from a profile (see `FleetCatalog.from_config`).
 """
 
 from __future__ import annotations
@@ -25,9 +29,16 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_CHAT, TASK_EMBED, NodeSpec, Task
 
 log = logging.getLogger("oumigo.config.catalog")
 
@@ -35,9 +46,14 @@ SHIPPED_DIR = Path(__file__).resolve().parent.parent / "catalog"
 
 ANY_MODEL = "any-model"  # the wildcard model id: accepts any served model
 
-# `<repo-name>@<context>[-<variant>...]`; context like 32k / 128k / 256k, or `default`
-# for a legacy `model:` block without max_model_len.
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@(?:[0-9]+k?|default)(?:-[A-Za-z0-9._]+)*$")
+# Shown when a manager config has no `catalog:` block.
+CATALOG_EXAMPLE = """catalog:
+  allow: [gemma-4-12B-it-qat-w4a16-ct@128k]
+  default: gemma-4-12B-it-qat-w4a16-ct@128k"""
+
+# `<repo-name>@<context>[-<variant>...]`; context like 32k / 128k / 256k.
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@[0-9]+k?(?:-[A-Za-z0-9._]+)*$")
+_PROMPT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class CatalogError(ValueError):
@@ -76,6 +92,28 @@ class AgentDefaults(_Strict):
     stall_timeout: float | None = Field(default=None, gt=0)
 
 
+class EmbedSettings(_Strict):
+    """What an embedding model's clients need to know (only with `task: embed`).
+
+    `prompts` maps an `input_type` a client may send to `/v1/embeddings` to the prefix
+    the router puts before each input: the model's own query/document instructions, so
+    a client written against `query` / `document` works with any embedding model. An
+    empty prefix is a valid type that adds nothing (e.g. documents for a model that
+    embeds them raw).
+    """
+
+    dimensions: int | None = Field(default=None, ge=1)  # informational; in /v1/models
+    prompts: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("prompts")
+    @classmethod
+    def _check_prompt_names(cls, value: dict[str, str]) -> dict[str, str]:
+        bad = [name for name in value if not _PROMPT_NAME_RE.match(name)]
+        if bad:
+            raise ValueError(f"prompt names must be lowercase identifiers: {', '.join(bad)}")
+        return value
+
+
 class Requires(_Strict):
     """What a worker must have to run the profile; checked before the backend starts."""
 
@@ -89,11 +127,13 @@ class Profile(_Strict):
     id: str
     model: str = Field(description="Weights to load: the vendor's Hugging Face repo.")
     description: str | None = None
+    task: Task = TASK_CHAT
     storage_location: str | None = None  # fleet-wide hint; workers may override
     download_dir: str | None = None
     engine: EngineSettings = Field(default_factory=EngineSettings)
     caps: Caps = Field(default_factory=Caps)
     agent: AgentDefaults | None = None  # None: the manager's `agent:` block applies
+    embed: EmbedSettings | None = None  # only with task: embed
     requires: Requires = Field(default_factory=Requires)
     tested: str | None = None  # informational: hardware and backend version verified
 
@@ -105,6 +145,22 @@ class Profile(_Strict):
                 f"profile id {value!r} must look like <repo-name>@<context>[-<variant>], "
                 "e.g. gemma-4-31B-it-qat-w4a16-ct@128k")
         return value
+
+    @model_validator(mode="after")
+    def _check_task(self) -> Profile:
+        if self.task == TASK_EMBED:
+            chat_caps = [name for name in ("max_output_tokens", "max_audio_seconds")
+                         if getattr(self.caps, name) is not None]
+            if chat_caps:
+                raise ValueError(f"an embed profile has no use for caps.{', caps.'.join(chat_caps)}")
+        elif self.embed is not None:
+            raise ValueError("an `embed:` block needs `task: embed`")
+        return self
+
+    @property
+    def prompts(self) -> dict[str, str]:
+        """The `input_type` -> prefix map of an embedding model (empty otherwise)."""
+        return dict(self.embed.prompts) if self.embed is not None else {}
 
     @property
     def vendor(self) -> str:
@@ -118,6 +174,7 @@ class Profile(_Strict):
         return NodeSpec(
             model=self.model,
             profile=self.id,
+            task=self.task,
             storage_location=self.storage_location,
             port=port,
             dtype=e.dtype,
@@ -132,15 +189,6 @@ class Profile(_Strict):
             min_vram_gib=self.requires.min_vram_gib,
             requires_vllm=self.requires.vllm,
         )
-
-
-def context_label(max_model_len: int | None) -> str:
-    """The `@<context>` part of an id: 131072 -> `128k`, 512 -> `512`, None -> `default`."""
-    if max_model_len is None:
-        return "default"
-    if max_model_len % 1024:
-        return str(max_model_len)
-    return f"{max_model_len // 1024}k"
 
 
 def load_profile(path: Path) -> Profile:
@@ -186,6 +234,8 @@ class FleetCatalog:
     """The profiles one fleet allows, and its default."""
 
     def __init__(self, profiles: dict[str, Profile], default: str | None) -> None:
+        if not profiles:
+            raise CatalogError("catalog.allow must list at least one profile id")
         if default is not None and default not in profiles:
             raise CatalogError(f"catalog.default {default!r} is not in catalog.allow")
         self.profiles = profiles
@@ -200,23 +250,20 @@ class FleetCatalog:
 
     @classmethod
     def from_config(cls, config: dict) -> FleetCatalog:
-        """Build the fleet catalog from a manager config dict.
+        """Build the fleet catalog from a manager config dict's `catalog:` block.
 
-        `catalog:` (allow / default / dirs) selects from the loaded profiles. A legacy
-        `model:` block instead becomes a one-profile catalog. Neither yields an empty
-        catalog (the manager then has nothing to hand out). Both is an error.
+        The candidates are the shipped profiles plus those in `catalog.dirs`; `allow`
+        picks this fleet's profiles from them and `default` (optional) one of those.
+        The block is required: a fleet without one would have no model, and "every
+        shipped profile" would change with each package upgrade.
         """
+        if "model" in config:
+            raise CatalogError("the `model:` block was removed in 0.5.5; list a profile in "
+                               "catalog.allow instead (see docs/model-catalog.md)")
         block = config.get("catalog")
-        legacy = config.get("model")
-        if block is not None and legacy:
-            raise CatalogError("manager config has both `catalog:` and `model:`; "
-                               "move the model into a profile and keep only `catalog:`")
-        if block is not None:
-            return cls._from_block(block)
-        if legacy and legacy.get("name"):
-            profile = legacy_profile(legacy)
-            return cls({profile.id: profile}, profile.id)
-        return cls({}, None)
+        if not isinstance(block, dict):
+            raise CatalogError(f"manager.yaml needs a `catalog:` block, e.g.\n{CATALOG_EXAMPLE}")
+        return cls._from_block(block)
 
     @classmethod
     def _from_block(cls, block: dict) -> FleetCatalog:
@@ -229,27 +276,3 @@ class FleetCatalog:
             raise CatalogError(f"catalog.allow names unknown profiles: {', '.join(missing)}")
         return cls({pid: available[pid] for pid in allow}, block.get("default"))
 
-
-def legacy_profile(model: dict) -> Profile:
-    """A profile from a legacy `model:` block, keeping that block's own defaults."""
-    name = str(model["name"])
-    max_len = model.get("max_model_len")
-    repo_name = name.rsplit("/", 1)[-1]
-    return Profile(
-        id=f"{repo_name}@{context_label(max_len)}",
-        model=name,
-        storage_location=model.get("storage_location"),
-        download_dir=model.get("download_dir"),
-        engine=EngineSettings(
-            max_model_len=max_len,
-            gpu_memory_utilization=float(model.get("gpu_memory_utilization", 0.80)),
-            dtype=str(model.get("dtype", "auto")),
-            tensor_parallel_size=int(model.get("tensor_parallel_size", 1)),
-            max_concurrent_requests=int(model.get("max_concurrent_requests", 4)),
-            extra_args=list(model.get("extra_args") or []),
-        ),
-        caps=Caps(
-            max_output_tokens=model.get("max_output_tokens"),
-            max_audio_seconds=model.get("max_audio_seconds"),
-        ),
-    )

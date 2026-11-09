@@ -25,6 +25,7 @@ this runs ONE genuine worker end-to-end against a test manager:
 Single worker only (no `--workers`, no dummy fleet). Same-host quick test:
 
     # test_manager.yaml — data_plane: {host: 127.0.0.1, port: 7017}
+    #                     catalog: {allow: [Qwen3.5-9B@32k-bnb4], default: Qwen3.5-9B@32k-bnb4}
     oumigo manager serve -c test_manager.yaml --no-mdns --host 127.0.0.1 --port 7016
     python tests/worker_hf_test.py --host 127.0.0.1 \
         --manager-url http://127.0.0.1:7016 --model Qwen/Qwen2.5-0.5B-Instruct
@@ -38,9 +39,10 @@ LAN IP so the manager's router can reach the served model:
     python tests/worker_hf_test.py            # discovers the manager on the LAN
     #  ...or point it explicitly: --manager-url http://<manager-LAN-IP>:7014
 
-The manager needn't have a model configured: the worker reports its own preflight-
-negotiated port, and takes the model from `--model` (falling back to the manager's
-node_spec if you omit it).
+The manager needs a catalog like any fleet. The worker registers with `--profile` (or
+the fleet's default profile) and reports its own preflight-negotiated port; it loads
+the weights given by `--model`, whatever that profile names, and clients address them
+by the profile id.
 
 A `.env` in the working directory (or `--env-file`) is loaded at startup and honored:
 `MODEL_ID` sets the default model, `HF_HOME` the HF cache dir (with `~`/`$VARS`
@@ -91,7 +93,7 @@ from oumigo.service.worker.supervisor import PortUnavailable, find_free_port  # 
 
 log = logging.getLogger("oumigo.worker_hf")
 
-DEFAULT_BASE_PORT = 7001    # preferred serving port when the manager has no model.port
+DEFAULT_BASE_PORT = 7001    # preferred serving port until the manager hands out its own
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"  # small, open, has a chat template
 _STREAM_DONE = object()     # sentinel: the streamer iterator is exhausted
 
@@ -394,11 +396,12 @@ class HFWorker:
     """One real worker: registration, OpenAI serving over HF, heartbeat, real metrics."""
 
     def __init__(
-        self, manager_url: str, token: str | None, host: str,
+        self, manager_url: str, token: str | None, host: str, profile: str | None = None,
     ) -> None:
         self.manager_url = manager_url.rstrip("/")
         self.token = token
         self.host = host
+        self.profile = profile  # catalog profile to register with (None: the fleet default)
         self.preferred_port = DEFAULT_BASE_PORT  # updated from node_spec at registration
         self.port: int | None = None             # actual port, chosen by preflight
         self.spec_model: str | None = None        # model the manager configured, if any
@@ -431,9 +434,20 @@ class HFWorker:
 
     async def register(self, client: httpx.AsyncClient) -> None:
         """Register (retrying until the manager answers), learning port + cadence + model."""
+        if self.profile is None:
+            # Like a real worker: ask /spec for the fleet's default profile.
+            try:
+                spec = await client.get(f"{self.manager_url}/spec", headers=self._headers,
+                                        timeout=10.0)
+            except httpx.HTTPError as exc:
+                raise SystemExit(f"could not read /spec: {exc}")
+            if spec.status_code != 200:
+                raise SystemExit(f"/spec refused (HTTP {spec.status_code}): {spec.text}")
+            self.profile = spec.json()["profile"]
         req = RegisterRequest(
             node_id=self.node_id,
             address=self.host,
+            profile=self.profile,
             incarnation=0,
             state=NodeState.REGISTERING,
             capabilities=NodeCapabilities(),
@@ -454,9 +468,8 @@ class HFWorker:
                     return
                 continue
             self.heartbeat_interval = parsed.heartbeat_interval_s or 10
-            if parsed.node_spec is not None:
-                self.preferred_port = parsed.node_spec.port
-                self.spec_model = parsed.node_spec.model
+            self.preferred_port = parsed.node_spec.port
+            self.spec_model = parsed.node_spec.model
             log.info(
                 "registered as %s @ %s (preferred port %d, heartbeat=%ds)",
                 self.node_id[:8], self.host, self.preferred_port, self.heartbeat_interval,
@@ -705,7 +718,8 @@ async def _resolve_manager_url(manager_url: str | None, discover_timeout: float)
 
 async def _run(args: argparse.Namespace) -> None:
     manager_url = await _resolve_manager_url(args.manager_url, args.discover_timeout)
-    worker = HFWorker(manager_url=manager_url, token=args.token, host=args.host)
+    worker = HFWorker(manager_url=manager_url, token=args.token, host=args.host,
+                      profile=args.profile)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -721,7 +735,7 @@ async def _run(args: argparse.Namespace) -> None:
 
         model_id = args.model or worker.spec_model
         if not model_id:
-            raise SystemExit("no model to serve: pass --model or configure a model on the manager")
+            raise SystemExit("no model to serve: pass --model")
         worker.engine = HFEngine(
             model_id, quantize=args.quantize, dtype=args.dtype,
             device=args.device, max_new_tokens=args.max_new_tokens,
@@ -819,7 +833,11 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default=os.environ.get("MODEL_ID") or os.environ.get("OUMIGO_HF_MODEL") or DEFAULT_MODEL,
-        help="HF model id/path to serve (env: MODEL_ID; falls back to the manager's node_spec).",
+        help="HF model id/path to serve (env: MODEL_ID; falls back to the profile's weights).",
+    )
+    parser.add_argument(
+        "--profile", default=os.environ.get("OUMIGO_MODEL_PROFILE"),
+        help="Catalog profile to register with (default: the fleet's default).",
     )
     parser.add_argument(
         "--device", default="auto", choices=["auto", "cuda", "cpu"],

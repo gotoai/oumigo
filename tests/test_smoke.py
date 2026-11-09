@@ -32,7 +32,7 @@ def test_register_response_can_carry_node_spec() -> None:
     from oumigo.config.spec import NodeSpec
     from oumigo.protocol.messages import RegisterResponse
 
-    spec = NodeSpec(model="acme/tiny")
+    spec = NodeSpec(model="acme/tiny", profile="tiny@8k")
     resp = RegisterResponse(accepted=True, node_id="n", node_spec=spec)
     # round-trips over the wire
     assert RegisterResponse.model_validate(resp.model_dump()).node_spec.model == "acme/tiny"

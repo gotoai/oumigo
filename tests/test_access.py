@@ -7,6 +7,7 @@ from starlette.testclient import TestClient
 from oumigo.service.manager.access import FailureLimiter, WorkerAllowlist
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.control.server import create_app
+from tests._fleet import one_profile_catalog, register_body
 
 
 def test_allowlist_off_allows_everyone() -> None:
@@ -34,12 +35,13 @@ def test_failure_limiter_blocks_after_threshold() -> None:
 
 
 def _client(allowlist: list[str] | None, source: str) -> TestClient:
-    app = create_app(Registry(), "fleet-secret", worker_allowlist=allowlist)
+    app = create_app(Registry(), "fleet-secret", worker_allowlist=allowlist,
+                     catalog=one_profile_catalog())
     return TestClient(app, client=(source, 50000))
 
 
 def test_endpoints_enforce_the_allowlist() -> None:
-    body = {"node_id": "n1", "address": "x", "vllm_port": 7001}
+    body = register_body("n1")
     auth = {"Authorization": "Bearer fleet-secret"}
     outside = _client(["10.0.0.0/8"], "203.0.113.7")
     assert outside.post("/register", json=body, headers=auth).status_code == 403

@@ -63,8 +63,7 @@ def _fleet(addrs, agents: dict | None = None, queue_caps: dict | None = None, **
         reg.register(node_id, host, NodeState.SERVING.value, 0, {}, port=port,
                      model=catalog.get(pid).model, profile=pid)
         reg.heartbeat(node_id, NodeState.SERVING.value)
-    spec = catalog.default_profile.node_spec(7001)
-    return create_router_app(reg, spec, catalog=catalog, **router_kwargs)
+    return create_router_app(reg, catalog, **router_kwargs)
 
 
 def test_requests_go_to_workers_of_the_named_model(upstreams) -> None:
@@ -107,8 +106,11 @@ def test_models_lists_only_models_with_a_serving_worker(upstreams) -> None:
     with TestClient(_fleet(upstreams)) as client:
         data = client.get("/v1/models").json()["data"]
     assert [m["id"] for m in data] == ["any-model", BIG, SMALL]  # not IDLE
+    assert data[0] == {"id": "any-model", "object": "model", "owned_by": "oumigo",
+                       "oumigo": {"task": "chat"}}
     assert data[1]["owned_by"] == "acme"
-    assert data[1]["oumigo"] == {"weights": "acme/big-model", "max_model_len": None, "serving": 1}
+    assert data[1]["oumigo"] == {"weights": "acme/big-model", "task": "chat",
+                                 "max_model_len": None, "serving": 1}
 
 
 def test_agent_defaults_per_model(upstreams) -> None:
@@ -196,8 +198,7 @@ def _router(*workers):
     for node_id, pid, state in workers:
         reg.register(node_id, "10.0.0.9", state, 0, {}, port=7001, profile=pid)
         reg.heartbeat(node_id, state)
-    return create_router_app(reg, catalog.default_profile.node_spec(7001), catalog=catalog,
-                             queue_timeout=0.05)
+    return create_router_app(reg, catalog, queue_timeout=0.05)
 
 
 @pytest.mark.parametrize("workers,model,code,message", [
@@ -227,7 +228,7 @@ def test_a_serving_tunnel_worker_without_its_tunnel_yet_is_starting() -> None:
                  transport="tunnel")
     reg.heartbeat("t", NodeState.SERVING.value)
     catalog = FleetCatalog({SMALL: _profile(SMALL, "acme/small-model")}, SMALL)
-    app = create_router_app(reg, catalog.default_profile.node_spec(7001), catalog=catalog)
+    app = create_router_app(reg, catalog)
     with TestClient(app) as client:
         resp = client.post("/v1/chat/completions", json={"model": SMALL, "messages": []})
     assert resp.json()["error"]["code"] == "model_loading"

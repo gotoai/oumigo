@@ -16,16 +16,16 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from oumigo.config.spec import NodeSpec
+from oumigo.config.catalog import EngineSettings
 from oumigo.service.manager.control.registry import Registry
 from oumigo.service.manager.control.server import create_app
 from oumigo.service.manager.credentials import Authenticator, AuthStore
 from oumigo.service.manager.router.server import create_router_app
 from oumigo.service.manager.tunnel import TunnelRegistry
 from oumigo.service.worker.tunnel import TunnelClient, tunnel_url
+from tests._fleet import PROFILE, one_profile_catalog, register_body
 
 JOIN = "fleet-secret"
-MODEL = "test/model"
 
 
 def _free_port() -> int:
@@ -102,10 +102,10 @@ class Fleet:
         self.registry = Registry()
         self.tunnels = TunnelRegistry()
         auth = Authenticator(self.store, JOIN, wan=True)
-        spec = NodeSpec(model=MODEL, max_concurrent_requests=3)
-        self.control = create_app(self.registry, JOIN, node_spec=spec, auth=auth,
-                                  provider_name="CUSTOM", tunnels=self.tunnels)
-        self.router = create_router_app(self.registry, spec, tunnels=self.tunnels,
+        catalog = one_profile_catalog(engine=EngineSettings(max_concurrent_requests=3))
+        self.control = create_app(self.registry, JOIN, auth=auth, provider_name="CUSTOM",
+                                  tunnels=self.tunnels, catalog=catalog)
+        self.router = create_router_app(self.registry, catalog, tunnels=self.tunnels,
                                         auth_store=self.store, queue_timeout=5.0)
         self.events: dict = {"models": [], "cancelled": 0}
         self.control_url = f"http://127.0.0.1:{self.control_port}"
@@ -125,8 +125,8 @@ class Fleet:
         self.wait_conns(self.reg["tunnel_pool_size"])
 
     def register(self, node_id: str = "node1") -> dict:
-        body = {"node_id": node_id, "address": "10.9.9.9", "vllm_port": self.backend_port,
-                "transport": "tunnel"}
+        body = register_body(node_id, address="10.9.9.9", vllm_port=self.backend_port,
+                             transport="tunnel")
         resp = httpx.post(f"{self.control_url}/register", json=body,
                           headers={"Authorization": f"Bearer {JOIN}"})
         resp.raise_for_status()
@@ -170,7 +170,7 @@ def test_tunnel_url() -> None:
 
 
 def test_registration_hands_out_tunnel_settings(fleet: Fleet) -> None:
-    assert fleet.reg["tunnel_pool_size"] == 4  # capacity 3 + 1 spare
+    assert fleet.reg["tunnel_pool_size"] == 4  # the profile's capacity 3 + 1 spare
     assert fleet.reg["vllm_api_key"].startswith("oumigo-vllm-")
     row = fleet.workers()["node1"]
     assert row["transport"] == "tunnel" and row["tunnel_idle"] == 4
@@ -183,7 +183,7 @@ def test_non_streaming_request_through_the_tunnel(fleet: Fleet) -> None:
     assert resp.status_code == 200
     assert resp.json()["choices"][0]["message"]["content"] == "hello"
     assert len(resp.json()["big"]) == 300_000  # larger than one WebSocket message
-    assert fleet.events["models"] == [MODEL]  # any-model -> the chosen worker's model id
+    assert fleet.events["models"] == [PROFILE]  # any-model -> the chosen worker's model id
 
 
 def test_streaming_requests_run_concurrently(fleet: Fleet) -> None:

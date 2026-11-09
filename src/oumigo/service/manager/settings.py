@@ -13,7 +13,6 @@ from pathlib import Path
 import yaml
 
 from oumigo.config.catalog import FleetCatalog, Profile
-from oumigo.config.spec import NodeSpec
 
 DEFAULT_PROVIDER = "LAN"
 DEFAULT_DATA_PLANE_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so LAN clients reach the router
@@ -166,27 +165,15 @@ def get_dashboard(config: dict) -> tuple[bool, str, int]:
 
 
 def get_catalog(config: dict) -> FleetCatalog:
-    """The profiles this fleet allows and its default (`catalog:`, or a legacy `model:`).
+    """The profiles this fleet allows and its default (the required `catalog:` block).
 
-    Raises `CatalogError` (a ValueError) for an invalid profile or `catalog:` block.
+    Raises `CatalogError` (a ValueError) for a missing or invalid `catalog:` block or
+    profile.
     """
     return FleetCatalog.from_config(config)
 
 
 def get_vllm_port(config: dict) -> int:
-    """The backend port workers prefer: `worker.vllm_port`, else a legacy `model.port`."""
+    """The backend port workers prefer (`worker.vllm_port`); each picks a free one."""
     worker = config.get("worker") or {}
-    if worker.get("vllm_port") is not None:
-        return int(worker["vllm_port"])
-    return int((config.get("model") or {}).get("port", DEFAULT_VLLM_PORT))
-
-
-def build_node_spec(config: dict) -> NodeSpec | None:
-    """The NodeSpec of the fleet's default profile, handed to workers that choose none.
-
-    Returns None if the fleet has no default (no `catalog.default` and no legacy
-    `model:` block): registration then returns no spec. Local-only concerns (cache
-    dirs) are excluded; those come from each worker's own environment.
-    """
-    profile = get_catalog(config).default_profile
-    return profile.node_spec(get_vllm_port(config)) if profile else None
+    return int(worker.get("vllm_port", DEFAULT_VLLM_PORT))

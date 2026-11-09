@@ -41,7 +41,6 @@ from oumigo.service.manager.credentials import Authenticator, AuthStore
 from oumigo.service.manager.tunnel import TunnelConn, TunnelRegistry
 from oumigo.service.manager.router.server import create_router_app
 from oumigo.service.manager.settings import (
-    build_node_spec,
     get_agent_defaults,
     get_auth_state_dir,
     get_catalog,
@@ -76,7 +75,6 @@ def create_app(
     advertise_port: int | None = None,
     reaper_timeout: float | None = None,
     reaper_forget_after: float | None = None,
-    node_spec: NodeSpec | None = None,
     store: MetricStore | None = None,
     auth: Authenticator | None = None,
     provider_name: str = LAN,
@@ -89,10 +87,11 @@ def create_app(
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
-    `catalog` holds the profiles workers may run (`oumigo.config.catalog`); a worker
-    picks one at `/spec` and registers with it. Without a catalog (or with an empty
-    one) the fleet is open: every worker gets `node_spec`, and may run any profile it
-    resolved itself.
+    `catalog` (required) holds the profiles workers may run (`oumigo.config.catalog`).
+    A worker asks `/spec` for the profile it chose (`OUMIGO_MODEL_PROFILE`), or the
+    fleet default when it chose none, and registers with it; the manager checks the
+    choice at both steps and takes everything about the model (weights, task,
+    capacity) from its own copy of the profile.
 
     If `advertise_port` is set, the app advertises via mDNS from its lifespan, in a
     background task so registration happens after the socket is serving (no race)
@@ -105,48 +104,43 @@ def create_app(
     guard the same endpoints by source address (`oumigo.service.manager.access`).
     """
 
+    if catalog is None:
+        raise ValueError("create_app needs the fleet's catalog")
     store = store or MetricStore()
-    port_hint = vllm_port if vllm_port is not None else (node_spec.port if node_spec else 7001)
-
-    def _closed() -> bool:
-        return catalog is not None and bool(catalog.profiles)
+    port_hint = vllm_port if vllm_port is not None else 7001
 
     def _allowed_list() -> str:
-        return ", ".join(sorted(catalog.profiles)) if catalog else ""
+        return ", ".join(sorted(catalog.profiles))
 
-    def _resolve_spec(profile: str | None, model: str | None) -> NodeSpec | None:
-        """The spec for a worker's choice: its profile, the one profile of its (deprecated)
-        MODEL_NAME, or the default. 403 when the choice isn't allowed in this fleet."""
-        if not _closed():
-            return node_spec
+    def _resolve_spec(profile: str | None) -> NodeSpec:
+        """The spec for a worker's choice: its profile, else the fleet default. 403 when
+        the choice isn't allowed, or there is no choice and no default."""
         if profile:
             chosen = catalog.get(profile)
             if chosen is None:
                 raise HTTPException(403, f"profile {profile!r} is not allowed in this fleet; "
                                          f"allowed: {_allowed_list()}")
-        elif model:
-            matches = [p for p in catalog.profiles.values() if p.model == model]
-            if len(matches) != 1:
-                raise HTTPException(
-                    403, f"MODEL_NAME={model!r} matches {len(matches)} allowed profiles; set "
-                         f"OUMIGO_MODEL_PROFILE to one of: {_allowed_list()}")
-            chosen = matches[0]
         else:
             chosen = catalog.default_profile
             if chosen is None:
-                raise HTTPException(403, "this fleet has no default profile; set "
-                                         f"OUMIGO_MODEL_PROFILE to one of: {_allowed_list()}")
+                raise HTTPException(403, "Model profile cannot be resolved: this fleet has no "
+                                         "default; set OUMIGO_MODEL_PROFILE to one of: "
+                                         f"{_allowed_list()}")
         return chosen.node_spec(port_hint)
 
     if auth is None:
         auth = Authenticator(AuthStore(), token, wan=provider_name == CUSTOM)
     tunnels = tunnels if tunnels is not None else TunnelRegistry()
-    default_capacity = node_spec.max_concurrent_requests if node_spec else 4
 
-    def _pool_size(capacity: int | None) -> int:
+    def _capacity(spec: NodeSpec, backend: str | None) -> int:
+        """In-flight requests the router may send a worker: its profile's
+        `max_concurrent_requests`; the transformer backend serves one at a time."""
+        return 1 if backend == "transformer" else spec.max_concurrent_requests
+
+    def _pool_size(capacity: int) -> int:
         """Tunnel connections a worker keeps open: its capacity plus spares, so a parked
         connection is always waiting even when every slot is busy."""
-        return (capacity if capacity is not None else default_capacity) + tunnel_pool_spare
+        return capacity + tunnel_pool_spare
 
     allowlist = WorkerAllowlist(worker_allowlist)
     limiter = FailureLimiter()
@@ -210,20 +204,18 @@ def create_app(
     async def spec(
         request: Request,
         profile: str | None = None,
-        model: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> dict:
-        """Hand a worker the vLLM spec of the profile it chose (`?profile=`), of the one
-        profile its deprecated MODEL_NAME names (`?model=`), or the fleet default, so it
-        can preflight its port and derive its node_id *before* registering. None when the
-        fleet has no model at all. `provider` tells the worker which posture to enforce
-        (CUSTOM: TLS only)."""
+        """Hand a worker the vLLM spec of the profile it chose (`?profile=`), or of the
+        fleet default, so it can preflight its port and derive its node_id *before*
+        registering. `provider` tells the worker which posture to enforce (CUSTOM: TLS
+        only)."""
         if not auth.may_read_spec(authorization):
             raise _deny(request)
-        resolved = _resolve_spec(profile, model)
+        resolved = _resolve_spec(profile)
         return {
-            "node_spec": resolved.model_dump() if resolved is not None else None,
-            "profile": resolved.profile if resolved is not None else None,
+            "node_spec": resolved.model_dump(),
+            "profile": resolved.profile,
             "provider": provider_name,
         }
 
@@ -238,22 +230,10 @@ def create_app(
         # not use up a single-use token), but only for a caller allowed to see the catalog.
         if not auth.may_read_spec(authorization):
             raise _deny(request, req.node_id)
-        if _closed():
-            # Every 0.5 worker registers with the profile /spec gave it. A pre-0.5 worker
-            # sends none and would serve under its repo name, which the router never
-            # routes to (it routes by profile id) — refuse it clearly instead.
-            if not req.profile:
-                raise HTTPException(
-                    403, "this manager runs a model catalog (oumigo 0.5+): upgrade the "
-                         "worker to oumigo 0.5 and choose a profile with OUMIGO_MODEL_PROFILE "
-                         f"(or none for the default); allowed: {_allowed_list()}")
-            resolved = _resolve_spec(req.profile, None)
-            if req.model is not None and resolved.model != req.model:
-                raise HTTPException(403, f"worker loads {req.model!r}, but profile "
-                                         f"{resolved.profile!r} needs {resolved.model!r}")
-        else:
-            resolved = node_spec
-        profile_id = resolved.profile if _closed() else req.profile
+        # Checked again here: the manager can't trust a worker's own reading of /spec.
+        # Weights, task and capacity all come from the manager's copy of the profile.
+        resolved = _resolve_spec(req.profile)
+        capacity = _capacity(resolved, req.backend)
         if not auth.may_register(authorization, req.node_id):
             raise _deny(request, req.node_id)
         registry.register(
@@ -263,18 +243,19 @@ def create_app(
             incarnation=req.incarnation,
             capabilities=req.capabilities.model_dump(),
             port=req.vllm_port,
-            model=req.model,
+            model=resolved.model,
             backend=req.backend,
             transport=req.transport.value,
-            profile=profile_id,
+            profile=resolved.profile,
+            task=resolved.task,
+            max_concurrent_requests=capacity,
         )
         log.info(
-            "registered worker %s at %s:%s via %s (incarnation=%d, profile=%s)",
+            "registered worker %s at %s:%s via %s (incarnation=%d, profile=%s, task=%s, "
+            "capacity=%d)",
             req.node_id, req.address, req.vllm_port, req.transport.value, req.incarnation,
-            profile_id,
+            resolved.profile, resolved.task, capacity,
         )
-        if resolved is None:
-            log.warning("no model configured; node %s gets no vLLM config", req.node_id)
         return RegisterResponse(
             accepted=True,
             node_id=req.node_id,
@@ -282,12 +263,9 @@ def create_app(
             node_spec=resolved,
             node_token=auth.store.node_token(req.node_id),
             # Tunnel workers: the key their backend must require (the router presents it),
-            # and how many connections to keep open. The transformer backend serves one
-            # request at a time, so it needs only one slot.
+            # and how many connections to keep open.
             vllm_api_key=auth.store.vllm_api_key(req.node_id) if tunneled else None,
-            tunnel_pool_size=(
-                _pool_size(1 if req.backend == "transformer" else None) if tunneled else None
-            ),
+            tunnel_pool_size=_pool_size(capacity) if tunneled else None,
         )
 
     @app.post("/heartbeat", response_model=HeartbeatResponse, dependencies=[Depends(worker_source)])
@@ -435,7 +413,6 @@ def run_server(
     advertise: bool = True,
     verbose: bool = False,
     config_file: Path | None = None,
-    node_spec: NodeSpec | None = None,
 ) -> None:
     """Run the manager's control plane **and** data-plane router together.
 
@@ -446,12 +423,10 @@ def run_server(
     """
     configure_logging(verbose)
 
-    # Load the config once for both the vLLM spec and the data-plane bind. A child
-    # server spawned by the launcher only receives --config-file, so re-read here.
+    # Load the config once for both the catalog and the data-plane bind. A child server
+    # spawned by the launcher only receives --config-file, so re-read here.
     manager_config = load_manager_yaml(config_file) if config_file is not None else {}
     catalog = get_catalog(manager_config)
-    if node_spec is None:
-        node_spec = build_node_spec(manager_config)
     data_host, data_port = get_data_plane(manager_config)
     dash_enabled, dash_host, dash_port = get_dashboard(manager_config)
 
@@ -479,7 +454,6 @@ def run_server(
         advertise_port=port if advertise else None,
         reaper_timeout=heartbeat_timeout,
         reaper_forget_after=forget_after,
-        node_spec=node_spec,
         auth=auth,
         provider_name=provider_name,
         tunnels=tunnels,
@@ -489,14 +463,13 @@ def run_server(
         catalog=catalog,
         vllm_port=get_vllm_port(manager_config),
     )
-    router_app = create_router_app(registry, node_spec,
+    router_app = create_router_app(registry, catalog,
                                    agent_defaults=get_agent_defaults(manager_config),
                                    tunnels=tunnels, auth_store=auth_store,
-                                   client_auth=client_auth, catalog=catalog,
+                                   client_auth=client_auth,
                                    fleet_agent_defaults=get_fleet_agent_defaults(manager_config))
-    if catalog.profiles:
-        log.info("catalog: %s (default: %s)", ", ".join(sorted(catalog.profiles)),
-                 catalog.default or "none")
+    log.info("catalog: %s (default: %s)", ", ".join(sorted(catalog.profiles)),
+             catalog.default or "none")
 
     log.info(
         "manager control plane on %s:%d | data plane on %s:%d "
@@ -507,7 +480,7 @@ def run_server(
         data_port,
         provider_name,
         "enforced" if auth.enforced else "disabled",
-        node_spec.served_name if node_spec else "unset",
+        catalog.default or "none",
     )
 
     signal.signal(signal.SIGUSR1, lambda *_: set_verbosity(True))   # console: verbose on

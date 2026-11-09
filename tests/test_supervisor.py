@@ -77,7 +77,7 @@ def test_stop_reaps_whole_process_group(tmp_path) -> None:
 
 
 def test_build_argv_minimal() -> None:
-    argv = build_argv(NodeSpec(model="acme/tiny"))
+    argv = build_argv(NodeSpec(model="acme/tiny", profile="tiny@8k"))
     assert argv[:5] == [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", "acme/tiny"]
     assert "--host" in argv and "0.0.0.0" in argv
     assert argv[argv.index("--port") + 1] == "7001"
@@ -90,6 +90,7 @@ def test_build_argv_minimal() -> None:
 def test_build_argv_full() -> None:
     spec = NodeSpec(
         model="acme/big",
+        profile="big@8k",
         port=9001,
         dtype="float16",
         tensor_parallel_size=2,
@@ -108,25 +109,11 @@ def test_build_argv_full() -> None:
     assert argv[-1] == "--enforce-eager"  # extra args appended verbatim, last
 
 
-def test_build_node_spec_from_manager_config() -> None:
-    from oumigo.service.manager.settings import build_node_spec
-
-    assert build_node_spec({}) is None
-    assert build_node_spec({"model": {"name": None}}) is None
-    spec = build_node_spec(
-        {"model": {"name": "acme/tiny", "dtype": "float16", "tensor_parallel_size": 2}}
-    )
-    assert spec is not None
-    assert spec.model == "acme/tiny"
-    assert spec.dtype == "float16"
-    assert spec.tensor_parallel_size == 2
-
-
 # --- port preflight -------------------------------------------------------------
 
 
 def test_build_argv_port_override() -> None:
-    argv = build_argv(NodeSpec(model="m", port=7001), port=7005)
+    argv = build_argv(NodeSpec(model="m", profile="m@8k", port=7001), port=7005)
     assert argv[argv.index("--port") + 1] == "7005"
 
 
@@ -168,70 +155,80 @@ def test_find_free_port_raises_when_exhausted() -> None:
 
 def test_storage_location_none_spellings_mean_the_hub() -> None:
     for value in (None, "", "  ", "none", "None", "NONE", "null"):
-        spec = NodeSpec(model="acme/tiny", storage_location=value)
+        spec = NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location=value)
         assert spec.storage_location is None
         assert spec.local_path is None
         assert spec.model_ref == "acme/tiny"          # falls back to the Hub id
 
 
 def test_storage_location_file_uri_resolves_to_a_path() -> None:
-    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
+    spec = NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location="file:///srv/models/tiny")
     assert spec.local_path == Path("/srv/models/tiny")
     assert spec.model_ref == "/srv/models/tiny"       # what the backend is pointed at
     assert spec.model == "acme/tiny"                  # canonical name is untouched
 
 
 def test_storage_location_accepts_localhost_and_percent_escapes() -> None:
-    assert NodeSpec(model="m", storage_location="file://localhost/srv/m").local_path == Path("/srv/m")
-    assert NodeSpec(model="m", storage_location="file:///srv/my%20models").local_path == Path("/srv/my models")
+    assert NodeSpec(model="m", profile="m@8k", storage_location="file://localhost/srv/m").local_path == Path("/srv/m")
+    assert NodeSpec(model="m", profile="m@8k", storage_location="file:///srv/my%20models").local_path == Path("/srv/my models")
 
 
 def test_storage_location_rejects_unsupported_schemes() -> None:
     for bad in ("s3://bucket/model", "http://host/model", "/srv/models/tiny", "~/models"):
         with pytest.raises(ValidationError):
-            NodeSpec(model="m", storage_location=bad)
+            NodeSpec(model="m", profile="m@8k", storage_location=bad)
 
 
 def test_storage_location_rejects_remote_host_and_relative_path() -> None:
     with pytest.raises(ValidationError):
-        NodeSpec(model="m", storage_location="file://nas.local/srv/models")
+        NodeSpec(model="m", profile="m@8k", storage_location="file://nas.local/srv/models")
     with pytest.raises(ValidationError):
-        NodeSpec(model="m", storage_location="file://relative/path")
+        NodeSpec(model="m", profile="m@8k", storage_location="file://relative/path")
 
 
-def test_build_argv_serves_local_weights_under_the_fleet_name() -> None:
-    """The router rewrites every request's `model` to spec.model, so a directory-served
+def test_build_argv_serves_local_weights_under_the_profile_id() -> None:
+    """The router rewrites every request's `model` to the profile id, so a directory-served
     backend must still answer to that name."""
-    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
+    spec = NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location="file:///srv/models/tiny")
     argv = build_argv(spec)
     assert argv[:5] == [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", "/srv/models/tiny"]
-    assert argv[argv.index("--served-model-name") + 1] == "acme/tiny"
+    assert argv[argv.index("--served-model-name") + 1] == "tiny@8k"
 
 
-def test_build_argv_omits_served_model_name_without_storage_location() -> None:
-    assert "--served-model-name" not in build_argv(NodeSpec(model="acme/tiny"))
+def test_build_argv_always_serves_under_the_profile_id() -> None:
+    argv = build_argv(NodeSpec(model="acme/tiny", profile="tiny@8k"))
+    assert argv[argv.index("--served-model-name") + 1] == "tiny@8k"
 
 
 def test_build_argv_extra_args_still_come_last() -> None:
-    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/m",
+    spec = NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location="file:///srv/m",
                     extra_args=["--enforce-eager"])
     assert build_argv(spec)[-1] == "--enforce-eager"
 
 
+def test_build_argv_runs_an_embedding_model_on_the_pooling_runner() -> None:
+    assert "--runner" not in build_argv(NodeSpec(model="acme/tiny", profile="tiny@8k"))
+    spec = NodeSpec(model="acme/embedder", profile="embedder@8k", task="embed",
+                    extra_args=["--pooler-config", "{}"])
+    argv = build_argv(spec)
+    assert argv[argv.index("--runner") + 1] == "pooling"
+    assert argv[-2:] == ["--pooler-config", "{}"]            # extra args still come last
+
+
 def test_build_hf_argv_uses_local_weights_too() -> None:
-    spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
+    spec = NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location="file:///srv/models/tiny")
     argv = build_hf_argv(spec)
     assert argv[argv.index("--model") + 1] == "/srv/models/tiny"
-    assert argv[argv.index("--served-model-name") + 1] == "acme/tiny"
+    assert argv[argv.index("--served-model-name") + 1] == "tiny@8k"
 
 
-def test_build_node_spec_reads_storage_location() -> None:
-    from oumigo.service.manager.settings import build_node_spec
+def test_a_profile_hands_its_storage_location_to_the_spec() -> None:
+    from oumigo.config.catalog import Profile
 
-    spec = build_node_spec({"model": {"name": "acme/tiny",
-                                      "storage_location": "file:///srv/models/tiny"}})
-    assert spec is not None and spec.model_ref == "/srv/models/tiny"
+    spec = Profile(id="tiny@8k", model="acme/tiny",
+                   storage_location="file:///srv/models/tiny").node_spec(7001)
+    assert spec.model_ref == "/srv/models/tiny"
     # the documented "off" value round-trips to None rather than erroring
-    off = build_node_spec({"model": {"name": "acme/tiny", "storage_location": "none"}})
-    assert off is not None and off.storage_location is None
+    off = Profile(id="tiny@8k", model="acme/tiny", storage_location="none").node_spec(7001)
+    assert off.storage_location is None
 

@@ -85,21 +85,25 @@ def _agent(**kw) -> OumiGoAgent:
 # --- config parsing -------------------------------------------------------------
 
 
+# A fleet whose default profile has no `agent:` block of its own, so the manager's applies.
+_CATALOG = {"catalog": {"allow": ["Qwen3.5-9B@32k-bnb4"], "default": "Qwen3.5-9B@32k-bnb4"}}
+
+
 def test_agent_block_is_parsed() -> None:
-    cfg = {"agent": {"turn_timeout": 90.0, "stall_timeout": 120.0}}
+    cfg = {**_CATALOG, "agent": {"turn_timeout": 90.0, "stall_timeout": 120.0}}
     assert get_agent_defaults(cfg) == {"turn_timeout": 90.0, "stall_timeout": 120.0}
 
 
 def test_missing_block_means_no_limits() -> None:
-    assert get_agent_defaults({}) == {"turn_timeout": None, "stall_timeout": None}
-    assert get_agent_defaults({"agent": {"turn_timeout": None}})["turn_timeout"] is None
+    assert get_agent_defaults(_CATALOG) == {"turn_timeout": None, "stall_timeout": None}
+    assert get_agent_defaults({**_CATALOG, "agent": {"turn_timeout": None}})["turn_timeout"] is None
 
 
 def test_nonsense_values_are_rejected_at_load() -> None:
     with pytest.raises(ValueError, match="agent.turn_timeout"):
-        get_agent_defaults({"agent": {"turn_timeout": "soon"}})
+        get_agent_defaults({**_CATALOG, "agent": {"turn_timeout": "soon"}})
     with pytest.raises(ValueError, match="positive"):
-        get_agent_defaults({"agent": {"stall_timeout": -1}})
+        get_agent_defaults({**_CATALOG, "agent": {"stall_timeout": -1}})
 
 
 # --- fleet lookup ---------------------------------------------------------------
