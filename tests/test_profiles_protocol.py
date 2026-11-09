@@ -113,6 +113,28 @@ def test_open_fleet_accepts_the_workers_own_profile() -> None:
     assert registry.get("n1").served_name == "x@8k"
 
 
+def test_register_records_the_task() -> None:
+    embed = Profile(id="embedder@8k", model="acme/embedder", task="embed")
+    client, registry, _ = _manager(FleetCatalog({**_catalog().profiles, embed.id: embed}, SMALL))
+    resp = client.post("/register", json=_reg("e", model="acme/embedder", profile=embed.id,
+                                              task="embed")).json()
+    assert resp["node_spec"]["task"] == "embed" and registry.get("e").task == "embed"
+    # A pre-0.5.4 worker sends no task: a chat worker, which is what it is.
+    client.post("/register", json=_reg("c", model="acme/small-model", profile=SMALL))
+    assert registry.get("c").task == "chat"
+    # A catalog fleet trusts its profile, not the worker's word.
+    client.post("/register", json=_reg("x", model="acme/small-model", profile=SMALL, task="embed"))
+    assert registry.get("x").task == "chat"
+
+
+def test_open_fleet_takes_the_workers_task() -> None:
+    registry = Registry()
+    app = create_app(registry, None, auth=Authenticator(AuthStore(), None, wan=False),
+                     catalog=FleetCatalog({}, None))
+    TestClient(app).post("/register", json=_reg(model="acme/e", profile="e@8k", task="embed"))
+    assert registry.get("n1").task == "embed"
+
+
 # --- worker side ------------------------------------------------------------------------
 
 
@@ -163,6 +185,12 @@ def test_vllm_version_requirement(monkeypatch) -> None:
     with pytest.raises(SystemExit, match="needs vLLM >=0.28; this worker has 0.27.1"):
         coordinator._check_requirements(_profile_spec(requires_vllm=">=0.28"), "vllm")
     coordinator._check_requirements(_profile_spec(requires_vllm=">=0.28"), "transformer")
+
+
+def test_an_embedding_profile_needs_the_vllm_backend() -> None:
+    with pytest.raises(SystemExit, match="embedding model and needs the vLLM backend"):
+        coordinator._check_requirements(_profile_spec(task="embed"), "transformer")
+    coordinator._check_requirements(_profile_spec(task="embed"), "vllm")
 
 
 def test_backends_serve_under_the_profile_id() -> None:

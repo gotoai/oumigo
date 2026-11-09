@@ -67,6 +67,10 @@ Only `id` and `model` are required. Unknown keys are rejected, so a typo stops t
 at startup instead of reaching a worker minutes later. `agent:` may be left out; the
 manager's own `agent:` block then applies.
 
+A profile's `task` says what its model is for: `chat` (the default) or `embed` for an
+embedding model, which may also carry an `embed:` block with its vector size and its
+query/document prompts. See [embeddings.md](embeddings.md).
+
 `requires` turns a slow failure into a fast one: a worker whose GPU is too small exits with
 "profile … needs a GPU with at least 44 GiB; GPU 0 has 15.6 GiB" before it downloads or
 loads anything.
@@ -84,6 +88,9 @@ OumiGo ships the profiles its maintainers have run, in `src/oumigo/catalog/<vend
 | `Qwen3.8-27B-W8A16@128k-c10` | `GotoAI-Inc/Qwen3.8-27B-W8A16` |
 | `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@256k-c8` | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` |
 | `Qwen3.5-9B@32k-bnb4` | `Qwen/Qwen3.5-9B` |
+| `ruri-v3-310m@8k` (embedding) | `cl-nagoya/ruri-v3-310m` |
+| `harrier-oss-v1-0.6b@8k` (embedding) | `microsoft/harrier-oss-v1-0.6b` |
+| `harrier-oss-v1-0.6b@32k` (embedding) | `microsoft/harrier-oss-v1-0.6b` |
 
 Each file's `tested:` line says what it was verified on. Untested templates to adapt live
 in [`config_examples/catalog/`](../config_examples/catalog/); they are not loaded
@@ -178,8 +185,9 @@ or leave `model` out for `any-model`.
 | Request `model` | Goes to |
 |---|---|
 | a model id | workers running that profile |
-| `any-model`, or no `model` field | any serving worker; the response names the model that answered |
+| `any-model`, or no `model` field | any serving chat worker; the response names the model that answered |
 | anything else, including a vendor repo name | nothing: `404 model_not_found` |
+| an embedding model, on the chat paths | nothing: `400 wrong_task` (use `/v1/embeddings`) |
 
 When nothing can take the request right now, the router answers `503` with a `code` that
 says why:
@@ -212,13 +220,17 @@ apps that fill a menu from this list never offer a model that would only time ou
 {"object": "list", "data": [
   {"id": "any-model", "object": "model", "owned_by": "oumigo"},
   {"id": "gemma-4-12B-it-qat-w4a16-ct@128k", "object": "model", "owned_by": "google",
-   "oumigo": {"weights": "google/gemma-4-12B-it-qat-w4a16-ct", "max_model_len": 131072, "serving": 1}}
+   "oumigo": {"weights": "google/gemma-4-12B-it-qat-w4a16-ct", "task": "chat",
+              "max_model_len": 131072, "serving": 1}}
 ]}
 ```
 
+Embedding models also list their `dimensions` and `input_types`; see
+[embeddings.md](embeddings.md).
+
 `GET /agent-defaults?model=<id>` returns that model's client timeouts. For `any-model` (or
-no `model`), it returns the **longest** timeouts among the models being served, since any of
-them may answer; "no limit" outranks every number.
+no `model`), it returns the **longest** timeouts among the chat models being served, since
+any of them may answer; "no limit" outranks every number.
 
 ## Queueing
 
@@ -230,7 +242,7 @@ another model, and order is kept within each model.
 A request waits at most its model's `caps.max_queue_seconds` (default 300 s), then gets
 `503`. Raise it for a model whose requests are long, such as one 128k-context sequence at a
 time, and raise the model's `agent:` timeouts with it so clients wait as long. An
-`any-model` request waits as long as the longest limit among the models being served.
+`any-model` request waits as long as the longest limit among the chat models being served.
 
 ## Upgrading from 0.4
 

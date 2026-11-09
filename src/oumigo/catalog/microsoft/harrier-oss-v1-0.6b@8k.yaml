@@ -1,0 +1,23 @@
+id: harrier-oss-v1-0.6b@8k
+model: microsoft/harrier-oss-v1-0.6b
+description: Harrier OSS v1 0.6B, multilingual text embeddings (1024-d), 8k context, small enough to share a GPU
+task: embed
+engine:
+  max_model_len: 8192
+  gpu_memory_utilization: 0.2
+  dtype: bfloat16
+  tensor_parallel_size: 1
+  max_concurrent_requests: 8
+embed:
+  dimensions: 1024
+  # From the model's config_sentence_transformers.json. Queries take an instruction;
+  # documents are embedded as they are.
+  prompts:
+    query: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
+    document: ''
+    sts: "Instruct: Retrieve semantically similar text\nQuery: "
+    bitext: "Instruct: Retrieve parallel sentences\nQuery: "
+requires:
+  vllm: '>=0.28'
+  min_vram_gib: 15
+tested: 'RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99994), 2.8 GiB used'

@@ -218,6 +218,15 @@ def test_build_argv_extra_args_still_come_last() -> None:
     assert build_argv(spec)[-1] == "--enforce-eager"
 
 
+def test_build_argv_runs_an_embedding_model_on_the_pooling_runner() -> None:
+    assert "--runner" not in build_argv(NodeSpec(model="acme/tiny"))
+    spec = NodeSpec(model="acme/embedder", profile="embedder@8k", task="embed",
+                    extra_args=["--pooler-config", "{}"])
+    argv = build_argv(spec)
+    assert argv[argv.index("--runner") + 1] == "pooling"
+    assert argv[-2:] == ["--pooler-config", "{}"]            # extra args still come last
+
+
 def test_build_hf_argv_uses_local_weights_too() -> None:
     spec = NodeSpec(model="acme/tiny", storage_location="file:///srv/models/tiny")
     argv = build_hf_argv(spec)

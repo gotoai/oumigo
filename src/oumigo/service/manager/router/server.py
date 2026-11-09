@@ -29,8 +29,8 @@ worker is routable only while it has at least one live tunnel connection — a g
 heartbeat alone doesn't prove the data path works.
 
 Endpoints are a thin passthrough of the vLLM OpenAI API (`/v1/chat/completions`,
-`/v1/completions`, `/v1/models`), including **SSE streaming** — the upstream response
-is relayed chunk-by-chunk.
+`/v1/completions`, `/v1/embeddings`, `/v1/models`), including **SSE streaming** — the
+upstream response is relayed chunk-by-chunk.
 
 Client auth: with `client_auth` on (always under provider CUSTOM, opt-in under LAN),
 `/v1/*`, `/agent-defaults` and `/list` require `Authorization: Bearer <client API key>`
@@ -48,7 +48,17 @@ doesn't know is `404 model_not_found`. With no SERVING worker for the request, i
 `503 model_unavailable`; a request that queued too long behind busy workers is
 `503 model_busy`. All are in OpenAI's error shape, and their messages are written for
 the end user (the details go to the log). `/v1/models` is answered here, from the
-registry: `any-model` plus every id with a SERVING worker.
+registry: `any-model` plus every id with a SERVING worker, each with its task.
+
+Tasks: a model is for `chat` or `embed` (its profile's `task`, as the worker reports
+it). The chat paths, `any-model` included, only reach chat workers; naming an embedding
+model there is `400 wrong_task`. `/v1/embeddings` only reaches embed workers and needs
+an explicit model (`400 model_required`): vectors of two embedding models never mix, so
+a random pick would quietly corrupt a caller's index. An embedding request may carry
+`input_type` (`query`, `document`, ...), an oumigo extension: the router puts the
+model's prompt for it (profile `embed.prompts`) before each input and drops the field,
+so clients need not know each model's instructions. An unknown type is
+`400 invalid_input_type`.
 
 Capability caps: on `/v1/chat/completions` the router may also trim over-long audio
 and clamp `max_tokens`, both **off unless the chosen worker's profile sets
@@ -76,7 +86,7 @@ from fastapi.routing import APIRoute
 
 from oumigo import __version__
 from oumigo.config.catalog import ANY_MODEL, FleetCatalog, Profile
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_CHAT, TASK_EMBED, NodeSpec, Task
 from oumigo.service.manager.control.registry import NodeRecord, Registry
 from oumigo.service.manager.credentials import AuthStore, bearer
 from oumigo.service.manager.router.shaping import (
@@ -102,6 +112,7 @@ _DROP_RESPONSE = {
 }
 
 CHAT_PATH = "/v1/chat/completions"  # the only path carrying messages worth shaping
+EMBEDDINGS_PATH = "/v1/embeddings"
 
 DEFAULT_QUEUE_TIMEOUT_S = 300.0  # give up (503) if all workers stay saturated this long
 # Upstream connection reuse. Idle connections are kept this long — below the worker
@@ -257,15 +268,46 @@ class WorkerPool:
 
 
 def _model_error(status: int, code: str, message: str,
-                 retry_after: int | None = None) -> JSONResponse:
-    """An OpenAI-shaped error about the request's `model`, so SDKs surface it properly.
+                 retry_after: int | None = None, param: str = "model") -> JSONResponse:
+    """An OpenAI-shaped error about the request's `model` (or another `param`), so SDKs
+    surface it properly.
 
     `message` is shown to end users by client apps: say what they need, no internals.
     """
     kind = "invalid_request_error" if status < 500 else "server_error"
     headers = {"Retry-After": str(retry_after)} if retry_after else None
     return JSONResponse(status_code=status, headers=headers, content={
-        "error": {"message": message, "type": kind, "param": "model", "code": code}})
+        "error": {"message": message, "type": kind, "param": param, "code": code}})
+
+
+class _InputTypeError(ValueError):
+    """`input_type` can't be applied; the message is for the end user."""
+
+
+def apply_input_type(payload: dict, prompts: dict[str, str]) -> None:
+    """Replace an embedding request's `input_type` with the model's prompt for it.
+
+    The named prompt is put before every input string and `input_type` is removed, so
+    the backend sees plain OpenAI input. Without `input_type` the payload is untouched.
+    Raises `_InputTypeError` for a type the model has no prompt for, or for token-id
+    input (a text prefix can't be put before token ids).
+    """
+    if "input_type" not in payload:
+        return
+    input_type = payload.pop("input_type")
+    if input_type not in prompts:
+        valid = ", ".join(sorted(prompts))
+        raise _InputTypeError(
+            f"{payload.get('model')} has no input_type {input_type!r}; valid: {valid}."
+            if valid else f"{payload.get('model')} takes no input_type.")
+    prefix = prompts[input_type]
+    inputs = payload.get("input")
+    if isinstance(inputs, str):
+        payload["input"] = prefix + inputs
+    elif isinstance(inputs, list) and all(isinstance(item, str) for item in inputs):
+        payload["input"] = [prefix + item for item in inputs]
+    else:
+        raise _InputTypeError("input_type needs text input, not token ids.")
 
 
 def _filter_request_headers(headers) -> dict[str, str]:
@@ -346,6 +388,27 @@ def create_router_app(
     def _profile(model_id: str | None) -> Profile | None:
         return catalog.get(model_id) if catalog is not None and model_id else None
 
+    def _is_chat(record: NodeRecord) -> bool:
+        """`any-model` and the chat paths only ever reach chat workers."""
+        return record.task == TASK_CHAT
+
+    def _task_of(model_id: str) -> str:
+        """A model id's task: its profile's, else what its workers report (open fleet)."""
+        profile = _profile(model_id)
+        if profile is not None:
+            return profile.task
+        for record in registry.list():
+            if _served(record) == model_id:
+                return record.task
+        if node_spec is not None and model_id == default_served:
+            return node_spec.task
+        return TASK_CHAT
+
+    def _prompts(model_id: str | None) -> dict[str, str]:
+        """An embedding model's `input_type` -> prefix map (empty without a profile)."""
+        profile = _profile(model_id)
+        return profile.prompts if profile is not None else {}
+
     def _caps(record: NodeRecord) -> tuple[float | None, int | None]:
         """(max_audio_seconds, max_output_tokens) for the worker's model; None = off."""
         profile = _profile(record.profile)
@@ -357,9 +420,9 @@ def create_router_app(
 
     def _queue_seconds(model_id: str | None) -> float:
         """How long a request for `model_id` may queue; `any-model` (None) may take any
-        serving worker, so it gets the longest wait among the models being served."""
+        serving chat worker, so it gets the longest wait among the chat models served."""
         if model_id is None:
-            served = {_served(r) for r in pool.serving()} - {None}
+            served = {_served(r) for r in pool.serving(_is_chat)} - {None}
             return max((_queue_seconds(m) for m in served), default=queue_timeout)
         profile = _profile(model_id)
         return (profile.caps.max_queue_seconds if profile else None) or queue_timeout
@@ -431,10 +494,11 @@ def create_router_app(
 
     authed = [Depends(require_client)]
 
-    async def _forward(request: Request, method: str, path: str) -> Response:
+    async def _forward(request: Request, method: str, path: str,
+                       task: Task = TASK_CHAT) -> Response:
         # The body names the model, which decides the eligible workers, so it is read
         # and parsed before a worker is chosen. Non-JSON / non-dict bodies pass through
-        # untouched and may go to any worker.
+        # untouched and may go to any worker of the path's task.
         body = await request.body()
         payload = None
         if body:
@@ -443,22 +507,43 @@ def create_router_app(
             except (ValueError, TypeError):
                 payload = None
         requested = payload.get("model") if isinstance(payload, dict) else None
-        eligible: Eligible | None = None
-        if requested not in (None, "", ANY_MODEL):
-            if requested not in _known():
+        named = requested if requested not in (None, "", ANY_MODEL) else None
+        if named is None and task == TASK_EMBED:
+            # Vectors of two embedding models never mix, so the caller must say which.
+            available = sorted(m for m in _known() if _task_of(m) == TASK_EMBED)
+            return _model_error(
+                400, "model_required",
+                "Name an embedding model"
+                + (f"; available: {', '.join(available)}." if available else "."))
+        if named is not None:
+            if named not in _known():
                 return _model_error(
                     404, "model_not_found",
-                    f"Model {requested!r} is not available. Available models: "
+                    f"Model {named!r} is not available. Available models: "
                     f"{', '.join(sorted(_known()) + [ANY_MODEL])}.")
-            eligible = lambda r: _served(r) == requested  # noqa: E731
+            if _task_of(named) != task:
+                return _model_error(
+                    400, "wrong_task",
+                    f"{named} is an embedding model; use /v1/embeddings."
+                    if task == TASK_CHAT else f"{named} is not an embedding model.")
+        if task == TASK_EMBED and isinstance(payload, dict) and "input_type" in payload:
+            try:
+                apply_input_type(payload, _prompts(named))
+            except _InputTypeError as exc:
+                return _model_error(400, "invalid_input_type", str(exc), param="input_type")
+            body = json.dumps(payload).encode()
+        if named is not None:
+            eligible: Eligible = lambda r: _served(r) == named and r.task == task  # noqa: E731
+        else:
+            eligible = _is_chat
 
         try:
-            record = await pool.acquire(eligible, _queue_seconds(requested if eligible else None))
+            record = await pool.acquire(eligible, _queue_seconds(named))
         except NoWorkersAvailable:
-            return _not_ready(requested if eligible is not None else None, eligible)
+            return _not_ready(named, eligible)
         except asyncio.TimeoutError:
-            log.info("queue wait timed out for %s", requested or ANY_MODEL)
-            message = (f"{requested} is busy, retry shortly." if eligible is not None
+            log.info("queue wait timed out for %s", named or ANY_MODEL)
+            message = (f"{named} is busy, retry shortly." if named is not None
                        else "All models are busy, retry shortly.")
             return _model_error(503, "model_busy", message, retry_after=RETRY_AFTER_S)
 
@@ -569,6 +654,11 @@ def create_router_app(
         """proxy an OpenAI text completion to a healthy worker vLLM"""
         return await _forward(request, "POST", "/v1/completions")
 
+    @app.post(EMBEDDINGS_PATH, dependencies=authed)
+    async def embeddings(request: Request) -> Response:
+        """proxy OpenAI embeddings to a worker of the named embedding model"""
+        return await _forward(request, "POST", EMBEDDINGS_PATH, TASK_EMBED)
+
     @app.get("/v1/models", dependencies=authed)
     async def models() -> dict:
         """list the models with a serving worker, plus any-model"""
@@ -588,12 +678,17 @@ def create_router_app(
                 max_len = node_spec.max_model_len
             else:
                 max_len = None
+            task = _task_of(model_id)
+            info: dict = {"weights": weights, "task": task, "max_model_len": max_len}
+            if task == TASK_EMBED:
+                info["dimensions"] = profile.embed.dimensions if profile and profile.embed else None
+                info["input_types"] = sorted(_prompts(model_id))
+            info["serving"] = len(records)
             data.append({
                 "id": model_id,
                 "object": "model",
                 "owned_by": weights.split("/", 1)[0] if "/" in weights else "oumigo",
-                "oumigo": {"weights": weights, "max_model_len": max_len,
-                           "serving": len(records)},
+                "oumigo": info,
             })
         return {"object": "list", "data": data}
 
@@ -602,9 +697,9 @@ def create_router_app(
         """client-side defaults for a model; for any-model, the longest of those served"""
         if model not in (None, "", ANY_MODEL):
             return _agent(model)
-        # Any serving model may answer, so the client must be prepared to wait as long as
-        # the slowest one needs. None (no limit) outranks every number.
-        served = sorted({_served(r) for r in pool.serving()} - {None})
+        # Any serving chat model may answer, so the client must be prepared to wait as long
+        # as the slowest one needs. None (no limit) outranks every number.
+        served = sorted({_served(r) for r in pool.serving(_is_chat)} - {None})
         if not served:
             return dict(agent_defaults or no_limits)
         merged: dict[str, float | None] = {}

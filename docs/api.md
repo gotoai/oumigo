@@ -471,3 +471,5 @@ depth for anything reaching the fleet without a gateway in front.
 - Every model call funnels through one internal seam (`OumiGoChat._payload`), reserved for
   a future guardrail interceptor chain — not yet wired.
 - Sampling defaults currently cover `temperature` / `max_tokens` / `top_p` / `stop`.
+- There is no embedding helper yet: call the fleet's `/v1/embeddings` with the OpenAI SDK
+  (`extra_body={"input_type": "query"}`); see [embeddings.md](embeddings.md).

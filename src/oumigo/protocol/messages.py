@@ -10,7 +10,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_CHAT, NodeSpec, Task
 from oumigo.protocol.states import NodeState, RunState
 
 
@@ -56,7 +56,8 @@ class RegisterRequest(BaseModel):
     model: str | None = None           # weights the worker loads (Hub repo)
     profile: str | None = None         # catalog profile it runs = the model id it serves
     backend: str | None = None         # inference backend in use ("vllm" | "transformer")
-    incarnation: int = 0               # bumped each worker start; same identity
+    task: Task = TASK_CHAT             # what the model is for; a pre-0.5.4 worker is chat
+    incarnation: int = 0             # bumped each worker start; same identity
     state: NodeState = NodeState.REGISTERING
     capabilities: NodeCapabilities = Field(default_factory=NodeCapabilities)
 

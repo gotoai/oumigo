@@ -13,6 +13,10 @@ with OumiGo live in `oumigo/catalog/<vendor>/`; an operator adds their own throu
 `catalog.dirs` in `manager.yaml`, and an operator profile overrides a shipped one with
 the same id.
 
+A profile's `task` says what clients use the model for: `chat` (the default) or `embed`.
+An embedding profile may add an `embed:` block with its vector size and its named
+prompts (`query`, `document`, ...), which the router applies for `input_type`.
+
 `manager.yaml` then names the profiles its fleet **allows** and the **default** a worker
 gets when it chooses none. A legacy single `model:` block still works: it becomes a
 one-profile catalog (see `FleetCatalog.from_config`).
@@ -25,9 +29,16 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_CHAT, TASK_EMBED, NodeSpec, Task
 
 log = logging.getLogger("oumigo.config.catalog")
 
@@ -38,6 +49,7 @@ ANY_MODEL = "any-model"  # the wildcard model id: accepts any served model
 # `<repo-name>@<context>[-<variant>...]`; context like 32k / 128k / 256k, or `default`
 # for a legacy `model:` block without max_model_len.
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@(?:[0-9]+k?|default)(?:-[A-Za-z0-9._]+)*$")
+_PROMPT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class CatalogError(ValueError):
@@ -76,6 +88,28 @@ class AgentDefaults(_Strict):
     stall_timeout: float | None = Field(default=None, gt=0)
 
 
+class EmbedSettings(_Strict):
+    """What an embedding model's clients need to know (only with `task: embed`).
+
+    `prompts` maps an `input_type` a client may send to `/v1/embeddings` to the prefix
+    the router puts before each input: the model's own query/document instructions, so
+    a client written against `query` / `document` works with any embedding model. An
+    empty prefix is a valid type that adds nothing (e.g. documents for a model that
+    embeds them raw).
+    """
+
+    dimensions: int | None = Field(default=None, ge=1)  # informational; in /v1/models
+    prompts: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("prompts")
+    @classmethod
+    def _check_prompt_names(cls, value: dict[str, str]) -> dict[str, str]:
+        bad = [name for name in value if not _PROMPT_NAME_RE.match(name)]
+        if bad:
+            raise ValueError(f"prompt names must be lowercase identifiers: {', '.join(bad)}")
+        return value
+
+
 class Requires(_Strict):
     """What a worker must have to run the profile; checked before the backend starts."""
 
@@ -89,11 +123,13 @@ class Profile(_Strict):
     id: str
     model: str = Field(description="Weights to load: the vendor's Hugging Face repo.")
     description: str | None = None
+    task: Task = TASK_CHAT
     storage_location: str | None = None  # fleet-wide hint; workers may override
     download_dir: str | None = None
     engine: EngineSettings = Field(default_factory=EngineSettings)
     caps: Caps = Field(default_factory=Caps)
     agent: AgentDefaults | None = None  # None: the manager's `agent:` block applies
+    embed: EmbedSettings | None = None  # only with task: embed
     requires: Requires = Field(default_factory=Requires)
     tested: str | None = None  # informational: hardware and backend version verified
 
@@ -105,6 +141,22 @@ class Profile(_Strict):
                 f"profile id {value!r} must look like <repo-name>@<context>[-<variant>], "
                 "e.g. gemma-4-31B-it-qat-w4a16-ct@128k")
         return value
+
+    @model_validator(mode="after")
+    def _check_task(self) -> Profile:
+        if self.task == TASK_EMBED:
+            chat_caps = [name for name in ("max_output_tokens", "max_audio_seconds")
+                         if getattr(self.caps, name) is not None]
+            if chat_caps:
+                raise ValueError(f"an embed profile has no use for caps.{', caps.'.join(chat_caps)}")
+        elif self.embed is not None:
+            raise ValueError("an `embed:` block needs `task: embed`")
+        return self
+
+    @property
+    def prompts(self) -> dict[str, str]:
+        """The `input_type` -> prefix map of an embedding model (empty otherwise)."""
+        return dict(self.embed.prompts) if self.embed is not None else {}
 
     @property
     def vendor(self) -> str:
@@ -118,6 +170,7 @@ class Profile(_Strict):
         return NodeSpec(
             model=self.model,
             profile=self.id,
+            task=self.task,
             storage_location=self.storage_location,
             port=port,
             dtype=e.dtype,

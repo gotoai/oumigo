@@ -254,6 +254,8 @@ def create_app(
         else:
             resolved = node_spec
         profile_id = resolved.profile if _closed() else req.profile
+        # A catalog fleet knows each profile's task; an open one takes the worker's word.
+        task = resolved.task if _closed() else req.task
         if not auth.may_register(authorization, req.node_id):
             raise _deny(request, req.node_id)
         registry.register(
@@ -267,11 +269,12 @@ def create_app(
             backend=req.backend,
             transport=req.transport.value,
             profile=profile_id,
+            task=task,
         )
         log.info(
-            "registered worker %s at %s:%s via %s (incarnation=%d, profile=%s)",
+            "registered worker %s at %s:%s via %s (incarnation=%d, profile=%s, task=%s)",
             req.node_id, req.address, req.vllm_port, req.transport.value, req.incarnation,
-            profile_id,
+            profile_id, task,
         )
         if resolved is None:
             log.warning("no model configured; node %s gets no vLLM config", req.node_id)

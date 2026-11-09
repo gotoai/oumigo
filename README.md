@@ -9,12 +9,13 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an OumiGo fleet (as of v0.5.3):
+Key functions provided by an OumiGo fleet (as of v0.5.4):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
 3. Several models in one fleet: each worker runs a catalog profile that fits its GPU,
-   and clients choose a model by id
+   and clients choose a model by id; embedding models serve `/v1/embeddings` next to
+   chat models
 4. Performance monitoring
 5. Remote workers on any vendor or site (RunPod, Vast.ai, other clouds, other on-prem
    sites) through a worker-initiated tunnel — no inbound ports or VPN on the GPU side;
@@ -52,7 +53,8 @@ Two roles:
     connections) — see [docs/tunnel.md](docs/tunnel.md).
   - **model catalog** (`oumigo.config.catalog`): static profiles, one per model with all
     its start-time settings; the fleet allows some, each worker runs one — see
-    [docs/model-catalog.md](docs/model-catalog.md).
+    [docs/model-catalog.md](docs/model-catalog.md). A profile's `task` is `chat` or `embed`;
+    the router keeps the two apart — see [docs/embeddings.md](docs/embeddings.md).
 
   
 - **Worker** (`oumigo.service.worker`): a long-lived *coordinator* supervises a LLM server
@@ -127,4 +129,5 @@ oumigo version
 - [docs/tunnel.md](docs/tunnel.md) — remote workers: CUSTOM provider, tunnel transport, nginx deployment, join tokens.
 - [docs/deploy-custom-providers-with-tunnel.md](docs/deploy-custom-providers-with-tunnel.md) — step by step: manager on a VPS, GPU workers behind NAT, clients with API keys.
 - [docs/model-catalog.md](docs/model-catalog.md) — several models in one fleet: profiles, the catalog, choosing a model (worker and client), upgrading from 0.4.
+- [docs/embeddings.md](docs/embeddings.md) — embedding models: `task: embed` profiles, `/v1/embeddings`, `input_type` prompts, the shipped ruri and harrier profiles.
 - [docs/gpu-pods.md](docs/gpu-pods.md) — the worker Docker image and running workers on rented GPUs (RunPod, Vast.ai), by hand or on a schedule.

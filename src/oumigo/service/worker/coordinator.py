@@ -27,7 +27,7 @@ import httpx
 
 from oumigo import discovery
 from oumigo.config.catalog import context_label
-from oumigo.config.spec import NodeSpec
+from oumigo.config.spec import TASK_EMBED, NodeSpec
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -528,6 +528,9 @@ def _check_requirements(spec: NodeSpec, backend: str) -> None:
     backend minutes later. A requirement that can't be checked here (no NVML /
     nvidia-smi, no `packaging`) is logged and skipped rather than guessed.
     """
+    if spec.task == TASK_EMBED and backend != BACKEND_VLLM:
+        raise SystemExit(f"profile {spec.served_name} is an embedding model and needs the "
+                         f"vLLM backend; this worker runs the {backend} backend")
     if spec.min_vram_gib is not None:
         vram = probe_gpu0_vram_gib()
         if vram is None:
@@ -664,6 +667,7 @@ def run_worker(
         model=spec.model,      # the weights it loads
         profile=spec.profile,  # the model id it serves (the router routes by it)
         backend=backend,       # which inference backend this worker runs
+        task=spec.task,        # chat or embed: the router keeps the two apart
         incarnation=incarnation,
         state=NodeState.REGISTERING,
         capabilities=NodeCapabilities(gpu=probe_gpu0_name(), vram_gb=_vram_gb()),

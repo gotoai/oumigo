@@ -54,6 +54,9 @@ def test_shipped_catalog_is_the_tested_set() -> None:
         "Qwen3.8-27B-W8A16@128k-c10",
         "gemma-4-12B-it-qat-w4a16-ct@128k",
         "gemma-4-31B-it-qat-w4a16-ct@128k",
+        "harrier-oss-v1-0.6b@32k",
+        "harrier-oss-v1-0.6b@8k",
+        "ruri-v3-310m@8k",
     ]
     assert all(p.tested for p in load_profiles().values())
 
@@ -87,6 +90,10 @@ def test_duplicate_id_in_one_tree_is_an_error(tmp_path: Path) -> None:
     ({"id": "tiny model@32k"}, "must look like"),
     ({"engine": {"max_model_len": 32768, "gpu_mem": 0.9}}, "gpu_mem"),   # typo: unknown key
     ({"caps": {"max_output_tokens": 0}}, "max_output_tokens"),
+    ({"task": "rerank"}, "task"),
+    ({"embed": {"dimensions": 768}}, "needs `task: embed`"),
+    ({"task": "embed", "caps": {"max_output_tokens": 100}}, "no use for caps.max_output_tokens"),
+    ({"task": "embed", "embed": {"prompts": {"Query": "q: "}}}, "lowercase identifiers: Query"),
 ])
 def test_invalid_profiles_are_rejected(tmp_path: Path, bad: dict, match: str) -> None:
     data = {**_profile(), **bad}
@@ -95,6 +102,29 @@ def test_invalid_profiles_are_rejected(tmp_path: Path, bad: dict, match: str) ->
     path.write_text(yaml.safe_dump(data))
     with pytest.raises(CatalogError, match=match):
         load_profile(path)
+
+
+def test_an_embed_profile_carries_its_task_and_prompts(tmp_path: Path) -> None:
+    path = _write(tmp_path, "acme", _profile(task="embed", embed={
+        "dimensions": 768, "prompts": {"query": "q: ", "document": ""}}))
+    profile = load_profile(path)
+    assert profile.node_spec(7001).task == "embed"
+    assert profile.prompts == {"query": "q: ", "document": ""}
+    chat = load_profile(_write(tmp_path, "acme", _profile("chat-model@32k")))
+    assert (chat.task, chat.node_spec(7001).task, chat.prompts) == ("chat", "chat", {})
+
+
+def test_shipped_embedding_profiles_pin_their_pooling_and_prompts() -> None:
+    profiles = load_profiles()
+    ruri, harrier = profiles["ruri-v3-310m@8k"], profiles["harrier-oss-v1-0.6b@32k"]
+    assert ruri.task == harrier.task == "embed"
+    # ruri's config.json says CLS, the model is used with mean pooling.
+    args = ruri.engine.extra_args
+    assert args[args.index("--pooler-config") + 1] == '{"seq_pooling_type":"MEAN"}'
+    assert ruri.prompts["query"] == "検索クエリ: " and ruri.prompts["document"] == "検索文書: "
+    assert harrier.prompts["document"] == ""
+    assert harrier.prompts["query"].endswith("\nQuery: ")
+    assert (ruri.embed.dimensions, harrier.embed.dimensions) == (768, 1024)
 
 
 def test_id_must_match_the_file_name(tmp_path: Path) -> None:

@@ -11,9 +11,16 @@ catalog profile (`oumigo.config.catalog`), whose id is also the name it serves u
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field, field_validator
+
+# What clients use a model for. The router keeps the tasks apart: chat traffic (also
+# `any-model`) only reaches `chat` workers, `/v1/embeddings` only `embed` workers.
+Task = Literal["chat", "embed"]
+TASK_CHAT: Task = "chat"
+TASK_EMBED: Task = "embed"
 
 
 class NodeSpec(BaseModel):
@@ -33,6 +40,11 @@ class NodeSpec(BaseModel):
         description="Catalog profile id, e.g. `gemma-4-12B-it@128k`: the model id clients "
                     "request and the name the backend serves under. None only for a spec "
                     "from a pre-0.5 manager.",
+    )
+    task: Task = Field(
+        default=TASK_CHAT,
+        description="`chat` (generation) or `embed` (an embedding model, served by vLLM's "
+                    "pooling runner).",
     )
     storage_location: str | None = Field(
         default=None,

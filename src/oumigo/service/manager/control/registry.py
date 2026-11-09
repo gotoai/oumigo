@@ -30,6 +30,7 @@ class NodeRecord:
     model: str | None = None  # weights the worker loads (Hub repo); None until reported
     profile: str | None = None  # catalog profile id = the model id it serves; None: pre-0.5 worker
     backend: str | None = None  # inference backend in use ("vllm" | "transformer"); None until reported
+    task: str = "chat"  # what its model is for ("chat" | "embed"); the router keeps them apart
     # Worker's negotiated in-flight cap; None until reported (router falls back to the
     # fleet default from node_spec.max_concurrent_requests).
     max_concurrent_requests: int | None = None
@@ -73,6 +74,7 @@ class Registry:
         backend: str | None = None,
         transport: str = "direct",
         profile: str | None = None,
+        task: str | None = None,
     ) -> NodeRecord:
         """Idempotent: keyed on node_id, so a re-register updates in place.
 
@@ -104,6 +106,7 @@ class Registry:
                 profile=profile if profile is not None else (existing.profile if existing else None),
                 # worker reports its backend at registration; keep last if omitted
                 backend=backend if backend is not None else (existing.backend if existing else None),
+                task=task if task is not None else (existing.task if existing else "chat"),
                 # keep negotiated in-flight cap across re-register
                 max_concurrent_requests=existing.max_concurrent_requests if existing else None,
                 transport=transport,
