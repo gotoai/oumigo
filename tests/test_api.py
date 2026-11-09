@@ -33,19 +33,21 @@ def test_get_manager_reuses_discovered_lan_manager(monkeypatch):
     assert mgr.stop() is None  # no-op for a non-owned manager
 
 
+_CATALOG = {"allow": ["Qwen3.5-9B@32k-bnb4"], "default": "Qwen3.5-9B@32k-bnb4"}
+
+
 def test_write_manager_config_round_trips(tmp_path, monkeypatch):
-    """The throwaway manager.yaml carries provider, data-plane bind, and model block."""
+    """The throwaway manager.yaml carries provider, data-plane bind, and catalog block."""
     path = api._write_manager_config(
         provider="LAN",
         data_host="0.0.0.0",
         data_port=7012,
-        model={"name": "google/gemma-4-E2B", "port": 7001, "max_concurrent_requests": 1},
+        catalog=_CATALOG,
     )
     config = yaml.safe_load(open(path, encoding="utf-8"))
     assert config["provider"] == "LAN"
     assert config["data_plane"] == {"host": "0.0.0.0", "port": 7012}
-    assert config["model"]["name"] == "google/gemma-4-E2B"
-    assert config["model"]["max_concurrent_requests"] == 1
+    assert config["catalog"] == _CATALOG and "model" not in config
 
 
 def test_config_file_seeds_settings_and_call_args_override(tmp_path, monkeypatch):
@@ -56,7 +58,7 @@ def test_config_file_seeds_settings_and_call_args_override(tmp_path, monkeypatch
             {
                 "provider": "LAN",
                 "data_plane": {"host": "1.2.3.4", "port": 8012},
-                "model": {"name": "yaml/model", "port": 9001},
+                "catalog": _CATALOG,
                 "bearer_token": "from-yaml",
                 "dashboard": {"enabled": False},  # extra key must survive into the spawn config
             }
@@ -80,26 +82,51 @@ def test_config_file_seeds_settings_and_call_args_override(tmp_path, monkeypatch
     assert captured["provider"] == "LAN"     # from the file
     assert captured["data_host"] == "1.2.3.4"  # from the file
     assert captured["data_port"] == 7099     # call arg wins over the file
-    assert captured["model"]["name"] == "yaml/model"  # from the file
+    assert captured["catalog"] == _CATALOG   # from the file
     assert captured["base"]["dashboard"] == {"enabled": False}  # extra key carried through
 
 
-def test_missing_config_file_is_ignored(tmp_path, monkeypatch):
-    """A non-existent config_file is ignored; defaults apply and nothing raises."""
+def _stub_manager_spawn(monkeypatch, captured: dict) -> None:
+    """Stub out discovery, the spawn and the health wait; capture the config written."""
     monkeypatch.setattr(api.discovery, "discover_manager", lambda _t: None)
     monkeypatch.setattr(api, "_spawn_child", lambda argv, env: types.SimpleNamespace(poll=lambda: None))
     monkeypatch.setattr(api, "_wait_manager_healthy", lambda child, manager, timeout: True)
     monkeypatch.setattr(api.atexit, "register", lambda *_a, **_k: None)
-
-    captured: dict = {}
     monkeypatch.setattr(api, "_write_manager_config", lambda **kw: captured.update(kw) or "/tmp/x.yaml")
 
-    mgr = oumigo_get_or_create_manager(config_file=str(tmp_path / "nope.yaml"))
+
+def test_missing_config_file_is_ignored(tmp_path, monkeypatch):
+    """A non-existent config_file is ignored; defaults apply and nothing raises."""
+    captured: dict = {}
+    _stub_manager_spawn(monkeypatch, captured)
+
+    mgr = oumigo_get_or_create_manager(config_file=str(tmp_path / "nope.yaml"), catalog=_CATALOG)
 
     assert mgr.owned is True
     assert captured["provider"] == "LAN"       # built-in default
     assert captured["data_port"] == 7012       # built-in default
-    assert captured["model"]["name"] == api.DEFAULT_MODEL["name"]
+    assert captured["catalog"] == _CATALOG     # from the call
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({}, "a manager needs a catalog: pass catalog="),
+    ({"catalog": {"allow": ["no-such@8k"]}}, "unknown profiles: no-such@8k"),
+])
+def test_a_manager_to_spawn_needs_a_valid_catalog(monkeypatch, kwargs, match):
+    """Refused before anything is spawned, with the manager's own message."""
+    captured: dict = {}
+    _stub_manager_spawn(monkeypatch, captured)
+    with pytest.raises(ValueError, match=match):
+        oumigo_get_or_create_manager(**kwargs)
+    assert captured == {}                      # no config written, nothing spawned
+
+
+def test_a_config_file_with_a_model_block_is_refused(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "manager.yaml"
+    cfg_path.write_text(yaml.safe_dump({"model": {"name": "acme/x"}, "catalog": _CATALOG}))
+    _stub_manager_spawn(monkeypatch, {})
+    with pytest.raises(ValueError, match="`model:` block was removed in 0.5.5"):
+        oumigo_get_or_create_manager(config_file=str(cfg_path))
 
 
 def _no_mdns(*_a, **_k):
@@ -257,7 +284,7 @@ def test_wait_worker_serving_detects_reregistered_node_by_incarnation(monkeypatc
 
     # timeout=None (the default): wait indefinitely, returning once it reaches serving.
     worker = api._wait_worker_serving(
-        child, "http://m", "10.0.0.9", before, None, 0.01, "vllm", None
+        child, "http://m", "10.0.0.9", before, None, 0.01, "vllm"
     )
     assert worker.node_id == "n1"
     assert worker.port == 7001
@@ -271,7 +298,7 @@ def test_wait_worker_serving_fails_fast_on_failed(monkeypatch):
     monkeypatch.setattr(api.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="FAILED"):
-        api._wait_worker_serving(child, "http://m", "10.0.0.9", {}, None, 0.01, "vllm", None)
+        api._wait_worker_serving(child, "http://m", "10.0.0.9", {}, None, 0.01, "vllm")
 
 
 def test_wait_worker_serving_finite_timeout_raises_and_tears_down(monkeypatch):
@@ -283,7 +310,7 @@ def test_wait_worker_serving_finite_timeout_raises_and_tears_down(monkeypatch):
     monkeypatch.setattr(api, "terminate", lambda _c, **_k: killed.__setitem__("n", killed["n"] + 1))
 
     with pytest.raises(RuntimeError, match="did not reach SERVING within"):
-        api._wait_worker_serving(child, "http://m", "10.0.0.9", {}, 0.05, 0.01, "vllm", None)
+        api._wait_worker_serving(child, "http://m", "10.0.0.9", {}, 0.05, 0.01, "vllm")
     assert killed["n"] == 1  # child torn down on the finite-timeout give-up
 
 

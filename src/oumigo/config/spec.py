@@ -35,11 +35,10 @@ class NodeSpec(BaseModel):
         ...,
         description="Weights to load: the vendor's Hub repo (e.g. `google/gemma-4-12B-it`).",
     )
-    profile: str | None = Field(
-        default=None,
+    profile: str = Field(
+        ...,
         description="Catalog profile id, e.g. `gemma-4-12B-it@128k`: the model id clients "
-                    "request and the name the backend serves under. None only for a spec "
-                    "from a pre-0.5 manager.",
+                    "request and the name the backend serves under.",
     )
     task: Task = Field(
         default=TASK_CHAT,
@@ -55,7 +54,7 @@ class NodeSpec(BaseModel):
     host: str = Field(default="0.0.0.0", description="Host the vLLM server binds.")
     port: int = Field(default=7001, description="Port the vLLM server binds.")
 
-    # vLLM tuning knobs (mirror the manager.yaml `model:` block).
+    # vLLM tuning knobs (from the profile's `engine:` block).
     dtype: str = Field(
         default="auto", description="vLLM dtype: auto | bfloat16 | float16."
     )
@@ -68,8 +67,9 @@ class NodeSpec(BaseModel):
     max_concurrent_requests: int = Field(
         default=4, ge=1,
         description="Router admission cap: max in-flight requests sent to one worker "
-                    "before others are preferred / the request queues. Negotiable — the "
-                    "manager seeds this value; a worker may report its own on heartbeat.",
+                    "before others are preferred / the request queues. The manager sets it "
+                    "from the profile at registration; a worker may report its own on "
+                    "heartbeat (the transformer backend: 1).",
     )
     max_model_len: int | None = Field(
         default=None, description="Max context length; None uses the model default."
@@ -144,8 +144,8 @@ class NodeSpec(BaseModel):
 
     @property
     def served_name(self) -> str:
-        """The model id the backend answers to: the profile id, else the Hub id."""
-        return self.profile or self.model
+        """The model id the backend answers to: the profile id."""
+        return self.profile
 
     @property
     def model_ref(self) -> str:

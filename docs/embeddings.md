@@ -136,7 +136,7 @@ one.
 
 ## Upgrading
 
-- **Manager first.** Upgrade the manager before starting any embedding worker. An older
-  manager does not know `task` and could send `any-model` chat to an embedding worker.
-- **Older workers** register as chat workers, which is what they are.
+- **The manager decides the task.** It takes a worker's task from its own copy of the
+  profile, whatever the worker reports. Upgrade the manager and the workers together
+  (see [model-catalog.md](model-catalog.md#upgrading-to-055)).
 - **Clients** need no change; `/v1/models` entries gain a `task` field.

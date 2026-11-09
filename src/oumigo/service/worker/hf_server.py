@@ -98,7 +98,7 @@ class HFEngine:
         self.dtype_name = dtype
         self.device_name = device
         self.max_new_tokens = max_new_tokens
-        self.max_model_len = max_model_len  # advisory prompt cap (negotiated via MAX_MODEL_LEN)
+        self.max_model_len = max_model_len  # advisory prompt cap (the profile's max_model_len)
         self.processor: Any = None      # multimodal processor, or None for text-only
         self.tokenizer: Any = None      # always a tokenizer (processor.tokenizer if multimodal)
         self.is_multimodal = False
@@ -517,8 +517,7 @@ def main() -> None:
         description="OpenAI-compatible HF-transformers inference server (spawned by the worker).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--model", default=os.environ.get("MODEL_NAME") or DEFAULT_MODEL,
-                        help="HF model id/path to serve (env: MODEL_NAME).")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="HF model id/path to serve.")
     parser.add_argument("--served-model-name", default=None,
                         help="Name to advertise on /v1/models and echo in responses. "
                              "Defaults to --model; set when loading from a directory so "
@@ -532,7 +531,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=8192,
                         help="Default generation length when a request omits max_tokens.")
     parser.add_argument("--max-model-len", type=int, default=None,
-                        help="Advisory max context length (env: MAX_MODEL_LEN).")
+                        help="Advisory max context length.")
     parser.add_argument("--verbose", "-v", action="store_true", help="Log at DEBUG.")
     args = parser.parse_args()
 

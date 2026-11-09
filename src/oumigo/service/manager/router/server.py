@@ -9,17 +9,15 @@ Dispatch is a **FIFO admission queue** (`WorkerPool`), not round-robin. Each req
 is handed to a random eligible worker (one serving the model it names) that has a free
 slot; when every eligible worker is at capacity the request waits in a single FIFO
 queue until a slot it can use frees (or a new worker joins).
-Capacity is per worker and **negotiated** — a worker's reported
-`max_concurrent_requests` (defaulting to the fleet's `node_spec.max_concurrent_requests`).
-This gives backpressure and fault isolation: a stuck worker simply stops freeing its
+Capacity is per worker: the `max_concurrent_requests` of the worker's own profile, set by
+the control plane at registration (a worker may report its own, e.g. the transformer
+backend's 1). This gives backpressure and fault isolation: a stuck worker simply stops freeing its
 slots, so the queue flows to the others instead of piling onto it — one bad node can
 no longer stall the whole fleet.
 
-Homogeneous *model*, per-worker *port*: every worker serves the same model, but each
-may run vLLM on a different port — it preflight-negotiates a free one at startup
-(preferred = `node_spec.port`) and reports it on its heartbeat. So a target is
-`http://{worker.address}:{worker.port}`, falling back to the fleet-default
-`node_spec.port` for a worker that hasn't reported its port yet.
+Per-worker *port*: each worker may run vLLM on a different port — it preflight-negotiates
+a free one at startup (preferred = the manager's `worker.vllm_port`) and reports it when
+it registers. So a target is `http://{worker.address}:{worker.port}`.
 
 Transport, per worker: a `direct` worker is dialed at that address. A `tunnel` worker
 dialed out to the manager instead (`oumigo.service.manager.tunnel`); its requests go
@@ -51,9 +49,9 @@ the end user (the details go to the log). `/v1/models` is answered here, from th
 registry: every id with a SERVING worker, each with its task, and `any-model` (a chat
 entry) while at least one of them is a chat model.
 
-Tasks: a model is for `chat` or `embed` (its profile's `task`, as the worker reports
-it). The chat paths, `any-model` included, only reach chat workers; naming an embedding
-model there is `400 wrong_task`. `/v1/embeddings` only reaches embed workers and needs
+Tasks: a model is for `chat` or `embed` (its profile's `task`). The chat paths,
+`any-model` included, only reach chat workers; naming an embedding model there is
+`400 wrong_task`. `/v1/embeddings` only reaches embed workers and needs
 an explicit model (`400 model_required`): vectors of two embedding models never mix, so
 a random pick would quietly corrupt a caller's index. An embedding request may carry
 `input_type` (`query`, `document`, ...), an oumigo extension: the router puts the
@@ -87,7 +85,7 @@ from fastapi.routing import APIRoute
 
 from oumigo import __version__
 from oumigo.config.catalog import ANY_MODEL, FleetCatalog, Profile
-from oumigo.config.spec import TASK_CHAT, TASK_EMBED, NodeSpec, Task
+from oumigo.config.spec import TASK_CHAT, TASK_EMBED, Task
 from oumigo.service.manager.control.registry import NodeRecord, Registry
 from oumigo.service.manager.credentials import AuthStore, bearer
 from oumigo.service.manager.router.shaping import (
@@ -150,8 +148,9 @@ class WorkerPool:
     frees its slots, so it drops out of the eligible set and the queue routes around it
     (fault isolation).
 
-    Capacity is per worker: the registry record's negotiated `max_concurrent_requests`,
-    falling back to `default_capacity` when the worker hasn't reported one.
+    Capacity is per worker: the registry record's `max_concurrent_requests` (set from
+    the worker's profile at registration), falling back to `default_capacity` for a
+    record without one.
 
     Runs entirely on the manager's single event loop, so the in-flight map and the
     waiter queue need no locks — no `await` happens inside a bookkeeping critical section.
@@ -353,13 +352,12 @@ async def _send_with_retry(
 
 def create_router_app(
     registry: Registry,
-    node_spec: NodeSpec | None = None,
+    catalog: FleetCatalog,
     queue_timeout: float = DEFAULT_QUEUE_TIMEOUT_S,
     agent_defaults: dict[str, float | None] | None = None,
     tunnels: TunnelRegistry | None = None,
     auth_store: AuthStore | None = None,
     client_auth: bool = False,
-    catalog: FleetCatalog | None = None,
     fleet_agent_defaults: dict[str, float | None] | None = None,
 ) -> FastAPI:
     """Build the data-plane FastAPI app that proxies to healthy worker vLLMs.
@@ -370,40 +368,29 @@ def create_router_app(
     `auth_store` on the inference endpoints.
 
     Routing is by model id (= catalog profile id; see the module docstring). `catalog`
-    supplies the allowed ids and each profile's caps and client timeouts; `node_spec`
-    (the fleet default) covers workers registered without a profile.
+    supplies the allowed ids and each profile's task, caps and client timeouts.
     `agent_defaults` are the default profile's timeouts, `fleet_agent_defaults` the
     manager's own `agent:` block (for profiles without one).
     """
     if client_auth and auth_store is None:
         raise ValueError("client_auth needs an auth_store holding the client API keys")
-    default_capacity = node_spec.max_concurrent_requests if node_spec else 4
-    vllm_port = node_spec.port if node_spec else None
-    default_served = node_spec.served_name if node_spec else None
     no_limits = {"turn_timeout": None, "stall_timeout": None}
 
     def _served(record: NodeRecord) -> str | None:
-        """The model id a worker answers to (a pre-0.5 worker: the fleet default's)."""
-        return record.served_name or default_served
+        """The model id a worker answers to: its profile id."""
+        return record.served_name
 
     def _profile(model_id: str | None) -> Profile | None:
-        return catalog.get(model_id) if catalog is not None and model_id else None
+        return catalog.get(model_id) if model_id else None
 
     def _is_chat(record: NodeRecord) -> bool:
         """`any-model` and the chat paths only ever reach chat workers."""
         return record.task == TASK_CHAT
 
     def _task_of(model_id: str) -> str:
-        """A model id's task: its profile's, else what its workers report (open fleet)."""
+        """A model id's task: its profile's."""
         profile = _profile(model_id)
-        if profile is not None:
-            return profile.task
-        for record in registry.list():
-            if _served(record) == model_id:
-                return record.task
-        if node_spec is not None and model_id == default_served:
-            return node_spec.task
-        return TASK_CHAT
+        return profile.task if profile is not None else TASK_CHAT
 
     def _prompts(model_id: str | None) -> dict[str, str]:
         """An embedding model's `input_type` -> prefix map (empty without a profile)."""
@@ -415,8 +402,6 @@ def create_router_app(
         profile = _profile(record.profile)
         if profile is not None:
             return profile.caps.max_audio_seconds, profile.caps.max_output_tokens
-        if node_spec is not None:
-            return node_spec.max_audio_seconds, node_spec.max_output_tokens
         return None, None
 
     def _queue_seconds(model_id: str | None) -> float:
@@ -453,15 +438,12 @@ def create_router_app(
         return _model_error(503, "model_unavailable", message)
 
     def _known() -> set[str]:
-        """Model ids this fleet answers for: allowed profiles plus whatever registered
-        workers serve (an open fleet has no catalog)."""
-        ids = set(catalog.profiles) if catalog is not None else set()
-        ids.update(m for m in (_served(r) for r in registry.list()) if m)
-        if default_served:
-            ids.add(default_served)
-        return ids
+        """Model ids this fleet answers for: its allowed profiles."""
+        return set(catalog.profiles)
 
-    pool = WorkerPool(registry, default_capacity, queue_timeout, tunnels=tunnels)
+    # Every registered worker carries its profile's capacity; 1 only for a record
+    # without one.
+    pool = WorkerPool(registry, 1, queue_timeout, tunnels=tunnels)
     timeout = httpx.Timeout(600.0, connect=10.0)
 
     @asynccontextmanager
@@ -557,11 +539,10 @@ def create_router_app(
                 pool.release(record.node_id)
 
         try:
-            # Each worker reports its actual (preflight-negotiated) port; fall back to the
-            # fleet default from node_spec for workers that haven't reported one yet.
-            port = record.port if record.port is not None else vllm_port
+            # Each worker reports its actual (preflight-negotiated) port when it registers.
+            port = record.port
             if port is None:
-                raise HTTPException(503, "no model configured; workers have no vLLM to route to")
+                raise HTTPException(503, f"worker {record.node_id} has not reported its port")
             headers = _filter_request_headers(request.headers)  # drops content-length; httpx recomputes
             if client_auth:
                 # The client's API key was checked above; it never leaves the manager.
@@ -678,12 +659,7 @@ def create_router_app(
             records = serving[model_id]
             profile = _profile(model_id)
             weights = profile.model if profile else (records[0].model or model_id)
-            if profile is not None:
-                max_len = profile.engine.max_model_len
-            elif node_spec is not None and model_id == default_served:
-                max_len = node_spec.max_model_len
-            else:
-                max_len = None
+            max_len = profile.engine.max_model_len if profile else None
             task = _task_of(model_id)
             info: dict = {"weights": weights, "task": task, "max_model_len": max_len}
             if task == TASK_EMBED:

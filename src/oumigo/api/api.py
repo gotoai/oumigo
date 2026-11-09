@@ -37,6 +37,7 @@ from oumigo import discovery
 from oumigo.api.manager.manager import OumiGoManager
 from oumigo.api.worker.worker import _WORKER_STOP_GRACE_S, OumiGoWorker
 from oumigo.common.proc import die_with_parent_preexec, terminate
+from oumigo.config.catalog import CATALOG_EXAMPLE, FleetCatalog
 from oumigo.protocol.states import NodeState
 
 log = logging.getLogger("oumigo.api")
@@ -47,19 +48,7 @@ _ENV_MANAGER_TOKEN = "OUMIGO_MANAGER_TOKEN"
 _ENV_HF_HOME = "HF_HOME"
 _ENV_HF_TOKEN = "HF_TOKEN"
 _ENV_VLLM_CACHE = "VLLM_CACHE_ROOT"
-_ENV_MODEL_NAME = "MODEL_NAME"
 _ENV_MODEL_PROFILE = "OUMIGO_MODEL_PROFILE"
-
-# Default model block for the manager to hand workers: a legacy single-model `model:`
-# block, which the manager turns into a one-profile catalog (oumigo.config.catalog).
-DEFAULT_MODEL: dict[str, Any] = {
-    "name": "google/gemma-4-E2B",
-    "port": 7001,
-    "dtype": "auto",
-    "gpu_memory_utilization": 0.80,
-    "max_model_len": 512,
-    "max_concurrent_requests": 1,
-}
 
 # Sentinel for "argument not supplied" — lets config_file values fill only the slots
 # the caller left blank, while any explicit value (even a default-looking one) wins.
@@ -85,7 +74,7 @@ def oumigo_get_or_create_manager(
     control_host: str = _UNSET,
     control_port: int = _UNSET,
     provider: str = _UNSET,
-    model: dict[str, Any] | None = _UNSET,
+    catalog: dict[str, Any] | None = _UNSET,
     *,
     discover_timeout: float = 3.0,
     startup_timeout: float = 20.0,
@@ -94,7 +83,7 @@ def oumigo_get_or_create_manager(
 
     Settings resolve as **explicit call argument > config_file (YAML) > built-in
     default**: when ``config_file`` names a readable YAML file its values seed
-    provider / data-plane bind / control-plane bind / model / bearer_token, and any
+    provider / data-plane bind / control-plane bind / catalog / bearer_token, and any
     argument passed in the call overrides the file. A missing or unparseable
     ``config_file`` is ignored (a warning is logged), so the call args alone suffice.
 
@@ -107,8 +96,10 @@ def oumigo_get_or_create_manager(
        as a child armed with ``PR_SET_PDEATHSIG`` so it exits when this process does,
        and block until its control plane answers ``/healthz`` (up to ``startup_timeout``).
 
-    The ``model`` dict mirrors the manager.yaml ``model:`` block (name/port/dtype/
-    gpu_memory_utilization/max_model_len/max_concurrent_requests/...).
+    ``catalog`` mirrors the manager.yaml ``catalog:`` block (``allow``, optional
+    ``default`` and ``dirs``): the profiles the fleet's workers may run. A manager to
+    spawn needs one, from the call or the ``config_file``; without one (or with an
+    invalid one) a ``ValueError`` is raised before anything is spawned.
     """
     global _last_manager
 
@@ -122,7 +113,7 @@ def oumigo_get_or_create_manager(
     data_port = int(_pick(data_port, data_cfg.get("port"), 7012))
     control_host = _pick(control_host, control_cfg.get("host"), "0.0.0.0")  # noqa: S104 - bind all
     control_port = int(_pick(control_port, control_cfg.get("port"), 7014))
-    model = _pick(model, cfg.get("model"), DEFAULT_MODEL)
+    catalog = _pick(catalog, cfg.get("catalog"), None)
 
     found = discovery.discover_manager(discover_timeout)
     if found:
@@ -138,13 +129,18 @@ def oumigo_get_or_create_manager(
         return _last_manager
 
     log.info("no manager on the LAN; spawning one as a child of this process")
+    if catalog is None:
+        raise ValueError(f"a manager needs a catalog: pass catalog=, or a config_file with "
+                         f"a `catalog:` block, e.g.\n{CATALOG_EXAMPLE}")
+    # Fails here, with the manager's own message, rather than in the child at startup.
+    FleetCatalog.from_config({**cfg, "catalog": catalog})
     config_path = _write_manager_config(
         provider=provider,
         data_host=data_host,
         data_port=data_port,
         control_host=control_host,
         control_port=control_port,
-        model=model,
+        catalog=catalog,
         base=cfg,
     )
 
@@ -189,7 +185,6 @@ def oumigo_create_worker(
     hf_home: str = "~/.hf_cache",
     vllm_cache_root: str = "~/.vllm_cache",
     hf_token: str | None = None,
-    model_name: str | None = None,
     *,
     profile: str | None = None,
     manager: OumiGoManager | None = None,
@@ -220,9 +215,7 @@ def oumigo_create_worker(
     ``manager`` also supplies its ``bearer_token`` when one isn't given here.
 
     ``profile`` is the catalog profile the worker runs (``OUMIGO_MODEL_PROFILE``); None
-    takes the fleet's default. ``model_name`` (``MODEL_NAME``) is the deprecated way to
-    choose: the manager maps it to the one allowed profile of those weights, or, in a
-    fleet without a catalog, the worker serves it as is. ``hf_home`` /
+    takes the fleet's default (a fleet without one refuses the worker). ``hf_home`` /
     ``vllm_cache_root`` / ``hf_token`` reach the replica via the child's environment
     (``HF_HOME`` / ``VLLM_CACHE_ROOT`` / ``HF_TOKEN``).
     """
@@ -253,8 +246,6 @@ def oumigo_create_worker(
         env[_ENV_HF_TOKEN] = hf_token
     if profile:
         env[_ENV_MODEL_PROFILE] = profile
-    if model_name:
-        env[_ENV_MODEL_NAME] = model_name
     if bearer_token:
         env[_ENV_MANAGER_TOKEN] = bearer_token
 
@@ -266,7 +257,7 @@ def oumigo_create_worker(
     child = _spawn_child(argv, env)
 
     worker = _wait_worker_serving(
-        child, manager_url, address, before, serving_timeout, poll_interval, backend, model_name
+        child, manager_url, address, before, serving_timeout, poll_interval, backend
     )
     atexit.register(worker.stop)
     log.info(
@@ -319,7 +310,7 @@ def _write_manager_config(
     provider: str,
     data_host: str,
     data_port: int,
-    model: dict[str, Any],
+    catalog: dict[str, Any],
     control_host: str | None = None,
     control_port: int | None = None,
     base: dict[str, Any] | None = None,
@@ -327,14 +318,14 @@ def _write_manager_config(
     """Write a throwaway manager.yaml and return its path (removed on manager.stop()).
 
     Starts from ``base`` (an already-loaded config_file, so extra keys like ``dashboard``
-    / ``heartbeat`` survive) and overlays the resolved provider / binds / model.
+    / ``heartbeat`` survive) and overlays the resolved provider / binds / catalog.
     """
     config: dict[str, Any] = dict(base or {})
     config["provider"] = provider
     config["data_plane"] = {"host": data_host, "port": int(data_port)}
     if control_host is not None and control_port is not None:
         config["control_plane"] = {"host": control_host, "port": int(control_port)}
-    config["model"] = dict(model)
+    config["catalog"] = dict(catalog)
     config.pop("bearer_token", None)  # never persist the shared secret into a temp file
 
     fd, path = tempfile.mkstemp(prefix="oumigo-manager-", suffix=".yaml")
@@ -394,7 +385,6 @@ def _wait_worker_serving(
     timeout: float | None,
     poll_interval: float,
     backend: str,
-    model_name: str | None,
 ) -> OumiGoWorker:
     """Block until *our* fresh worker on this host reports SERVING.
 
@@ -430,7 +420,7 @@ def _wait_worker_serving(
                     manager_url=manager_url,
                     address=address,
                     port=int(rec.get("port") or 0),
-                    model=rec.get("model") or model_name or "",
+                    model=rec.get("model") or "",
                     backend=rec.get("backend") or backend,
                     node_id=node_id,
                     _child=child,

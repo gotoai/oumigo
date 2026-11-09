@@ -11,11 +11,10 @@ from oumigo.config.catalog import (
     SHIPPED_DIR,
     CatalogError,
     FleetCatalog,
-    context_label,
     load_profile,
     load_profiles,
 )
-from oumigo.service.manager.settings import build_node_spec, get_agent_defaults, get_vllm_port
+from oumigo.service.manager.settings import get_agent_defaults, get_vllm_port
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "config_examples" / "catalog"
 
@@ -61,12 +60,6 @@ def test_shipped_catalog_is_the_tested_set() -> None:
     assert all(p.tested for p in load_profiles().values())
 
 
-@pytest.mark.parametrize("length,label", [(32768, "32k"), (65536, "64k"), (131072, "128k"),
-                                          (262144, "256k"), (None, "default")])
-def test_context_label(length: int | None, label: str) -> None:
-    assert context_label(length) == label
-
-
 # --- loading rules ---------------------------------------------------------------
 
 
@@ -88,6 +81,7 @@ def test_duplicate_id_in_one_tree_is_an_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize("bad,match", [
     ({"id": "tiny-model"}, "must look like"),                 # no @<context>
     ({"id": "tiny model@32k"}, "must look like"),
+    ({"id": "tiny-model@default"}, "must look like"),         # the removed legacy form
     ({"engine": {"max_model_len": 32768, "gpu_mem": 0.9}}, "gpu_mem"),   # typo: unknown key
     ({"caps": {"max_output_tokens": 0}}, "max_output_tokens"),
     ({"task": "rerank"}, "task"),
@@ -151,7 +145,7 @@ def test_catalog_block_allows_and_defaults(tmp_path: Path) -> None:
               "worker": {"vllm_port": 7100}}
     fleet = FleetCatalog.from_config(config)
     assert sorted(fleet.profiles) == ["gemma-4-12B-it-qat-w4a16-ct@128k", "tiny-model@32k"]
-    spec = build_node_spec(config)
+    spec = fleet.default_profile.node_spec(get_vllm_port(config))
     assert (spec.model, spec.max_model_len, spec.port) == ("acme/tiny-model", 32768, 7100)
 
 
@@ -166,44 +160,30 @@ def test_bad_catalog_blocks(block: dict, match: str) -> None:
         FleetCatalog.from_config({"catalog": block})
 
 
-def test_catalog_without_default_hands_out_nothing_by_default() -> None:
-    config = {"catalog": {"allow": ["Qwen3.5-9B@32k-bnb4"]}}
-    assert FleetCatalog.from_config(config).default is None
-    assert build_node_spec(config) is None
+def test_a_catalog_may_have_no_default() -> None:
+    assert FleetCatalog.from_config({"catalog": {"allow": ["Qwen3.5-9B@32k-bnb4"]}}).default is None
 
 
-def test_catalog_and_legacy_model_together_is_an_error() -> None:
-    with pytest.raises(CatalogError, match="both"):
-        FleetCatalog.from_config({"catalog": {"allow": ["Qwen3.5-9B@32k-bnb4"]},
-                                  "model": {"name": "acme/x"}})
+@pytest.mark.parametrize("config,match", [
+    ({}, "needs a `catalog:` block"),                                  # no open fleet
+    ({"provider": "LAN"}, "needs a `catalog:` block"),
+    ({"model": {"name": "acme/x"}}, "`model:` block was removed in 0.5.5"),  # no legacy block
+    ({"catalog": {"allow": ["Qwen3.5-9B@32k-bnb4"]}, "model": {"name": "acme/x"}},
+     "`model:` block was removed"),
+])
+def test_a_fleet_needs_a_catalog_block(config: dict, match: str) -> None:
+    with pytest.raises(CatalogError, match=match):
+        FleetCatalog.from_config(config)
 
 
-# --- the fleet: legacy model: block -----------------------------------------------
+def test_an_empty_catalog_cannot_be_built() -> None:
+    with pytest.raises(CatalogError, match="at least one"):
+        FleetCatalog({}, None)
 
 
-def test_legacy_model_block_becomes_a_one_profile_catalog() -> None:
-    config = {"model": {"name": "acme/tiny-model", "port": 7005, "max_model_len": 65536,
-                        "max_output_tokens": 512, "extra_args": ["--x"]}}
-    fleet = FleetCatalog.from_config(config)
-    assert list(fleet.profiles) == ["tiny-model@64k"] and fleet.default == "tiny-model@64k"
-    spec = build_node_spec(config)
-    # The legacy block's own defaults are kept (0.80 memory, 4 concurrent requests).
-    assert (spec.model, spec.port, spec.max_model_len, spec.max_output_tokens) == (
-        "acme/tiny-model", 7005, 65536, 512)
-    assert (spec.gpu_memory_utilization, spec.max_concurrent_requests) == (0.80, 4)
-    assert spec.extra_args == ["--x"]
-
-
-def test_legacy_without_max_model_len_and_empty_config() -> None:
-    assert FleetCatalog.from_config({"model": {"name": "acme/m"}}).default == "m@default"
-    assert FleetCatalog.from_config({}).default is None
-    assert build_node_spec({}) is None
-
-
-def test_vllm_port_precedence() -> None:
+def test_vllm_port() -> None:
     assert get_vllm_port({}) == 7001
-    assert get_vllm_port({"model": {"port": 7005}}) == 7005
-    assert get_vllm_port({"worker": {"vllm_port": 7100}, "model": {"port": 7005}}) == 7100
+    assert get_vllm_port({"worker": {"vllm_port": 7100}}) == 7100
 
 
 def test_agent_defaults_prefer_the_profile_then_the_fleet_block(tmp_path: Path) -> None:

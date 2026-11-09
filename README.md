@@ -9,7 +9,7 @@ GPU worker nodes work independently as a whole to provide LLM based generation
 capability, and the manager node exposes a unified data plane interface to calling
 applications.
 
-Key functions provided by an OumiGo fleet (as of v0.5.4):
+Key functions provided by an OumiGo fleet (as of v0.5.5):
 
 1. Multiple GPU instance dynamic lifecycle management, supporting vLLM and Transformer backends
 2. Data and control interfaces unification, runtime request routing
@@ -52,7 +52,8 @@ Two roles:
     worker dials out to the manager's `/tunnel` and the router borrows those
     connections) — see [docs/tunnel.md](docs/tunnel.md).
   - **model catalog** (`oumigo.config.catalog`): static profiles, one per model with all
-    its start-time settings; the fleet allows some, each worker runs one — see
+    its start-time settings; every fleet allows some of them (a model only ever comes
+    from a profile), and each worker runs one — see
     [docs/model-catalog.md](docs/model-catalog.md). A profile's `task` is `chat` or `embed`;
     the router keeps the two apart — see [docs/embeddings.md](docs/embeddings.md).
 
@@ -128,6 +129,6 @@ oumigo version
 - [docs/worker-node-states.md](docs/worker-node-states.md) — worker node state machine.
 - [docs/tunnel.md](docs/tunnel.md) — remote workers: CUSTOM provider, tunnel transport, nginx deployment, join tokens.
 - [docs/deploy-custom-providers-with-tunnel.md](docs/deploy-custom-providers-with-tunnel.md) — step by step: manager on a VPS, GPU workers behind NAT, clients with API keys.
-- [docs/model-catalog.md](docs/model-catalog.md) — several models in one fleet: profiles, the catalog, choosing a model (worker and client), upgrading from 0.4.
+- [docs/model-catalog.md](docs/model-catalog.md) — several models in one fleet: profiles, the catalog, choosing a model (worker and client), upgrading to 0.5.5.
 - [docs/embeddings.md](docs/embeddings.md) — embedding models: `task: embed` profiles, `/v1/embeddings`, `input_type` prompts, the shipped ruri and harrier profiles.
 - [docs/gpu-pods.md](docs/gpu-pods.md) — the worker Docker image and running workers on rented GPUs (RunPod, Vast.ai), by hand or on a schedule.

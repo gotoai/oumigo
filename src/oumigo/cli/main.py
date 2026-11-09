@@ -87,9 +87,9 @@ def worker_run(
 ) -> None:
     """Load the env file, resolve identity, find the manager, register, and supervise the backend.
 
-    The env file is applied before anything reads the environment, so the negotiable
-    vars (MODEL_NAME / MAX_MODEL_LEN / MODEL_STORAGE_LOCATION / HF_HOME / HF_TOKEN, plus
-    VLLM_*) reach the backend child process the coordinator spawns.
+    The env file is applied before anything reads the environment, so the node's own
+    vars (OUMIGO_MODEL_PROFILE, MODEL_STORAGE_LOCATION / HF_HOME / HF_TOKEN, plus VLLM_*)
+    reach the coordinator and the backend child process it spawns.
     """
     import logging
 
@@ -159,7 +159,7 @@ def _resolve_manager_runtime(
     """Resolve config file, token, provider, and bind host/port for the manager."""
     from oumigo.config import resolve_config_file
     from oumigo.service.manager.auth import resolve_manager_token
-    from oumigo.service.manager.settings import build_node_spec, get_provider_name, load_manager_yaml
+    from oumigo.service.manager.settings import get_catalog, get_provider_name, load_manager_yaml
     from oumigo.providers import create_provider
 
     config_file = resolve_config_file(config_file)
@@ -211,10 +211,11 @@ def _resolve_manager_runtime(
             typer.echo(f"error: {problem}", err=True)
         raise typer.Exit(1)
 
-    # The catalog (profiles + allow/default) is validated here, so a typo in a profile
-    # stops the manager at once instead of reaching a worker minutes later.
+    # The catalog (profiles + allow/default) is validated here, so a missing `catalog:`
+    # block or a typo in a profile stops the manager at once instead of reaching a
+    # worker minutes later.
     try:
-        node_spec = build_node_spec(manager_config)
+        get_catalog(manager_config)
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
@@ -223,7 +224,6 @@ def _resolve_manager_runtime(
         "config_file": config_file,
         "token": token,
         "provider": provider,
-        "node_spec": node_spec,
         "bind_host": bind_host,
         "control_tls": control_tls is not None,
         "bind_port": port or int(control_plane.get("port", 7014)),
@@ -278,7 +278,6 @@ def manager_serve(
         advertise=not no_mdns and not rt["provider"].is_wan,  # CUSTOM: workers use an explicit URL
         verbose=verbose,
         config_file=rt["config_file"],
-        node_spec=rt["node_spec"],
     )
 
 
@@ -338,7 +337,6 @@ def manager_run(
             advertise=not no_mdns and not rt["provider"].is_wan,
             verbose=verbose,
             config_file=rt["config_file"],
-            node_spec=rt["node_spec"],
         )
         return
 

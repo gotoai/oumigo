@@ -18,8 +18,8 @@ An embedding profile may add an `embed:` block with its vector size and its name
 prompts (`query`, `document`, ...), which the router applies for `input_type`.
 
 `manager.yaml` then names the profiles its fleet **allows** and the **default** a worker
-gets when it chooses none. A legacy single `model:` block still works: it becomes a
-one-profile catalog (see `FleetCatalog.from_config`).
+gets when it chooses none. Every fleet has this `catalog:` block: a model only ever comes
+from a profile (see `FleetCatalog.from_config`).
 """
 
 from __future__ import annotations
@@ -46,9 +46,13 @@ SHIPPED_DIR = Path(__file__).resolve().parent.parent / "catalog"
 
 ANY_MODEL = "any-model"  # the wildcard model id: accepts any served model
 
-# `<repo-name>@<context>[-<variant>...]`; context like 32k / 128k / 256k, or `default`
-# for a legacy `model:` block without max_model_len.
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@(?:[0-9]+k?|default)(?:-[A-Za-z0-9._]+)*$")
+# Shown when a manager config has no `catalog:` block.
+CATALOG_EXAMPLE = """catalog:
+  allow: [gemma-4-12B-it-qat-w4a16-ct@128k]
+  default: gemma-4-12B-it-qat-w4a16-ct@128k"""
+
+# `<repo-name>@<context>[-<variant>...]`; context like 32k / 128k / 256k.
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*@[0-9]+k?(?:-[A-Za-z0-9._]+)*$")
 _PROMPT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -187,15 +191,6 @@ class Profile(_Strict):
         )
 
 
-def context_label(max_model_len: int | None) -> str:
-    """The `@<context>` part of an id: 131072 -> `128k`, 512 -> `512`, None -> `default`."""
-    if max_model_len is None:
-        return "default"
-    if max_model_len % 1024:
-        return str(max_model_len)
-    return f"{max_model_len // 1024}k"
-
-
 def load_profile(path: Path) -> Profile:
     """Read and validate one profile file; its id must equal the file name."""
     try:
@@ -239,6 +234,8 @@ class FleetCatalog:
     """The profiles one fleet allows, and its default."""
 
     def __init__(self, profiles: dict[str, Profile], default: str | None) -> None:
+        if not profiles:
+            raise CatalogError("catalog.allow must list at least one profile id")
         if default is not None and default not in profiles:
             raise CatalogError(f"catalog.default {default!r} is not in catalog.allow")
         self.profiles = profiles
@@ -253,23 +250,20 @@ class FleetCatalog:
 
     @classmethod
     def from_config(cls, config: dict) -> FleetCatalog:
-        """Build the fleet catalog from a manager config dict.
+        """Build the fleet catalog from a manager config dict's `catalog:` block.
 
-        `catalog:` (allow / default / dirs) selects from the loaded profiles. A legacy
-        `model:` block instead becomes a one-profile catalog. Neither yields an empty
-        catalog (the manager then has nothing to hand out). Both is an error.
+        The candidates are the shipped profiles plus those in `catalog.dirs`; `allow`
+        picks this fleet's profiles from them and `default` (optional) one of those.
+        The block is required: a fleet without one would have no model, and "every
+        shipped profile" would change with each package upgrade.
         """
+        if "model" in config:
+            raise CatalogError("the `model:` block was removed in 0.5.5; list a profile in "
+                               "catalog.allow instead (see docs/model-catalog.md)")
         block = config.get("catalog")
-        legacy = config.get("model")
-        if block is not None and legacy:
-            raise CatalogError("manager config has both `catalog:` and `model:`; "
-                               "move the model into a profile and keep only `catalog:`")
-        if block is not None:
-            return cls._from_block(block)
-        if legacy and legacy.get("name"):
-            profile = legacy_profile(legacy)
-            return cls({profile.id: profile}, profile.id)
-        return cls({}, None)
+        if not isinstance(block, dict):
+            raise CatalogError(f"manager.yaml needs a `catalog:` block, e.g.\n{CATALOG_EXAMPLE}")
+        return cls._from_block(block)
 
     @classmethod
     def _from_block(cls, block: dict) -> FleetCatalog:
@@ -282,27 +276,3 @@ class FleetCatalog:
             raise CatalogError(f"catalog.allow names unknown profiles: {', '.join(missing)}")
         return cls({pid: available[pid] for pid in allow}, block.get("default"))
 
-
-def legacy_profile(model: dict) -> Profile:
-    """A profile from a legacy `model:` block, keeping that block's own defaults."""
-    name = str(model["name"])
-    max_len = model.get("max_model_len")
-    repo_name = name.rsplit("/", 1)[-1]
-    return Profile(
-        id=f"{repo_name}@{context_label(max_len)}",
-        model=name,
-        storage_location=model.get("storage_location"),
-        download_dir=model.get("download_dir"),
-        engine=EngineSettings(
-            max_model_len=max_len,
-            gpu_memory_utilization=float(model.get("gpu_memory_utilization", 0.80)),
-            dtype=str(model.get("dtype", "auto")),
-            tensor_parallel_size=int(model.get("tensor_parallel_size", 1)),
-            max_concurrent_requests=int(model.get("max_concurrent_requests", 4)),
-            extra_args=list(model.get("extra_args") or []),
-        ),
-        caps=Caps(
-            max_output_tokens=model.get("max_output_tokens"),
-            max_audio_seconds=model.get("max_audio_seconds"),
-        ),
-    )

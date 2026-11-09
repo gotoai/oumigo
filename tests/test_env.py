@@ -110,8 +110,7 @@ def test_flashinfer_sampler_defaults_to_off(monkeypatch):
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
     monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
-    monkeypatch.delenv("MODEL_NAME", raising=False)
-    _apply_env_overrides(NodeSpec(model="m"))
+    _apply_env_overrides(NodeSpec(model="m", profile="m@8k"))
     assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "0"  # backend child inherits the default
 
 
@@ -120,8 +119,7 @@ def test_flashinfer_sampler_env_wins_over_default(monkeypatch):
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
-    monkeypatch.delenv("MODEL_NAME", raising=False)
-    _apply_env_overrides(NodeSpec(model="m"))
+    _apply_env_overrides(NodeSpec(model="m", profile="m@8k"))
     assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "1"  # explicit opt-in preserved
 
 
@@ -135,12 +133,11 @@ def test_storage_location_env_overrides_the_fleet_spec(tmp_path, monkeypatch):
     local = tmp_path / "weights"
     local.mkdir()
     (local / "config.json").write_text("{}")
-    monkeypatch.delenv("MODEL_NAME", raising=False)
     monkeypatch.setenv("MODEL_STORAGE_LOCATION", f"file://{local}")
 
-    spec = _apply_env_overrides(NodeSpec(model="acme/tiny"))
+    spec = _apply_env_overrides(NodeSpec(model="acme/tiny", profile="tiny@8k"))
     assert spec.model_ref == str(local)      # backend loads from disk
-    assert spec.model == "acme/tiny"         # clients still address the fleet name
+    assert spec.served_name == "tiny@8k"     # clients still address the profile id
 
 
 def test_storage_location_env_none_falls_back_to_the_hub(tmp_path, monkeypatch):
@@ -148,10 +145,9 @@ def test_storage_location_env_none_falls_back_to_the_hub(tmp_path, monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
-    monkeypatch.delenv("MODEL_NAME", raising=False)
     monkeypatch.setenv("MODEL_STORAGE_LOCATION", "none")
     spec = _apply_env_overrides(
-        NodeSpec(model="acme/tiny", storage_location="file:///nonexistent/models/tiny")
+        NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location="file:///nonexistent/models/tiny")
     )
     assert spec.storage_location is None
     assert spec.model_ref == "acme/tiny"
@@ -161,10 +157,9 @@ def test_missing_local_weights_fail_before_the_backend_starts(monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
-    monkeypatch.delenv("MODEL_NAME", raising=False)
     monkeypatch.delenv("MODEL_STORAGE_LOCATION", raising=False)
     with pytest.raises(SystemExit, match="does not exist on this worker"):
-        _apply_env_overrides(NodeSpec(model="m", storage_location="file:///no/such/dir"))
+        _apply_env_overrides(NodeSpec(model="m", profile="m@8k", storage_location="file:///no/such/dir"))
 
 
 def test_directory_without_config_json_is_rejected(tmp_path, monkeypatch):
@@ -173,17 +168,39 @@ def test_directory_without_config_json_is_rejected(tmp_path, monkeypatch):
 
     empty = tmp_path / "empty"
     empty.mkdir()
-    monkeypatch.delenv("MODEL_NAME", raising=False)
     monkeypatch.delenv("MODEL_STORAGE_LOCATION", raising=False)
     with pytest.raises(SystemExit, match="no config.json"):
-        _apply_env_overrides(NodeSpec(model="m", storage_location=f"file://{empty}"))
+        _apply_env_overrides(NodeSpec(model="m", profile="m@8k", storage_location=f"file://{empty}"))
 
 
 def test_bad_storage_location_env_exits_cleanly(monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
-    monkeypatch.delenv("MODEL_NAME", raising=False)
     monkeypatch.setenv("MODEL_STORAGE_LOCATION", "s3://bucket/model")
     with pytest.raises(SystemExit, match="MODEL_STORAGE_LOCATION"):
-        _apply_env_overrides(NodeSpec(model="m"))
+        _apply_env_overrides(NodeSpec(model="m", profile="m@8k"))
+
+
+# --- MODEL_NAME / MAX_MODEL_LEN: removed in 0.5.5, refused rather than ignored ------
+
+
+@pytest.mark.parametrize("name,instead", [
+    ("MODEL_NAME", "choose a model with OUMIGO_MODEL_PROFILE"),
+    ("MAX_MODEL_LEN", "choose a profile with that context length"),
+])
+def test_removed_model_variables_stop_the_worker(monkeypatch, name, instead):
+    from oumigo.service.worker.coordinator import run_worker
+
+    monkeypatch.setenv(name, "acme/tiny" if name == "MODEL_NAME" else "8192")
+    # Refused before the manager is even looked for.
+    with pytest.raises(SystemExit, match=f"{name} is no longer supported \\(0.5.5\\); {instead}"):
+        run_worker("http://127.0.0.1:1", None)
+
+
+def test_blank_removed_variables_are_not_set(monkeypatch):
+    from oumigo.service.worker.coordinator import _refuse_removed_env
+
+    monkeypatch.setenv("MODEL_NAME", "  ")
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+    _refuse_removed_env()

@@ -47,7 +47,7 @@ def upstreams():
         srv.shutdown()
 
 
-def _fleet(addrs, catalog: bool = True, chat: bool = True):
+def _fleet(addrs, chat: bool = True):
     """A chat worker and an embed worker, both SERVING; EMB2 is allowed but not up.
     `chat=False` leaves the chat worker out."""
     profiles = FleetCatalog({p.id: p for p in (
@@ -63,10 +63,7 @@ def _fleet(addrs, catalog: bool = True, chat: bool = True):
                      model=profiles.get(pid).model, profile=pid,
                      task=profiles.get(pid).task)
         reg.heartbeat(node_id, NodeState.SERVING.value)
-    if not catalog:  # an open fleet: tasks only as the workers report them
-        return create_router_app(reg, None)
-    return create_router_app(reg, profiles.default_profile.node_spec(7001), catalog=profiles,
-                             queue_timeout=0.05)
+    return create_router_app(reg, profiles, queue_timeout=0.05)
 
 
 # --- routing by task ---------------------------------------------------------------------
@@ -118,17 +115,6 @@ def test_an_allowed_embed_model_without_a_worker_is_unavailable(upstreams) -> No
     assert unknown.status_code == 404 and unknown.json()["error"]["code"] == "model_not_found"
 
 
-def test_an_open_fleet_routes_by_the_task_workers_report(upstreams) -> None:
-    with TestClient(_fleet(upstreams, catalog=False)) as client:
-        assert client.post("/v1/embeddings",
-                           json={"model": EMB, "input": "x"}).json()["worker"] == "embed"
-        assert client.post("/v1/chat/completions",
-                           json={"model": EMB, "messages": []}).json()["error"]["code"] == "wrong_task"
-        for _ in range(10):
-            assert client.post("/v1/chat/completions",
-                               json={"model": "any-model", "messages": []}).json()["worker"] == "chat"
-
-
 def test_any_model_defaults_ignore_embed_models(upstreams) -> None:
     profiles = FleetCatalog({p.id: p for p in (
         Profile(id=CHAT, model="acme/chat-model", agent={"turn_timeout": 60.0}),
@@ -140,7 +126,7 @@ def test_any_model_defaults_ignore_embed_models(upstreams) -> None:
         reg.register(node_id, host, NodeState.SERVING.value, 0, {}, port=port, profile=pid,
                      task=profiles.get(pid).task)
         reg.heartbeat(node_id, NodeState.SERVING.value)
-    app = create_router_app(reg, profiles.default_profile.node_spec(7001), catalog=profiles)
+    app = create_router_app(reg, profiles)
     with TestClient(app) as client:
         assert client.get("/agent-defaults").json()["turn_timeout"] == 60.0
 

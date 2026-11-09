@@ -2,7 +2,7 @@
 
 Since 0.5.0, one OumiGo fleet can serve several models at once. Each worker runs the model
 that fits its GPU; clients choose a model by id, and the router sends each request to a
-worker running that model.
+worker running that model. Since 0.5.5, a model can only come from a catalog profile.
 
 ## The idea: one start-time configuration is one model
 
@@ -123,18 +123,20 @@ agent:                               # fallback client timeouts for profiles wit
   stall_timeout: 120.0
 ```
 
-- `allow` must name at least one profile, and every name must exist.
-- `default` must be in `allow`. Without a default, every worker has to choose.
-- The manager logs the allowed profiles and the default at startup.
+The rules:
 
-**Legacy form.** A 0.4-style `model:` block (without `catalog:`) still works: the manager
-turns it into a one-profile catalog whose id follows the naming rule
-(`<repo-name>@<context>` from `max_model_len`, or `@default` when unset), and makes it the
-default. Having both `catalog:` and `model:` is an error.
+1. **Candidates.** The shipped profiles plus those in `dirs` are the only models a fleet
+   can ever run.
+2. **Allow list.** `allow` picks this fleet's profiles from the candidates. It must name at
+   least one, and every name must exist.
+3. **Default.** `default` is optional and must be in `allow`. Without one, every worker
+   has to choose.
 
-**Open fleet.** With neither block, the manager has no catalog and accepts any model a
-worker brings (`MODEL_NAME`); the worker names its own id the same way. Useful on a
-development box, not for a shared fleet.
+The `catalog:` block is **required**. A manager without one doesn't start, and shows a
+minimal example. A missing block does not mean "every shipped profile": that set would
+change with each package upgrade. The 0.4-style `model:` block was removed in 0.5.5;
+the manager refuses it and asks for a profile in `allow` instead. The manager logs the
+allowed profiles and the default at startup.
 
 ## Workers: choosing a profile
 
@@ -142,12 +144,20 @@ development box, not for a shared fleet.
 OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
 ```
 
-Unset, the worker gets the fleet's default. The worker asks the manager for that profile's
-settings before it registers, so **the worker carries no model settings of its own**: a
-container image needs only the profile id in its environment.
+The worker resolves its profile in this order:
 
-A profile the fleet doesn't allow is refused (`403`) with the list of allowed ids, and the
-worker exits with that message.
+1. `OUMIGO_MODEL_PROFILE` is set and allowed: the worker runs it. If the fleet doesn't
+   allow it, the worker exits with the list of allowed ids. It never falls back to the
+   default: running a model you didn't ask for is worse than stopping.
+2. It is unset: the worker runs the fleet's default.
+3. Nor is there a default: the worker exits with `Model profile cannot be resolved: this
+   fleet has no default; set OUMIGO_MODEL_PROFILE to one of: ...`.
+
+The manager makes this decision, not the worker. The worker asks the manager for the
+profile's settings before it registers, and the manager checks the profile again at
+registration. **The worker carries no model settings of its own**: a container image needs
+only the profile id in its environment, and the manager's copy of a profile always wins
+over the worker's package.
 
 Settings that describe the **node**, not the model, still come from the worker's
 environment:
@@ -157,11 +167,10 @@ environment:
 | `MODEL_STORAGE_LOCATION` | Weights on this node's disk (`file:///path`), or `none` to download despite a fleet-wide location |
 | `HF_HOME`, `HF_TOKEN` | Hugging Face cache and token (gated models) |
 
-`MAX_MODEL_LEN` can't change a profile: context length is part of it. A worker whose
-`MAX_MODEL_LEN` differs from its profile exits; choose or create a profile with that
-context instead. `MODEL_NAME` is deprecated: without `OUMIGO_MODEL_PROFILE`, the manager
-maps it to the one allowed profile of those weights, and refuses it when there are none
-or several.
+`MODEL_NAME` and `MAX_MODEL_LEN` were removed in 0.5.5. A worker with either set exits at
+once, saying to use `OUMIGO_MODEL_PROFILE`; it doesn't ignore them, because an old `.env`
+would otherwise start the default model while its owner believes they chose another. For
+a different context length, choose or create a profile with that context.
 
 ## Clients: choosing a model
 
@@ -236,7 +245,8 @@ any of them may answer; "no limit" outranks every number.
 
 ## Queueing
 
-Each worker accepts up to its profile's `max_concurrent_requests`. When every worker for a
+Each worker accepts up to its own profile's `max_concurrent_requests` (one request at a
+time on the transformer backend). When every worker for a
 model is busy, its requests wait in the router's queue. A slot that frees goes to the
 oldest waiting request that can use it, so a busy model never holds up requests for
 another model, and order is kept within each model.
@@ -246,18 +256,18 @@ A request waits at most its model's `caps.max_queue_seconds` (default 300 s), th
 time, and raise the model's `agent:` timeouts with it so clients wait as long. An
 `any-model` request waits as long as the longest limit among the chat models being served.
 
-## Upgrading from 0.4
+## Upgrading to 0.5.5
 
 | What | Change |
 |---|---|
-| `manager.yaml` with `model:` | Keeps working (one-profile catalog). Move to `catalog:` when you add a second model |
-| Clients sending a placeholder model (`"oumigo"`, `"any"`) or a repo name | **Now 404.** Send a model id from `/v1/models`, or `any-model` |
-| OumiGo Python client | Upgrade with the manager: it now sends `any-model` (or the `model=` you give it) |
-| 0.4 workers | Refused by a 0.5 manager with a catalog; upgrade them |
-| Workers using `MODEL_NAME` | Still work with a warning; move to `OUMIGO_MODEL_PROFILE` |
-| Workers using `MAX_MODEL_LEN` | Refused if it differs from the profile; use a profile with that context |
-| `config_examples/manager_<model>.yaml` | Replaced by profiles in `src/oumigo/catalog/` and templates in `config_examples/catalog/` |
+| `manager.yaml` with a `model:` block | **Refused.** Put the model in a profile and list it in `catalog.allow` |
+| `manager.yaml` without `catalog:` (an open fleet) | **Refused.** Add a `catalog:` block |
+| Workers using `MODEL_NAME` | **Refused.** Set `OUMIGO_MODEL_PROFILE` to a profile id |
+| Workers using `MAX_MODEL_LEN` | **Refused.** Choose or create a profile with that context |
+| Python API: `oumigo_get_or_create_manager(model=...)` | Removed. Pass `catalog=` or a `config_file` with `catalog:` |
+| Python API: `oumigo_create_worker(model_name=...)` | Removed. Pass `profile=` |
+| Per-worker capacity | Each worker now gets its own profile's `max_concurrent_requests`. Before, every vLLM worker got the default profile's value |
 
-Upgrade the manager, the workers and the clients together. A 0.5 manager with a catalog
-refuses 0.4 workers at registration, with a message saying to upgrade them: they would
-serve under their repo name, which the router never routes to.
+Upgrade the manager and the workers together. A 0.5.5 worker exits when a manager hands it
+no profile, saying the manager needs upgrading; a 0.5.5 manager refuses a registration
+without a profile.

@@ -10,7 +10,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from oumigo.config.spec import TASK_CHAT, NodeSpec, Task
+from oumigo.config.spec import NodeSpec
 from oumigo.protocol.states import NodeState, RunState
 
 
@@ -53,10 +53,8 @@ class RegisterRequest(BaseModel):
     address: str                       # LAN address the worker reports (dialed only for direct)
     transport: Transport = Transport.DIRECT
     vllm_port: int | None = None       # actual (preflight-selected) vLLM port; part of node_id
-    model: str | None = None           # weights the worker loads (Hub repo)
-    profile: str | None = None         # catalog profile it runs = the model id it serves
+    profile: str                       # catalog profile it runs = the model id it serves
     backend: str | None = None         # inference backend in use ("vllm" | "transformer")
-    task: Task = TASK_CHAT             # what the model is for; a pre-0.5.4 worker is chat
     incarnation: int = 0             # bumped each worker start; same identity
     state: NodeState = NodeState.REGISTERING
     capabilities: NodeCapabilities = Field(default_factory=NodeCapabilities)
@@ -65,9 +63,8 @@ class RegisterRequest(BaseModel):
 class RegisterResponse(BaseModel):
     """Manager -> worker: accept the registration, hand back cadence and vLLM config.
 
-    `node_spec` is the vLLM configuration the worker must run (homogeneous fleet:
-    the manager derives it from its single model config). It is None only when the
-    manager has no model configured yet — the worker then cannot start vLLM.
+    `node_spec` is the vLLM configuration the worker must run: the manager's copy of
+    the worker's profile, which wins over anything the worker resolved itself.
 
     `node_token` is this node's own credential: the worker presents it (instead of the
     join token) on every later call — heartbeat, metrics, re-register, `/tunnel`. It is
@@ -80,7 +77,7 @@ class RegisterResponse(BaseModel):
     accepted: bool
     node_id: str
     heartbeat_interval_s: int = 10
-    node_spec: NodeSpec | None = None
+    node_spec: NodeSpec
     message: str | None = None
     node_token: str | None = None
     vllm_api_key: str | None = None
@@ -97,7 +94,7 @@ class HeartbeatRequest(BaseModel):
     node_id: str
     node_state: NodeState
     run_state: RunState | None = None
-    vllm_port: int | None = None  # worker's actual serving port (may differ from model.port)
+    vllm_port: int | None = None  # worker's actual serving port (may differ from the preferred one)
     max_concurrent_requests: int | None = None  # worker's negotiated in-flight cap (None = unchanged)
     tunnel_rtt_ms: float | None = None  # tunnel worker: last measured WebSocket ping RTT
 

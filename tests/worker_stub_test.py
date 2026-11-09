@@ -3,7 +3,7 @@
 
 Spins up N independent stub workers in one process, all on 127.0.0.1. Each worker:
   * **preflight-negotiates its own port** — reusing the real worker's
-    `find_free_port` — fanning out from the manager's `model.port` (or 7001 if none),
+    `find_free_port` — fanning out from the manager's `worker.vllm_port` (default 7001),
     then *reports that port* on its heartbeat so the router targets it. N stubs
     competing for ports on one host is exactly the multi-replica-per-host case;
   * self-registers, heartbeats SERVING (run_state reflects in-flight work), and
@@ -14,13 +14,15 @@ Spins up N independent stub workers in one process, all on 127.0.0.1. Each worke
     seconds ±50% before responding (streaming spreads that delay across tokens).
 
 Run against a DEDICATED test manager on the same host — not your production one.
-No port flag and no matching to configure: because each worker reports its own
-negotiated port, the manager needn't even have a model configured. Give the test
+No port flag to configure: each worker reports its own negotiated port. The manager
+needs a catalog like any fleet; the stubs register with its default profile (or
+`--profile`) but serve no real model, so any shipped profile will do. Give the test
 manager its own control/data ports:
 
     # test_manager.yaml
     #   data_plane: {host: 127.0.0.1, port: 7017}
     #   dashboard:  {enabled: false}
+    #   catalog:    {allow: [Qwen3.5-9B@32k-bnb4], default: Qwen3.5-9B@32k-bnb4}
     oumigo manager serve -c test_manager.yaml --no-mdns --host 127.0.0.1 --port 7016
     python tests/worker_stub_test.py --workers 3 --manager-url http://127.0.0.1:7016
 
@@ -74,7 +76,7 @@ log = logging.getLogger("oumigo.worker_stub")
 _FALLBACK_WORDS = "the quick brown fox jumps over the lazy dog".split()
 GRID_S = 5.0  # metric sampling grid, matching the real worker
 HOST = "127.0.0.1"  # all fake workers share the loopback host; ports fan out per worker
-DEFAULT_BASE_PORT = 7001  # preferred starting port when the manager has no model.port
+DEFAULT_BASE_PORT = 7001  # preferred starting port until the manager hands out its own
 
 
 # --- pure response synthesis ----------------------------------------------------
@@ -161,15 +163,17 @@ class StubWorker:
     async def register(self, client: httpx.AsyncClient) -> None:
         """Register (retrying until the manager answers), learning preferred port + cadence."""
         if self.profile is None:
-            # Like a real worker: ask /spec for the fleet's default profile (none in an
-            # open fleet, or from a pre-0.5 manager).
+            # Like a real worker: ask /spec for the fleet's default profile.
             try:
                 spec = await client.get(f"{self.manager_url}/spec", headers=self._headers,
                                         timeout=10.0)
                 if spec.status_code == 200:
                     self.profile = spec.json().get("profile")
+                else:
+                    raise SystemExit(f"worker {self.index}: /spec refused (HTTP "
+                                     f"{spec.status_code}): {spec.text}")
             except httpx.HTTPError as exc:
-                log.warning("worker %d could not read /spec (%s)", self.index, exc)
+                raise SystemExit(f"worker {self.index} could not read /spec: {exc}")
         req = RegisterRequest(
             node_id=self.node_id,
             address=self.host,
@@ -200,11 +204,10 @@ class StubWorker:
             if self.transport == "tunnel":
                 self.api_key = parsed.vllm_api_key
                 self.tunnel_pool_size = parsed.tunnel_pool_size or 1
-            # Preferred port = the manager's model.port (like a real worker), else a
-            # default. The actual port is preflight-negotiated and reported on the
-            # heartbeat, so it need not match anything the manager configured.
-            if parsed.node_spec is not None:
-                self.preferred_port = parsed.node_spec.port
+            # Preferred port = the manager's worker.vllm_port (like a real worker). The
+            # actual port is preflight-negotiated and reported on the heartbeat, so it
+            # need not match anything the manager configured.
+            self.preferred_port = parsed.node_spec.port
             log.info(
                 "worker %d registered as %s @ %s (preferred port %d, heartbeat=%ds)",
                 self.index, self.node_id[:8], self.host, self.preferred_port,
