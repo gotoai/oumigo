@@ -107,6 +107,8 @@ def test_models_lists_only_models_with_a_serving_worker(upstreams) -> None:
     with TestClient(_fleet(upstreams)) as client:
         data = client.get("/v1/models").json()["data"]
     assert [m["id"] for m in data] == ["any-model", BIG, SMALL]  # not IDLE
+    assert data[0] == {"id": "any-model", "object": "model", "owned_by": "oumigo",
+                       "oumigo": {"task": "chat"}}
     assert data[1]["owned_by"] == "acme"
     assert data[1]["oumigo"] == {"weights": "acme/big-model", "task": "chat",
                                  "max_model_len": None, "serving": 1}

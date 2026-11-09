@@ -179,11 +179,12 @@ class ManagerConsole:
                 _fmt_transport(r),
                 r["state"],
                 r.get("model") or "-",
+                r.get("task") or "-",
                 self._fmt_utc(start),
                 f"{now - r['last_seen']:.0f}s ago",
             ))
 
-        headers = ("WORKER", "HASH ID", "IP", "PORT", "GPU#0", "BACKEND", "TRANSPORT", "STATE", "MODEL_NAME", "START (UTC)", "LAST SEEN")
+        headers = ("WORKER", "HASH ID", "IP", "PORT", "GPU#0", "BACKEND", "TRANSPORT", "STATE", "MODEL_NAME", "TASK", "START (UTC)", "LAST SEEN")
         widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
         fmt = "  ".join(f"{{:<{w}}}" for w in widths)
         print("  " + fmt.format(*headers))

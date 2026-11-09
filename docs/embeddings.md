@@ -101,8 +101,9 @@ context length.
 **Over-length input.** An input longer than the model's context is refused with vLLM's
 `400`, never cut short silently. Pass `truncate_prompt_tokens` if you want truncation.
 
-`GET /v1/models` lists each model's task and, for embedding models, its dimensions and
-valid `input_type` names:
+`GET /v1/models` lists each model's task (`any-model` too, as `chat`; it is listed only
+while a chat model is serving) and, for embedding models, its dimensions and valid
+`input_type` names:
 
 ```json
 {"id": "ruri-v3-310m@8k", "object": "model", "owned_by": "cl-nagoya",

@@ -47,8 +47,9 @@ def upstreams():
         srv.shutdown()
 
 
-def _fleet(addrs, catalog: bool = True):
-    """A chat worker and an embed worker, both SERVING; EMB2 is allowed but not up."""
+def _fleet(addrs, catalog: bool = True, chat: bool = True):
+    """A chat worker and an embed worker, both SERVING; EMB2 is allowed but not up.
+    `chat=False` leaves the chat worker out."""
     profiles = FleetCatalog({p.id: p for p in (
         Profile(id=CHAT, model="acme/chat-model"),
         Profile(id=EMB, model="acme/embedder", task="embed",
@@ -56,7 +57,8 @@ def _fleet(addrs, catalog: bool = True):
         Profile(id=EMB2, model="acme/other-embedder", task="embed"),
     )}, CHAT)
     reg = Registry()
-    for node_id, (host, port), pid in (("chat", addrs[0], CHAT), ("embed", addrs[1], EMB)):
+    nodes = [("chat", addrs[0], CHAT)] if chat else []
+    for node_id, (host, port), pid in nodes + [("embed", addrs[1], EMB)]:
         reg.register(node_id, host, NodeState.SERVING.value, 0, {}, port=port,
                      model=profiles.get(pid).model, profile=pid,
                      task=profiles.get(pid).task)
@@ -186,3 +188,12 @@ def test_models_say_what_each_model_is_for(upstreams) -> None:
     assert data[CHAT]["task"] == "chat" and "dimensions" not in data[CHAT]
     assert data[EMB] == {"weights": "acme/embedder", "task": "embed", "max_model_len": None,
                          "dimensions": 768, "input_types": ["document", "query"], "serving": 1}
+
+
+def test_models_list_any_model_only_while_a_chat_model_is_up(upstreams) -> None:
+    with TestClient(_fleet(upstreams, chat=False)) as client:
+        ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
+        missing = client.post("/v1/embeddings", json={"model": "nope", "input": "x"}).json()
+    assert ids == [EMB]
+    # nor is any-model offered as an alternative on the embeddings path
+    assert "any-model" not in missing["error"]["message"]

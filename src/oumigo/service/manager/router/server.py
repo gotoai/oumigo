@@ -48,7 +48,8 @@ doesn't know is `404 model_not_found`. With no SERVING worker for the request, i
 `503 model_unavailable`; a request that queued too long behind busy workers is
 `503 model_busy`. All are in OpenAI's error shape, and their messages are written for
 the end user (the details go to the log). `/v1/models` is answered here, from the
-registry: `any-model` plus every id with a SERVING worker, each with its task.
+registry: every id with a SERVING worker, each with its task, and `any-model` (a chat
+entry) while at least one of them is a chat model.
 
 Tasks: a model is for `chat` or `embed` (its profile's `task`, as the worker reports
 it). The chat paths, `any-model` included, only reach chat workers; naming an embedding
@@ -520,7 +521,7 @@ def create_router_app(
                 return _model_error(
                     404, "model_not_found",
                     f"Model {named!r} is not available. Available models: "
-                    f"{', '.join(sorted(_known()) + [ANY_MODEL])}.")
+                    f"{', '.join(sorted(_known()) + ([ANY_MODEL] if task == TASK_CHAT else []))}.")
             if _task_of(named) != task:
                 return _model_error(
                     400, "wrong_task",
@@ -661,13 +662,18 @@ def create_router_app(
 
     @app.get("/v1/models", dependencies=authed)
     async def models() -> dict:
-        """list the models with a serving worker, plus any-model"""
+        """list the models with a serving worker, plus any-model while a chat model is up"""
         serving: dict[str, list[NodeRecord]] = defaultdict(list)
         for record in pool.serving():
             served = _served(record)
             if served:
                 serving[served].append(record)
-        data = [{"id": ANY_MODEL, "object": "model", "owned_by": "oumigo"}]
+        data = []
+        if any(_task_of(model_id) == TASK_CHAT for model_id in serving):
+            # any-model only ever reaches chat workers, so it is listed (and labelled)
+            # only while one of them can answer it.
+            data.append({"id": ANY_MODEL, "object": "model", "owned_by": "oumigo",
+                         "oumigo": {"task": TASK_CHAT}})
         for model_id in sorted(serving):
             records = serving[model_id]
             profile = _profile(model_id)

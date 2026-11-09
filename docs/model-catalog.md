@@ -215,10 +215,12 @@ SDKs also retry a `503` on their own, waiting `Retry-After` between attempts:
 The router answers it from its live view of the workers: `any-model` first, then each id
 with at least one serving worker. An allowed model with no serving worker is left out, so
 apps that fill a menu from this list never offer a model that would only time out.
+`any-model` is listed only while at least one chat model is serving, since it only ever
+reaches chat workers; a fleet of embedding workers alone does not list it.
 
 ```json
 {"object": "list", "data": [
-  {"id": "any-model", "object": "model", "owned_by": "oumigo"},
+  {"id": "any-model", "object": "model", "owned_by": "oumigo", "oumigo": {"task": "chat"}},
   {"id": "gemma-4-12B-it-qat-w4a16-ct@128k", "object": "model", "owned_by": "google",
    "oumigo": {"weights": "google/gemma-4-12B-it-qat-w4a16-ct", "task": "chat",
               "max_model_len": 131072, "serving": 1}}
