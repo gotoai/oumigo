@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "GOTOAI" }]
 keywords = ["vllm", "llm", "inference", "cluster", "serving"]
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 3 - Alpha",       # TODO: 3-Alpha / 4-Beta / 5-Production-Stable
@@ -21,7 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Operating System :: POSIX :: Linux",    
-    # NOTE: do NOT add a "License :: ..." classifier — the SPDX `license = "MIT"`
+    # NOTE: do NOT add a "License :: ..." classifier — the SPDX `license = "Apache-2.0"`
     # field above supersedes it and the two together will conflict.
 ]
 dependencies = [

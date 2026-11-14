@@ -24,7 +24,7 @@ ARG OUMIGO_VERSION=0.5.1
 # The source label links the published package to the repository on GitHub.
 LABEL org.opencontainers.image.source="https://github.com/gotoai/oumigo" \
       org.opencontainers.image.description="OumiGo worker: vLLM ${VLLM_VERSION}${VLLM_VARIANT} + oumigo ${OUMIGO_VERSION}" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # tini as PID 1: forwards the platform's stop signal (SIGTERM) to the worker, which
 # drains, stops vLLM's whole process group and releases VRAM.
