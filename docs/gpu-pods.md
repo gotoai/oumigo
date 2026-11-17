@@ -106,7 +106,7 @@ The script refuses to run if this file is readable by anyone but its owner.
 ([example](../deploy/pods/pods.example.yaml)). The parts that choose the machine:
 
 ```yaml
-image: ghcr.io/<owner>/oumigo-worker:0.5.1-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.5-vllm0.28.0-cu129
 disk_gb: 80                      # weights + caches; there is no volume
 
 search:
@@ -137,6 +137,10 @@ worker:
 ```
 
 The profile must be allowed in the manager's `catalog:`; see [model-catalog.md](model-catalog.md).
+It also sets the smallest GPU: `up` reads the profile's `min_vram_gib` from the manager's
+catalog and skips listed cards with less memory, on RunPod and Vast.ai alike. A worker
+would refuse such a GPU anyway, after the pod was rented. `vast.min_gpu_ram_gb` can only
+raise that floor.
 
 **Price.** The bound is on the pod's hourly price, disk included. RunPod is checked
 against its list price before asking, and the new pod's actual price again after: a pod
@@ -171,12 +175,24 @@ Options of `up` override `search:` for one run:
 ```bash
 $PODS up --providers vast.ai,secure.runpod --max-price 0.45 --wait
 $PODS up --retry-interval 60 --search-timeout 3600 --wait
+$PODS up --profile gemma-4-12B-it-qat-w4a16-ct@128k --wait   # instead of worker.profile
+```
+
+**Several pods.** Each settings file runs one pod, named by its `name`. Give each kind
+of worker its own file and pass it with `-c`. For example, an embedding model on a small
+card next to the chat pod
+([example](../deploy/pods/pods-embed.example.yaml)):
+
+```bash
+$PODS -c /etc/oumigo/pods-embed.yaml up --wait
+$PODS -c /etc/oumigo/pods-embed.yaml down
 ```
 
 **`up`**
 
 1. Mints a join token (`join_token.ttl`, `join_token.uses`) labelled with the pod name.
-2. Asks each provider in turn for an on-demand machine: a listed GPU, a host whose CUDA
+2. Asks each provider in turn for an on-demand machine: a listed GPU with at least the
+   profile's `min_vram_gib`, a host whose CUDA
    version is at least the image's (from the tag, or `min_cuda_version`), within the
    price bound. The first provider with one wins.
 3. If none has one, waits `retry_interval` seconds and asks them all again, for up to
@@ -186,6 +202,12 @@ $PODS up --retry-interval 60 --search-timeout 3600 --wait
 5. With `--wait`, waits until the worker is serving. If the worker fails or does not
    serve within `--wait-timeout` (default 30 minutes), the pod is deleted again: a pod
    that never serves only costs money.
+6. A Vast.ai machine whose Docker cannot start the container at all (for example
+   `failed to inject CDI devices`: the host's NVIDIA runtime is broken) is a host fault,
+   not the image's. With `--wait`, the pod is deleted as soon as Vast.ai reports it, the
+   machine goes on the skip list (below), and the next machine is rented with
+   the same join token, up to 3 machines. Other start errors, such as a registry that
+   refuses the pull, fail at once: another machine would fail the same way.
 
 **`down`**
 
@@ -198,6 +220,18 @@ $PODS up --retry-interval 60 --search-timeout 3600 --wait
 
 A pod the state file does not know (say, one left over from a crash) is deleted with
 `down --provider <provider> --pod-id <id>`.
+
+**The Vast.ai skip list.** A machine on it is left out of every search, by every pod
+config, for `vast.avoid_machines_hours` (default 24; kept in
+`<auth state dir>/pods/vast-avoid.json`). A machine gets there by failing to start the
+container (step 6 of `up`), or by hand: a pod that misbehaves, say one that hangs while
+loading, is taken down with `down --avoid`, so the next `up` does not rent the same
+machine again. A plain `down`, such as the daily one, leaves the machine off the list.
+
+```bash
+$PODS -c /etc/oumigo/pods-embed.yaml down --avoid   # delete the pod, skip its machine
+$PODS clear --avoid-list                            # forget every skipped machine
+```
 
 **What a pod sees.** The pod's environment, including the join token and `HF_TOKEN`, and
 on Vast.ai the registry login, is visible to anyone with access to the provider account,

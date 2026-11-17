@@ -39,9 +39,9 @@ from oumigo.protocol.messages import (
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.providers.static import CUSTOM
 from oumigo.service.worker import client
+from oumigo.service.worker.gpus import select_gpus, selected_gpus
 from oumigo.service.worker.identity import resolve_worker_identity
-from oumigo.service.worker.metrics import MetricsCollector, probe_gpu0_name, probe_gpu0_vram_gib
-from oumigo.service.worker.tunnel import TunnelClient
+from oumigo.service.worker.metrics import MetricsCollector, probe_gpu_name, probe_gpu_vram_gib
 from oumigo.service.worker.supervisor import (
     HFProcess,
     PortUnavailable,
@@ -49,6 +49,7 @@ from oumigo.service.worker.supervisor import (
     _ServerProcess,
     find_free_port,
 )
+from oumigo.service.worker.tunnel import TunnelClient
 
 log = logging.getLogger("oumigo.service.worker")
 
@@ -488,8 +489,41 @@ def _refuse_removed_env() -> None:
 
 
 def _vram_gb() -> float | None:
-    vram = probe_gpu0_vram_gib()
+    vram = probe_gpu_vram_gib()
     return round(vram, 1) if vram is not None else None
+
+
+def _gpus_to_check(spec: NodeSpec) -> list[str]:
+    """The GPUs the backend will run on: those chosen, else GPU 0."""
+    return (selected_gpus() or ["0"])[:spec.tensor_parallel_size]
+
+
+def _apply_memory_target(spec: NodeSpec) -> NodeSpec:
+    """Turn the profile's `gpu_memory_target_gib` into this GPU's `gpu_memory_utilization`.
+
+    vLLM takes a share of the GPU's *total* memory; a model needs about the same GiB on
+    any card, so the profile states that, and the share is worked out here for this card
+    (the smallest of the GPUs it runs on). Unset or 0: the profile's share applies.
+    vLLM counts the total slightly smaller than NVML does (about 2%), so it gets a little
+    less than the target; the profiles' targets carry a margin over what was measured.
+    """
+    target = spec.gpu_memory_target_gib
+    if not target:
+        return spec
+    sizes = {gpu: probe_gpu_vram_gib(gpu) for gpu in _gpus_to_check(spec)}
+    known = {gpu: size for gpu, size in sizes.items() if size}
+    if not known:
+        raise SystemExit(f"profile {spec.served_name} sets gpu_memory_target_gib, which "
+                         "needs this GPU's memory size, and it cannot be read (no NVML, "
+                         "no nvidia-smi)")
+    gpu, total = min(known.items(), key=lambda item: item[1])
+    if target >= total:
+        raise SystemExit(f"profile {spec.served_name} needs {target:g} GiB of GPU memory; "
+                         f"GPU {gpu} has {total:.1f} GiB")
+    share = round(target / total, 4)
+    log.info("gpu_memory_target_gib %g of GPU %s's %.1f GiB: gpu_memory_utilization %.4f",
+             target, gpu, total, share)
+    return spec.model_copy(update={"gpu_memory_utilization": share})
 
 
 def _check_requirements(spec: NodeSpec, backend: str) -> None:
@@ -503,15 +537,16 @@ def _check_requirements(spec: NodeSpec, backend: str) -> None:
         raise SystemExit(f"profile {spec.served_name} is an embedding model and needs the "
                          f"vLLM backend; this worker runs the {backend} backend")
     if spec.min_vram_gib is not None:
-        vram = probe_gpu0_vram_gib()
-        if vram is None:
-            log.warning("cannot read this GPU's VRAM; skipping the profile's %.0f GiB check",
-                        spec.min_vram_gib)
-        elif vram < spec.min_vram_gib:
-            raise SystemExit(
-                f"profile {spec.served_name} needs a GPU with at least {spec.min_vram_gib:g} "
-                f"GiB; GPU 0 has {vram:.1f} GiB. Choose a smaller profile with "
-                "OUMIGO_MODEL_PROFILE.")
+        for gpu in _gpus_to_check(spec):
+            vram = probe_gpu_vram_gib(gpu)
+            if vram is None:
+                log.warning("cannot read GPU %s's VRAM; skipping the profile's %.0f GiB "
+                            "check", gpu, spec.min_vram_gib)
+            elif vram < spec.min_vram_gib:
+                raise SystemExit(
+                    f"profile {spec.served_name} needs a GPU with at least "
+                    f"{spec.min_vram_gib:g} GiB; GPU {gpu} has {vram:.1f} GiB. Choose a "
+                    "smaller profile with OUMIGO_MODEL_PROFILE.")
     if spec.requires_vllm and backend == BACKEND_VLLM:
         try:
             from importlib.metadata import PackageNotFoundError, version
@@ -568,13 +603,20 @@ def run_worker(
     discover_timeout: float = discovery.DEFAULT_DISCOVER_TIMEOUT,
     backend: str = BACKEND_VLLM,
     transport: str = Transport.DIRECT.value,
+    gpu_id: str | None = None,
 ) -> None:
     """Find the manager, fetch + env-negotiate the spec, preflight a port, derive
     identity, then hand off to the coordinator loop. The node_id is a hash of the host id +
-    the *actual* backend port, so the port must be chosen before we register."""
+    the *actual* backend port, so the port must be chosen before we register.
+
+    `gpu_id` (`--gpu-id` / `$OUMIGO_GPU_ID`) pins the worker to GPUs (`gpus`)."""
     if backend not in BACKENDS:
         raise SystemExit(f"unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}")
     _refuse_removed_env()
+    try:
+        chosen = select_gpus(gpu_id) if gpu_id else None
+    except ValueError as exc:
+        raise SystemExit(f"--gpu-id / OUMIGO_GPU_ID: {exc}") from None
 
     if not manager_url:
         log.info("no manager URL provided; discovering via mDNS (up to %.0fs) ...", discover_timeout)
@@ -610,7 +652,12 @@ def run_worker(
         raise SystemExit(f"manager {manager_url} handed out no model profile; it needs "
                          "oumigo 0.5.5 or later")
     spec = _apply_env_overrides(spec)
+    if chosen is not None and len(chosen) != spec.tensor_parallel_size:
+        raise SystemExit(f"--gpu-id names {len(chosen)} GPU(s), but profile "
+                         f"{spec.served_name} runs on {spec.tensor_parallel_size} "
+                         "(tensor_parallel_size)")
     _check_requirements(spec, backend)
+    spec = _apply_memory_target(spec)
     if transport == Transport.TUNNEL.value:
         # Nothing dials a tunnel worker: its backend binds loopback, reachable only
         # through the tunnel (and by the local supervisor's health/metrics polls).
@@ -637,7 +684,7 @@ def run_worker(
         backend=backend,       # which inference backend this worker runs
         incarnation=incarnation,
         state=NodeState.REGISTERING,
-        capabilities=NodeCapabilities(gpu=probe_gpu0_name(), vram_gb=_vram_gb()),
+        capabilities=NodeCapabilities(gpu=probe_gpu_name(), vram_gb=_vram_gb()),
     )
     WorkerCoordinator(
         manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend,

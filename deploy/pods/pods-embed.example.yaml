@@ -1,0 +1,52 @@
+# oumigo_pods.py settings for an embedding worker on a small rented GPU:
+#
+#   oumigo_pods.py -c /etc/oumigo/pods-embed.yaml up --wait
+#
+# The shipped embedding profiles take 0.85 of the GPU, so the pod runs nothing else.
+# Cards smaller than the profile's min_vram_gib are skipped (ruri and harrier@8k: 4 GiB,
+# harrier@32k: 8 GiB), so one GPU list serves all three. Secrets as in pods.example.yaml.
+
+name: oumigo-embed                         # also names the state file; one pod per name
+image: ghcr.io/<owner>/oumigo-worker:0.5.5-vllm0.28.0-cu129
+gpu_count: 1
+disk_gb: 40                                # the unpacked image (Vast.ai counts it) + ~2 GB of weights and caches
+
+search:
+  providers:
+    - vast.ai
+    - secure.runpod
+    - community.runpod
+  max_price_per_hour: 0.30                 # USD; set your own bound
+  retry_interval: 30
+  timeout: 1800
+
+runpod:
+  gpu_types:
+    - NVIDIA RTX 2000 Ada Generation
+    - NVIDIA RTX A4500
+    - NVIDIA RTX A4000
+    - NVIDIA RTX 4000 Ada Generation
+    - NVIDIA RTX A5000
+  # registry_auth_id: <id>                 # RunPod registry credential, for a private image
+
+vast:
+  gpu_names: [RTX 3060, RTX 3070, RTX 3080, RTX 3060 Ti, RTX 3070 Ti, RTX 3080 Ti,
+              RTX A4000, RTX 4060, RTX A5000, RTX 5060, RTX 4060 Ti, RTX 5060 Ti]
+  min_reliability: 0.98
+  min_download_mbps: 500                   # the image is ~9 GB to pull
+  max_download_usd_per_tb: 10
+  # avoid_machines_hours: 24               # skip a machine that failed to start the container, or `down --avoid`
+  # registry_user: <user>                  # for a private image, with REGISTRY_TOKEN
+
+worker:
+  manager_url: https://oumigo.example.com
+  # One of ruri-v3-310m@8k, harrier-oss-v1-0.6b@8k, harrier-oss-v1-0.6b@32k; must be in
+  # the manager's catalog.allow. `up --profile` overrides it. An index built with one
+  # model can only be searched with that model.
+  profile: ruri-v3-310m@8k
+
+join_token:
+  ttl: 13h
+  uses: 3
+
+manager_config: /etc/oumigo/manager.yaml

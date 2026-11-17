@@ -18,7 +18,7 @@ description: Ruri v3 310M, Japanese text embeddings (768-d), 8k context
 task: embed                         # served with `vllm serve ... --runner pooling`
 engine:
   max_model_len: 8192
-  gpu_memory_utilization: 0.2
+  gpu_memory_utilization: 0.85      # a GPU of its own
   dtype: float16
   max_concurrent_requests: 8
   extra_args:
@@ -41,11 +41,11 @@ embed:
 
 ### Shipped embedding profiles
 
-| Id | Weights | Language | Dims | Vectors | VRAM used | `tested` |
-|---|---|---|---|---|---|---|
-| `ruri-v3-310m@8k` | `cl-nagoya/ruri-v3-310m` | Japanese | 768 | **not normalised** | 1.5 GiB | RTX 3080 Ti Laptop 16 GB |
-| `harrier-oss-v1-0.6b@8k` | `microsoft/harrier-oss-v1-0.6b` | multilingual | 1024 | unit length | 2.8 GiB | RTX 3080 Ti Laptop 16 GB |
-| `harrier-oss-v1-0.6b@32k` | `microsoft/harrier-oss-v1-0.6b` | multilingual | 1024 | unit length | 6.5 GiB | RTX 3080 Ti Laptop 16 GB |
+| Id | Weights | Language | Dims | Vectors | VRAM used | Smallest GPU | `tested` |
+|---|---|---|---|---|---|---|---|
+| `ruri-v3-310m@8k` | `cl-nagoya/ruri-v3-310m` | Japanese | 768 | **not normalised** | 1.5 GiB | 4 GiB | RTX 3080 Ti Laptop 16 GB |
+| `harrier-oss-v1-0.6b@8k` | `microsoft/harrier-oss-v1-0.6b` | multilingual | 1024 | unit length | 2.8 GiB | 4 GiB | RTX 3080 Ti Laptop 16 GB |
+| `harrier-oss-v1-0.6b@32k` | `microsoft/harrier-oss-v1-0.6b` | multilingual | 1024 | unit length | 6.5 GiB | 8 GiB | RTX 3080 Ti Laptop 16 GB |
 
 **How they were checked.** Each was compared with the model's own sentence-transformers
 pipeline (`tests/embedding_parity_test.py`) on short and long multilingual text, for every
@@ -63,9 +63,14 @@ prompt. The cosine with the reference vector was at least 0.99994 for every inpu
 model's own pipeline returns them. Compare them with **cosine** similarity, or normalise
 them yourself before using inner product. harrier's vectors are already unit length.
 
-Several small workers can share one GPU: each worker picks its own port. On a 16 GB GPU, a
-small chat model, `ruri-v3-310m@8k` and `harrier-oss-v1-0.6b@8k` run together. Start
-them one after another, because each vLLM checks for its memory share when it starts.
+**A GPU of its own.** The shipped embedding profiles take 0.85 of the GPU's memory: they
+are meant for a dedicated embedding worker, such as a small rented pod, where the extra
+memory becomes KV cache for more inputs at once. "Smallest GPU" is the card on which 0.85
+still covers the share each profile was tested with on 16 GB. To run an embedding model
+next to a chat model on one GPU, override the profile in a `catalog.dirs` directory (see
+model-catalog.md) with a smaller `gpu_memory_utilization` and a matching `min_vram_gib`:
+ruri and harrier@8k needed 0.2 of 16 GB, harrier@32k 0.4. Each worker picks its own port;
+start them one after another, because each vLLM checks for its memory share when it starts.
 
 ## Calling `/v1/embeddings`
 

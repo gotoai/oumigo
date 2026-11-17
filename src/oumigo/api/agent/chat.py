@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from oumigo.api.agent.response import OumiGoResponse
-from oumigo.guard import GuardContext, InterceptPoint, OUTPUT_POINTS, Verdict
+from oumigo.guard import OUTPUT_POINTS, GuardContext, InterceptPoint, Verdict
 
 if TYPE_CHECKING:  # avoid a runtime import cycle: agent.py imports this module
     from oumigo.api.agent.agent import OumiGoAgent

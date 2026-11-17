@@ -15,11 +15,11 @@ import yaml
 from oumigo.config.catalog import FleetCatalog, Profile
 
 DEFAULT_PROVIDER = "LAN"
-DEFAULT_DATA_PLANE_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so LAN clients reach the router
+DEFAULT_DATA_PLANE_HOST = "0.0.0.0"
 DEFAULT_DATA_PLANE_PORT = 7012
 DEFAULT_VLLM_PORT = 7001
 
-DEFAULT_DASHBOARD_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so the LAN can view it
+DEFAULT_DASHBOARD_HOST = "0.0.0.0"
 DEFAULT_DASHBOARD_PORT = 7080  # 7070 is commonly taken (AnyDesk); reporting plane uses 7080
 
 DEFAULT_TRUSTED_PROXIES = ["127.0.0.1"]  # whose X-Forwarded-For is believed (nginx on the host)

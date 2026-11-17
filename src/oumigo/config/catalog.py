@@ -69,6 +69,9 @@ class EngineSettings(_Strict):
 
     max_model_len: int | None = Field(default=None, ge=1)
     gpu_memory_utilization: float = Field(default=0.90, gt=0, le=1)
+    gpu_memory_target_gib: float | None = Field(default=None, ge=0)
+    """GiB per GPU, measured for the model; when set (above 0), each worker derives its
+    `gpu_memory_utilization` from it and its GPU's size, and the share above is unused."""
     dtype: str = "auto"
     tensor_parallel_size: int = Field(default=1, ge=1)
     max_concurrent_requests: int = Field(default=1, ge=1)
@@ -180,6 +183,7 @@ class Profile(_Strict):
             dtype=e.dtype,
             tensor_parallel_size=e.tensor_parallel_size,
             gpu_memory_utilization=e.gpu_memory_utilization,
+            gpu_memory_target_gib=e.gpu_memory_target_gib,
             max_concurrent_requests=e.max_concurrent_requests,
             max_model_len=e.max_model_len,
             max_audio_seconds=self.caps.max_audio_seconds,

@@ -36,7 +36,7 @@ def run_with_child_server(
         env["OUMIGO_MANAGER_TOKEN"] = token  # pass secret via env, never argv
 
     cmd = [sys.executable, "-m", "oumigo.cli.main", "manager", "serve", *forward_args]
-    child = subprocess.Popen(  # noqa: S603 - fixed argv
+    child = subprocess.Popen(
         cmd, env=env, start_new_session=True, preexec_fn=die_with_parent_preexec()
     )
 

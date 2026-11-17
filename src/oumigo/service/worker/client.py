@@ -21,7 +21,6 @@ from oumigo.protocol.messages import (
     RegisterResponse,
 )
 
-
 ENV_CA_FILE = "OUMIGO_MANAGER_CA_FILE"
 
 _verify: ssl.SSLContext | bool = True  # set by configure_tls; shared by every call here

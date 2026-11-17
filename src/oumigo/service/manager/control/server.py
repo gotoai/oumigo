@@ -33,28 +33,6 @@ from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.common.state import default_state_dir
 from oumigo.config.catalog import FleetCatalog
 from oumigo.config.spec import NodeSpec
-from oumigo.providers.static import CUSTOM, LAN
-from oumigo.service.manager.access import FailureLimiter, WorkerAllowlist
-from oumigo.service.manager.control.registry import Registry
-from oumigo.service.manager.control.store import MetricStore
-from oumigo.service.manager.credentials import Authenticator, AuthStore
-from oumigo.service.manager.tunnel import TunnelConn, TunnelRegistry
-from oumigo.service.manager.router.server import create_router_app
-from oumigo.service.manager.settings import (
-    get_agent_defaults,
-    get_auth_state_dir,
-    get_catalog,
-    get_client_auth,
-    get_control_tls,
-    get_fleet_agent_defaults,
-    get_dashboard,
-    get_data_plane,
-    get_trusted_proxies,
-    get_tunnel,
-    get_vllm_port,
-    get_worker_allowlist,
-    load_manager_yaml,
-)
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -63,6 +41,28 @@ from oumigo.protocol.messages import (
     RegisterResponse,
     Transport,
 )
+from oumigo.providers.static import CUSTOM, LAN
+from oumigo.service.manager.access import FailureLimiter, WorkerAllowlist
+from oumigo.service.manager.control.registry import Registry
+from oumigo.service.manager.control.store import MetricStore
+from oumigo.service.manager.credentials import Authenticator, AuthStore
+from oumigo.service.manager.router.server import create_router_app
+from oumigo.service.manager.settings import (
+    get_agent_defaults,
+    get_auth_state_dir,
+    get_catalog,
+    get_client_auth,
+    get_control_tls,
+    get_dashboard,
+    get_data_plane,
+    get_fleet_agent_defaults,
+    get_trusted_proxies,
+    get_tunnel,
+    get_vllm_port,
+    get_worker_allowlist,
+    load_manager_yaml,
+)
+from oumigo.service.manager.tunnel import TunnelConn, TunnelRegistry
 
 log = logging.getLogger("oumigo.service.manager")
 
@@ -541,7 +541,7 @@ def _spawn_dashboard(
     if verbose:
         cmd.append("--verbose")
     try:
-        child = subprocess.Popen(  # noqa: S603 - fixed argv
+        child = subprocess.Popen(
             cmd, start_new_session=True, preexec_fn=die_with_parent_preexec()
         )
     except OSError as exc:

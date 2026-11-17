@@ -73,8 +73,7 @@ class MetricMirror:
         for p in points:
             ts = p["timestamp"]
             self._rows[(p["node_id"], p["metric"], ts)] = float(p["value"])
-            if ts > self._max_ts:
-                self._max_ts = ts
+            self._max_ts = max(self._max_ts, ts)
         self._prune(now)
         await self._refresh_names(client)
         self.last_ok = now

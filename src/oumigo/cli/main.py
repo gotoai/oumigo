@@ -12,7 +12,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import typer
 
@@ -45,19 +44,19 @@ def version() -> None:
 
 @worker_app.command("run")
 def worker_run(
-    manager_url: Optional[str] = typer.Option(
+    manager_url: str | None = typer.Option(
         None,
         "--manager-url",
         envvar="OUMIGO_MANAGER_URL",
         help="Manager control-plane URL. If unset, discover on the LAN via mDNS.",
     ),
-    token_file: Optional[Path] = typer.Option(
+    token_file: Path | None = typer.Option(
         None, "--token-file", help="Path to a file containing the join token."
     ),
-    state_dir: Optional[Path] = typer.Option(
+    state_dir: Path | None = typer.Option(
         None, "--state-dir", help="Directory holding the persisted node identity."
     ),
-    transport: Optional[str] = typer.Option(
+    transport: str | None = typer.Option(
         None,
         "--transport",
         envvar="OUMIGO_TRANSPORT",
@@ -65,18 +64,26 @@ def worker_run(
         "'tunnel' (this worker dials out to the manager; no inbound port needed). "
         "Default: direct.",
     ),
-    discover_timeout: Optional[float] = typer.Option(
+    discover_timeout: float | None = typer.Option(
         None,
         "--discover-timeout",
         envvar="OUMIGO_DISCOVER_TIMEOUT",
         help="Seconds to wait for mDNS discovery of the manager (when no --manager-url). "
         "Default: 60.",
     ),
-    env_file: Optional[Path] = typer.Option(
+    env_file: Path | None = typer.Option(
         Path(".env"),
         "--env-file",
         help="Load KEY=VALUE vars from this file into the environment (inherited by the "
         "backend). Existing environment variables win. Skipped if the file is absent.",
+    ),
+    gpu_id: str | None = typer.Option(
+        None,
+        "--gpu-id",
+        envvar="OUMIGO_GPU_ID",
+        help="The GPU this worker runs on, as nvidia-smi numbers them (from 0) or by UUID "
+        "(GPU-…); comma-separated for a model sharded over several. Default: "
+        "$CUDA_VISIBLE_DEVICES if set, else GPU 0.",
     ),
     backend: str = typer.Option(
         "vllm",
@@ -111,6 +118,7 @@ def worker_run(
     # options a flag or the real environment left unset from the env file's values.
     manager_url = manager_url or os.environ.get("OUMIGO_MANAGER_URL", "").strip() or None
     transport = transport or os.environ.get("OUMIGO_TRANSPORT", "").strip() or "direct"
+    gpu_id = gpu_id or os.environ.get("OUMIGO_GPU_ID", "").strip() or None
     if discover_timeout is None:
         try:
             discover_timeout = float(os.environ.get("OUMIGO_DISCOVER_TIMEOUT") or 60.0)
@@ -140,6 +148,7 @@ def worker_run(
         discover_timeout=discover_timeout,
         backend=backend,
         transport=transport,
+        gpu_id=gpu_id,
     )
 
 
@@ -154,13 +163,13 @@ def _parse_yes_no(value: str) -> bool:
 
 
 def _resolve_manager_runtime(
-    config_file: Optional[Path], token_file: Optional[Path], host: Optional[str], port: Optional[int]
+    config_file: Path | None, token_file: Path | None, host: str | None, port: int | None
 ) -> dict:
     """Resolve config file, token, provider, and bind host/port for the manager."""
     from oumigo.config import resolve_config_file
+    from oumigo.providers import create_provider
     from oumigo.service.manager.auth import resolve_manager_token
     from oumigo.service.manager.settings import get_catalog, get_provider_name, load_manager_yaml
-    from oumigo.providers import create_provider
 
     config_file = resolve_config_file(config_file)
     try:
@@ -235,25 +244,25 @@ def _resolve_manager_runtime(
 
 def _no_token_message(provider) -> str:
     """Startup notice when no reusable join token is configured, per provider posture."""
-    from oumigo.service.manager.auth import NO_TOKEN_WARNING, NO_TOKEN_WAN_NOTICE
+    from oumigo.service.manager.auth import NO_TOKEN_WAN_NOTICE, NO_TOKEN_WARNING
 
     return NO_TOKEN_WAN_NOTICE if provider.is_wan else NO_TOKEN_WARNING
 
 
 @manager_app.command("serve")
 def manager_serve(
-    config_file: Optional[Path] = typer.Option(
+    config_file: Path | None = typer.Option(
         None,
         "--config-file",
         "-c",
         envvar="OUMIGO_CONFIG_FILE",
         help="Path to the manager config file (overrides the search path).",
     ),
-    token_file: Optional[Path] = typer.Option(
+    token_file: Path | None = typer.Option(
         None, "--token-file", help="Path to a file containing the shared bearer token."
     ),
-    host: Optional[str] = typer.Option(None, "--host", help="Control-plane bind host (overrides config)."),
-    port: Optional[int] = typer.Option(None, "--port", help="Control-plane bind port (overrides config)."),
+    host: str | None = typer.Option(None, "--host", help="Control-plane bind host (overrides config)."),
+    port: int | None = typer.Option(None, "--port", help="Control-plane bind port (overrides config)."),
     no_mdns: bool = typer.Option(False, "--no-mdns", help="Do not advertise the manager over mDNS."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Log server output at INFO."),
 ) -> None:
@@ -283,18 +292,18 @@ def manager_serve(
 
 @manager_app.command("run")
 def manager_run(
-    config_file: Optional[Path] = typer.Option(
+    config_file: Path | None = typer.Option(
         None,
         "--config-file",
         "-c",
         envvar="OUMIGO_CONFIG_FILE",
         help="Path to the manager config file (overrides the search path).",
     ),
-    token_file: Optional[Path] = typer.Option(
+    token_file: Path | None = typer.Option(
         None, "--token-file", help="Path to a file containing the shared bearer token."
     ),
-    host: Optional[str] = typer.Option(None, "--host", help="Control-plane bind host (overrides config)."),
-    port: Optional[int] = typer.Option(None, "--port", help="Control-plane bind port (overrides config)."),
+    host: str | None = typer.Option(None, "--host", help="Control-plane bind host (overrides config)."),
+    port: int | None = typer.Option(None, "--port", help="Control-plane bind port (overrides config)."),
     no_mdns: str = typer.Option(
         "NO",
         "--no-mdns",
@@ -361,7 +370,7 @@ def manager_run(
     )
 
 
-def _auth_store(config_file: Optional[Path]):
+def _auth_store(config_file: Path | None):
     """Open the manager's auth state (the same file the running manager reads)."""
     from oumigo.common.state import default_state_dir
     from oumigo.config import resolve_config_file
@@ -396,8 +405,8 @@ _CONFIG_OPTION = typer.Option(
 def token_create(
     ttl: str = typer.Option("1h", "--ttl", help="Lifetime: 30m, 1h, 2d, or 'never'."),
     uses: int = typer.Option(1, "--uses", help="Registrations allowed; 0 = unlimited."),
-    label: Optional[str] = typer.Option(None, "--label", help="Free-form note (e.g. the pod name)."),
-    config_file: Optional[Path] = _CONFIG_OPTION,
+    label: str | None = typer.Option(None, "--label", help="Free-form note (e.g. the pod name)."),
+    config_file: Path | None = _CONFIG_OPTION,
 ) -> None:
     """Mint a join token for a new worker (set it as OUMIGO_JOIN_TOKEN on the worker)."""
     token_id, token = _auth_store(config_file).create_join_token(
@@ -408,7 +417,7 @@ def token_create(
 
 
 @token_app.command("list")
-def token_list(config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+def token_list(config_file: Path | None = _CONFIG_OPTION) -> None:
     """List minted join tokens (the tokens themselves are not stored)."""
     tokens = _auth_store(config_file).list_join_tokens()
     if not tokens:
@@ -424,7 +433,7 @@ def token_list(config_file: Optional[Path] = _CONFIG_OPTION) -> None:
 
 
 @token_app.command("revoke")
-def token_revoke(token_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+def token_revoke(token_id: str, config_file: Path | None = _CONFIG_OPTION) -> None:
     """Revoke an unused join token. Workers that already joined keep their node tokens."""
     if not _auth_store(config_file).revoke_join_token(token_id):
         typer.echo(f"error: no join token with id {token_id}", err=True)
@@ -433,7 +442,7 @@ def token_revoke(token_id: str, config_file: Optional[Path] = _CONFIG_OPTION) ->
 
 
 @node_app.command("revoke")
-def node_revoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+def node_revoke(node_id: str, config_file: Path | None = _CONFIG_OPTION) -> None:
     """Revoke a worker: its node token stops working and the manager drops it and closes
     its tunnels within seconds. It cannot re-register under this node_id."""
     _auth_store(config_file).revoke_node(node_id)
@@ -441,7 +450,7 @@ def node_revoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> N
 
 
 @node_app.command("unrevoke")
-def node_unrevoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+def node_unrevoke(node_id: str, config_file: Path | None = _CONFIG_OPTION) -> None:
     """Lift a node revocation: its node token (derived, not stored) is accepted again."""
     if not _auth_store(config_file).unrevoke_node(node_id):
         typer.echo(f"error: node {node_id} is not revoked", err=True)
@@ -451,8 +460,8 @@ def node_unrevoke(node_id: str, config_file: Optional[Path] = _CONFIG_OPTION) ->
 
 @apikey_app.command("create")
 def apikey_create(
-    label: Optional[str] = typer.Option(None, "--label", help="Who holds it (e.g. kari-dev)."),
-    config_file: Optional[Path] = _CONFIG_OPTION,
+    label: str | None = typer.Option(None, "--label", help="Who holds it (e.g. kari-dev)."),
+    config_file: Path | None = _CONFIG_OPTION,
 ) -> None:
     """Create a client API key (clients send it as `Authorization: Bearer <key>`)."""
     key_id, key = _auth_store(config_file).create_api_key(label=label)
@@ -461,7 +470,7 @@ def apikey_create(
 
 
 @apikey_app.command("list")
-def apikey_list(config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+def apikey_list(config_file: Path | None = _CONFIG_OPTION) -> None:
     """List client API keys (the keys themselves are not stored)."""
     keys = _auth_store(config_file).list_api_keys()
     if not keys:
@@ -474,7 +483,7 @@ def apikey_list(config_file: Optional[Path] = _CONFIG_OPTION) -> None:
 
 
 @apikey_app.command("revoke")
-def apikey_revoke(key_id: str, config_file: Optional[Path] = _CONFIG_OPTION) -> None:
+def apikey_revoke(key_id: str, config_file: Path | None = _CONFIG_OPTION) -> None:
     """Revoke a client API key. The running manager refuses it from the next request on."""
     if not _auth_store(config_file).revoke_api_key(key_id):
         typer.echo(f"error: no client API key with id {key_id}", err=True)

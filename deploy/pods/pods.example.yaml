@@ -3,7 +3,7 @@
 # HF_TOKEN), mode 0600.
 
 name: oumigo-48gb                          # also names the state file; one pod per name
-image: ghcr.io/<owner>/oumigo-worker:0.5.1-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.5-vllm0.28.0-cu129
 gpu_count: 1
 disk_gb: 80                                # weights + caches; there is no volume
 # min_cuda_version: "13.0"                # hosts with this CUDA or newer; default: from the
@@ -30,10 +30,11 @@ runpod:                                    # secure.runpod and community.runpod
 
 vast:                                      # vast.ai: cheapest fitting machine first
   gpu_names: [RTX A6000, A40, L40, L40S, RTX 6000Ada]   # Vast.ai's names for the cards
-  min_gpu_ram_gb: 44
+  # min_gpu_ram_gb: 48                     # optional; the profile's min_vram_gib always applies
   min_reliability: 0.98                    # the host's track record, 0..1
   min_download_mbps: 500                   # the first start downloads ~40 GB
   max_download_usd_per_tb: 10              # some hosts charge for downloads
+  # avoid_machines_hours: 24               # skip a machine that failed to start the container, or `down --avoid`
   # registry_user: <user>                  # for a private image, with REGISTRY_TOKEN
 
 worker:

@@ -64,6 +64,13 @@ class NodeSpec(BaseModel):
     gpu_memory_utilization: float = Field(
         default=0.90, gt=0, le=1, description="Fraction of VRAM vLLM may use."
     )
+    gpu_memory_target_gib: float | None = Field(
+        default=None, ge=0,
+        description="GiB of each GPU the backend may use. When set (above 0) it decides: "
+                    "the worker turns it into `gpu_memory_utilization` for its own GPU, "
+                    "so the profile takes the same memory on any card and leaves the "
+                    "rest to other workers. None or 0: `gpu_memory_utilization` applies.",
+    )
     max_concurrent_requests: int = Field(
         default=4, ge=1,
         description="Router admission cap: max in-flight requests sent to one worker "

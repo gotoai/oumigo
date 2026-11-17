@@ -42,6 +42,7 @@ import httpx
 
 from oumigo.protocol.messages import MetricPoint, MetricsReport
 from oumigo.service.worker import client
+from oumigo.service.worker.gpus import first_gpu, selected_gpus
 
 log = logging.getLogger("oumigo.service.worker.metrics")
 
@@ -196,25 +197,36 @@ class _GpuSampler:
 
     ``start`` picks a backend once (NVML init is not free); ``sample`` is called on
     the grid; ``close`` releases NVML. A node with no GPU / no tooling stays silent.
+    Only the worker's own GPUs are read when it has chosen some (`--gpu-id`, or
+    `CUDA_VISIBLE_DEVICES`), each reported under its nvidia-smi index (`gpu:#1_*`), so
+    two workers sharing a machine do not both report each other's GPU.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, devices: list[str] | None = None) -> None:
         self._mode: str | None = None
         self._nvml = None
         self._handles: list = []
+        self._indexes: list[int] = []
+        self._devices = devices
 
     def start(self) -> None:
         try:
             import pynvml  # type: ignore[import-untyped]  # optional, GPU-only dep, no stubs
         except ImportError:
             pynvml = None
+        if self._devices is None:
+            self._devices = selected_gpus()
         if pynvml is not None:
             try:
                 pynvml.nvmlInit()
-                self._handles = [
-                    pynvml.nvmlDeviceGetHandleByIndex(i)
-                    for i in range(pynvml.nvmlDeviceGetCount())
-                ]
+                if self._devices:
+                    self._handles = [_nvml_handle(pynvml, d) for d in self._devices]
+                else:
+                    self._handles = [
+                        pynvml.nvmlDeviceGetHandleByIndex(i)
+                        for i in range(pynvml.nvmlDeviceGetCount())
+                    ]
+                self._indexes = [int(pynvml.nvmlDeviceGetIndex(h)) for h in self._handles]
                 self._nvml = pynvml
                 self._mode = "pynvml"
                 log.info("GPU metrics via NVML (%d device(s))", len(self._handles))
@@ -245,7 +257,7 @@ class _GpuSampler:
         out: dict[str, float] = {}
         n = self._nvml
         assert n is not None
-        for i, h in enumerate(self._handles):
+        for i, h in zip(self._indexes, self._handles):
             util = vram_used = vram_total = temp = power = None
             try:
                 util = n.nvmlDeviceGetUtilizationRates(h).gpu
@@ -271,8 +283,11 @@ class _GpuSampler:
     def _sample_smi(self) -> dict[str, float]:
         query = "index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
         try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            argv = ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"]
+            if self._devices:
+                argv += ["-i", ",".join(self._devices)]
+            proc = subprocess.run(
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=3.0,
@@ -283,18 +298,27 @@ class _GpuSampler:
         return _parse_smi_csv(proc.stdout)
 
 
-def probe_gpu0_name() -> str | None:
-    """One-shot model name of GPU 0 (e.g. 'Tesla P40', 'NVIDIA GeForce RTX 3080 Ti
-    Laptop GPU'), for the worker's reported capabilities. NVML first, else nvidia-smi;
-    None when neither is available. Neither path initializes a CUDA context (no VRAM
-    cost), so it's safe to call from the coordinator alongside the backend's own context.
+def _nvml_handle(pynvml, device: str):  # type: ignore[no-untyped-def]
+    """An NVML handle for a GPU id as nvidia-smi gives it: an index, or a UUID."""
+    if device.isdigit():
+        return pynvml.nvmlDeviceGetHandleByIndex(int(device))
+    return pynvml.nvmlDeviceGetHandleByUUID(device)
+
+
+def probe_gpu_name(device: str | None = None) -> str | None:
+    """One-shot model name of the worker's GPU (e.g. 'Tesla P40', 'NVIDIA GeForce RTX 3080
+    Ti Laptop GPU'), for its reported capabilities: `device`, else the first one it chose,
+    else GPU 0. NVML first, else nvidia-smi; None when neither is available. Neither path
+    initializes a CUDA context (no VRAM cost), so it's safe to call from the coordinator
+    alongside the backend's own context.
     """
+    device = device or first_gpu()
     try:
         import pynvml  # type: ignore[import-untyped]  # optional, GPU-only dep, no stubs
 
         pynvml.nvmlInit()
         try:
-            name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
+            name = pynvml.nvmlDeviceGetName(_nvml_handle(pynvml, device))
             return name.decode() if isinstance(name, bytes) else name
         finally:
             pynvml.nvmlShutdown()
@@ -302,8 +326,8 @@ def probe_gpu0_name() -> str | None:
         pass
     if shutil.which("nvidia-smi"):
         try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", "0"],
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", device],
                 capture_output=True, text=True, timeout=3.0, check=True,
             )
             name = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
@@ -313,15 +337,17 @@ def probe_gpu0_name() -> str | None:
     return None
 
 
-def probe_gpu0_vram_gib() -> float | None:
-    """One-shot total VRAM of GPU 0 in GiB (NVML first, else nvidia-smi); None when
-    neither is available. Like `probe_gpu0_name`, it creates no CUDA context."""
+def probe_gpu_vram_gib(device: str | None = None) -> float | None:
+    """One-shot total VRAM in GiB of `device`, else the first GPU the worker chose, else
+    GPU 0 (NVML first, else nvidia-smi); None when neither is available. Like
+    `probe_gpu_name`, it creates no CUDA context."""
+    device = device or first_gpu()
     try:
         import pynvml  # type: ignore[import-untyped]  # optional, GPU-only dep, no stubs
 
         pynvml.nvmlInit()
         try:
-            info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(0))
+            info = pynvml.nvmlDeviceGetMemoryInfo(_nvml_handle(pynvml, device))
             return info.total / 2**30
         finally:
             pynvml.nvmlShutdown()
@@ -329,9 +355,9 @@ def probe_gpu0_vram_gib() -> float | None:
         pass
     if shutil.which("nvidia-smi"):
         try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            proc = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits",
-                 "-i", "0"],
+                 "-i", device],
                 capture_output=True, text=True, timeout=3.0, check=True,
             )
             mib = _smi_float(proc.stdout.strip().splitlines()[0])
