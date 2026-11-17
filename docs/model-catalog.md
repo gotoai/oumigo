@@ -40,7 +40,8 @@ model: google/gemma-4-31B-it-qat-w4a16-ct   # the weights: a Hugging Face repo
 description: Gemma 4 31B instruct, Google QAT W4A16, 128k context, one request at a time
 engine:                                     # start-time settings → `vllm serve`
   max_model_len: 131072
-  gpu_memory_utilization: 0.90
+  gpu_memory_utilization: 0.90              # share of the GPU's total memory
+  # gpu_memory_target_gib: 3.0              # or: GiB it needs; then this decides (below)
   dtype: auto
   tensor_parallel_size: 1
   max_concurrent_requests: 1                # the router's per-worker admission cap
@@ -58,7 +59,7 @@ agent:                                      # client timeouts served at /agent-d
   turn_timeout: 1800.0
   stall_timeout: 600.0
 requires:                                   # checked by the worker before it loads anything
-  min_vram_gib: 44                          # total VRAM of GPU 0
+  min_vram_gib: 44                          # total VRAM of the worker's GPU
   vllm: ">=0.28"                            # version specifier
 tested: RTX A6000 48 GB, vLLM 0.28.0        # informational
 ```
@@ -70,6 +71,19 @@ manager's own `agent:` block then applies.
 A profile's `task` says what its model is for: `chat` (the default) or `embed` for an
 embedding model, which may also carry an `embed:` block with its vector size and its
 query/document prompts. See [embeddings.md](embeddings.md).
+
+**Memory: a share, or a target in GiB.** vLLM takes `gpu_memory_utilization` as a share
+of the GPU's *total* memory, so a profile with only a share takes more of a bigger card,
+and a share that suits one card is wrong for another. `gpu_memory_target_gib` states the
+memory the model needs instead; when it is set (above 0), each worker works out its own
+share from its GPU's size (3 GiB on a 16 GB card is 0.1875, on a 48 GB card 0.0625) and the
+profile's `gpu_memory_utilization` is not used. The rest of the GPU stays free, so another
+worker can run beside it (see [Workers: choosing a GPU](#workers-choosing-a-gpu)). A worker
+whose GPU is smaller than the target, or whose GPU size cannot be read, exits with a
+message. The shipped embedding profiles set it from measurements: 2.0 GiB for
+ruri-v3-310m@8k, 3.0 for harrier-oss-v1-0.6b@8k, 6.0 for harrier-oss-v1-0.6b@32k. An
+embedding model needs little memory beyond its weights: the KV cache only has to hold the
+longest input once, and more of it made these models no faster.
 
 `requires` turns a slow failure into a fast one: a worker whose GPU is too small exits with
 "profile … needs a GPU with at least 44 GiB; GPU 0 has 15.6 GiB" before it downloads or
@@ -171,6 +185,39 @@ environment:
 once, saying to use `OUMIGO_MODEL_PROFILE`; it doesn't ignore them, because an old `.env`
 would otherwise start the default model while its owner believes they chose another. For
 a different context length, choose or create a profile with that context.
+
+## Workers: choosing a GPU
+
+```bash
+OUMIGO_GPU_ID=1          # or: oumigo worker run --gpu-id 1
+```
+
+On a machine with several GPUs, each worker can run on its own: `--gpu-id` on the command
+line, else `OUMIGO_GPU_ID` in the environment, else in the worker's `.env`. A GPU id is
+what `nvidia-smi` shows: its index, counted from 0, or its UUID (`GPU-…`, from
+`nvidia-smi -L`), which stays the same when cards move between slots. A model sharded over
+several GPUs takes a comma-separated list, as many as its `tensor_parallel_size`.
+
+The worker passes the choice to vLLM as `CUDA_VISIBLE_DEVICES`, with
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` so that `1` means the same card to vLLM as to `nvidia-smi`,
+and uses the same GPUs for its own checks (`min_vram_gib`, `gpu_memory_target_gib`), the GPU
+it registers and the GPU metrics it reports. Without a choice, a `CUDA_VISIBLE_DEVICES`
+already set is honoured the same way; with neither, the worker uses GPU 0, as before.
+
+Two workers on one machine, one env file each:
+
+```bash
+# chat.env:  OUMIGO_MODEL_PROFILE=gemma-4-12B-it-qat-w4a16-ct@128k   OUMIGO_GPU_ID=0
+# embed.env: OUMIGO_MODEL_PROFILE=ruri-v3-310m@8k                    OUMIGO_GPU_ID=1
+oumigo worker run --env-file chat.env
+oumigo worker run --env-file embed.env
+```
+
+Two workers can also share one GPU when their memory adds up: give both the same id, and
+start the larger model first, since vLLM checks at startup that its memory is free. A
+profile with `gpu_memory_target_gib` takes only that much. Keep `OUMIGO_GPU_ID` in the
+per-worker env files, not in your shell: a variable already in the environment wins over
+every env file.
 
 ## Clients: choosing a model
 

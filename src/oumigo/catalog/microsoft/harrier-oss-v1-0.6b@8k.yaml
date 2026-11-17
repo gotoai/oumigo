@@ -4,7 +4,12 @@ description: Harrier OSS v1 0.6B, multilingual text embeddings (1024-d), 8k cont
 task: embed
 engine:
   max_model_len: 8192
-  # Sized for a GPU of its own (an embedding pod); not for sharing a GPU.
+  # What it needs on any GPU; the rest stays free for other workers. Measured
+  # 2026-11-17 (RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.31.0): 1.64 GiB fixed (weights,
+  # activations, CUDA graphs) plus 0.88 GiB of KV cache for one 8k input = 2.5 GiB;
+  # bursts of 8 x 8,176 tokens ran as fast at 3 GiB as at 13.
+  gpu_memory_target_gib: 3.0
+  # Used only when the target above is unset.
   gpu_memory_utilization: 0.85
   dtype: bfloat16
   tensor_parallel_size: 1
@@ -20,6 +25,6 @@ embed:
     bitext: "Instruct: Retrieve parallel sentences\nQuery: "
 requires:
   vllm: '>=0.28'
-  # 0.85 of this many GiB covers the share it was tested with on 16 GB.
+  # The smallest GPU worth giving it; the target above decides what it takes.
   min_vram_gib: 4
 tested: 'RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99994), 2.8 GiB used'

@@ -147,7 +147,10 @@ clients request. Each worker picks the profile that fits its GPU (`OUMIGO_MODEL_
 see [2.2](#22-configure)), or gets the default. OumiGo ships tested profiles; to add your
 own, or a variant with another context length, see [model-catalog.md](model-catalog.md).
 If vLLM runs out of memory while "Capturing CUDA graphs", the profile's
-`gpu_memory_utilization` is too high for that GPU: use or create a profile with a lower one.
+`gpu_memory_utilization` is too high for that GPU: use or create a profile with a lower one,
+or one with `gpu_memory_target_gib`, which takes the same GiB on any card. A machine with
+several GPUs can run one worker per GPU with `OUMIGO_GPU_ID` (see
+[model-catalog.md](model-catalog.md#workers-choosing-a-gpu)).
 
 ### 1.5 Run it as a service
 
@@ -439,6 +442,8 @@ cannot join a 0.4.x manager.
 | vLLM: `CUDA out of memory` while capturing CUDA graphs | The profile's `gpu_memory_utilization` is too high for this GPU: use or create a profile with a lower one |
 | Worker exits: `profile … is not allowed in this fleet` | `OUMIGO_MODEL_PROFILE` names a profile missing from `catalog.allow`; the message lists the allowed ones |
 | Worker exits: `needs a GPU with at least … GiB` | The profile's `requires.min_vram_gib` is larger than this GPU: pick a smaller profile |
+| Worker exits: `needs … GiB of GPU memory; GPU … has …` | The profile's `gpu_memory_target_gib` is larger than this GPU: pick a smaller profile, or another GPU with `OUMIGO_GPU_ID` |
+| vLLM: `Free memory on device … is less than desired GPU memory utilization` | Another process, often a second worker, holds that GPU's memory: start the larger model first, or give this worker another GPU (`OUMIGO_GPU_ID`) |
 | Client gets `404 model_not_found` | The request's `model` isn't a served model id: see `GET /v1/models`, or send `any-model` |
 | Client gets `401 missing or invalid API key` | No `Authorization: Bearer <key>`, a mistyped key, or a revoked key |
 | Client gets `503 model_loading` ("… is starting") | A worker is still loading the model: wait, or watch it in the worker's log |

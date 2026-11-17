@@ -177,11 +177,12 @@ def test_a_worker_quits_when_the_manager_hands_out_no_profile(monkeypatch) -> No
 
 
 def test_requirements_stop_a_worker_that_cannot_run_the_profile(monkeypatch) -> None:
-    monkeypatch.setattr(coordinator, "probe_gpu0_vram_gib", lambda: 15.6)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(coordinator, "probe_gpu_vram_gib", lambda gpu=None: 15.6)
     with pytest.raises(SystemExit, match="at least 40 GiB; GPU 0 has 15.6 GiB"):
         coordinator._check_requirements(_profile_spec(min_vram_gib=40), "vllm")
     coordinator._check_requirements(_profile_spec(min_vram_gib=15), "vllm")
-    monkeypatch.setattr(coordinator, "probe_gpu0_vram_gib", lambda: None)   # unknown: skip
+    monkeypatch.setattr(coordinator, "probe_gpu_vram_gib", lambda gpu=None: None)  # unknown: skip
     coordinator._check_requirements(_profile_spec(min_vram_gib=40), "vllm")
 
 
