@@ -86,8 +86,6 @@ from fastapi.routing import APIRoute
 from oumigo import __version__
 from oumigo.config.catalog import ANY_MODEL, FleetCatalog, Profile
 from oumigo.config.spec import TASK_CHAT, TASK_EMBED, Task
-from oumigo.protocol.messages import Transport
-from oumigo.protocol.states import NodeState
 from oumigo.service.manager.control.registry import NodeRecord, Registry
 from oumigo.service.manager.credentials import AuthStore, bearer
 from oumigo.service.manager.router.shaping import (
@@ -96,6 +94,8 @@ from oumigo.service.manager.router.shaping import (
     shaping_headers,
 )
 from oumigo.service.manager.tunnel import TunnelRegistry, TunnelTransport, tunnel_host
+from oumigo.protocol.messages import Transport
+from oumigo.protocol.states import NodeState
 
 log = logging.getLogger("oumigo.service.manager.router")
 
@@ -516,7 +516,7 @@ def create_router_app(
                 return _model_error(400, "invalid_input_type", str(exc), param="input_type")
             body = json.dumps(payload).encode()
         if named is not None:
-            eligible: Eligible = lambda r: _served(r) == named and r.task == task
+            eligible: Eligible = lambda r: _served(r) == named and r.task == task  # noqa: E731
         else:
             eligible = _is_chat
 

@@ -286,7 +286,7 @@ class _GpuSampler:
             argv = ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"]
             if self._devices:
                 argv += ["-i", ",".join(self._devices)]
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
                 argv,
                 capture_output=True,
                 text=True,
@@ -326,7 +326,7 @@ def probe_gpu_name(device: str | None = None) -> str | None:
         pass
     if shutil.which("nvidia-smi"):
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", device],
                 capture_output=True, text=True, timeout=3.0, check=True,
             )
@@ -355,7 +355,7 @@ def probe_gpu_vram_gib(device: str | None = None) -> float | None:
         pass
     if shutil.which("nvidia-smi"):
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
                 ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits",
                  "-i", device],
                 capture_output=True, text=True, timeout=3.0, check=True,

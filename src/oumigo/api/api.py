@@ -109,9 +109,9 @@ def oumigo_get_or_create_manager(
     control_cfg = cfg.get("control_plane") or {}
     bearer_token = _pick(bearer_token, cfg.get("bearer_token"), None)
     provider = _pick(provider, cfg.get("provider"), "LAN")
-    data_host = _pick(data_host, data_cfg.get("host"), "0.0.0.0")
+    data_host = _pick(data_host, data_cfg.get("host"), "0.0.0.0")  # noqa: S104 - bind all interfaces
     data_port = int(_pick(data_port, data_cfg.get("port"), 7012))
-    control_host = _pick(control_host, control_cfg.get("host"), "0.0.0.0")
+    control_host = _pick(control_host, control_cfg.get("host"), "0.0.0.0")  # noqa: S104 - bind all
     control_port = int(_pick(control_port, control_cfg.get("port"), 7014))
     catalog = _pick(catalog, cfg.get("catalog"), None)
 
@@ -341,7 +341,7 @@ def _spawn_child(argv: list[str], env: dict[str, str]) -> subprocess.Popen:
     New session isolates it from a terminal Ctrl-C (this process owns its lifecycle),
     while ``PR_SET_PDEATHSIG`` guarantees it exits even if this process is hard-killed.
     """
-    return subprocess.Popen(
+    return subprocess.Popen(  # noqa: S603 - fixed argv (sys.executable + module path)
         argv, env=env, start_new_session=True, preexec_fn=die_with_parent_preexec()
     )
 

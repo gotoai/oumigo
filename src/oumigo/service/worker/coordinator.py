@@ -39,9 +39,10 @@ from oumigo.protocol.messages import (
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.providers.static import CUSTOM
 from oumigo.service.worker import client
-from oumigo.service.worker.gpus import select_gpus, selected_gpus
 from oumigo.service.worker.identity import resolve_worker_identity
+from oumigo.service.worker.gpus import select_gpus, selected_gpus
 from oumigo.service.worker.metrics import MetricsCollector, probe_gpu_name, probe_gpu_vram_gib
+from oumigo.service.worker.tunnel import TunnelClient
 from oumigo.service.worker.supervisor import (
     HFProcess,
     PortUnavailable,
@@ -49,7 +50,6 @@ from oumigo.service.worker.supervisor import (
     _ServerProcess,
     find_free_port,
 )
-from oumigo.service.worker.tunnel import TunnelClient
 
 log = logging.getLogger("oumigo.service.worker")
 

@@ -168,7 +168,7 @@ class _ServerProcess:
         # still holding VRAM. `die_with_parent_preexec` (PR_SET_PDEATHSIG) is the backstop:
         # if the coordinator itself dies, the kernel SIGTERMs the backend. stdout/stderr are
         # still inherited, so the backend's logs stream to the coordinator as before.
-        self._proc = subprocess.Popen(
+        self._proc = subprocess.Popen(  # noqa: S603 - argv built from a typed spec
             self.argv,
             start_new_session=True,
             preexec_fn=die_with_parent_preexec(),
