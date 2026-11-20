@@ -106,7 +106,7 @@ The script refuses to run if this file is readable by anyone but its owner.
 ([example](../deploy/pods/pods.example.yaml)). The parts that choose the machine:
 
 ```yaml
-image: ghcr.io/<owner>/oumigo-worker:0.5.5-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.7-vllm0.28.0-cu129
 disk_gb: 80                      # weights + caches; there is no volume
 
 search:

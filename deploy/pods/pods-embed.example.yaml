@@ -2,12 +2,12 @@
 #
 #   oumigo_pods.py -c /etc/oumigo/pods-embed.yaml up --wait
 #
-# The pod runs two profiles, one worker each, on one GPU (oumigo 0.5.6+). The GPU must
+# The pod runs two profiles, one worker each, on one GPU (oumigo 0.5.7+). The GPU must
 # hold the sum of their min_vram_gib: harrier@32k 8 + ruri 4 = 12 GiB, so 12 GB cards
 # and up; smaller listed cards are skipped. Secrets as in pods.example.yaml.
 
 name: oumigo-embed                         # also names the state file; one pod per name
-image: ghcr.io/<owner>/oumigo-worker:0.5.6-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.7-vllm0.28.0-cu129
 gpu_count: 1
 disk_gb: 40                                # the unpacked image (Vast.ai counts it) + ~3 GB of weights and caches
 
