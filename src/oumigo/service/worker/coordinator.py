@@ -21,6 +21,7 @@ import os
 import signal
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -60,6 +61,10 @@ BACKENDS = (BACKEND_VLLM, BACKEND_TRANSFORMER)
 
 ENV_BACKEND_API_KEY = "VLLM_API_KEY"  # read by vLLM and by the HF server
 ENV_MODEL_PROFILE = "OUMIGO_MODEL_PROFILE"  # the catalog profile this worker runs
+# `min_vram_gib` is a card size as sold, and NVML reports a little less: 12282 MiB for a
+# 12 GB RTX 4070, 8151 MiB for an 8 GB RTX 5060 Ti. A card within this of the size counts
+# as that size. oumigo_pods.py filters rented cards the same way.
+VRAM_SLACK_GIB = 0.5
 
 
 class WorkerCoordinator:
@@ -85,6 +90,7 @@ class WorkerCoordinator:
         metrics_report_s: float = 30.0,
         metrics_capacity_s: float = 1800.0,
         metrics_evict_chunk_s: float = 300.0,
+        on_serving: Callable[[], None] | None = None,
     ) -> None:
         self.manager_url = manager_url
         # `token` starts as the join token; registration swaps in this node's own token
@@ -122,6 +128,9 @@ class WorkerCoordinator:
         self.supervisor: _ServerProcess | None = None
         self.metrics: MetricsCollector | None = None
         self._restarts = 0
+        # Called once, the first time the backend serves (the multi-profile supervisor
+        # starts the next profile then); later restarts don't call it again.
+        self._on_serving = on_serving
 
         self._stop = threading.Event()   # graceful stop requested (signal or STOP command)
         self._force = threading.Event()  # second signal: stop draining, kill now
@@ -177,6 +186,9 @@ class WorkerCoordinator:
                 self.node_state = NodeState.SERVING
                 if self.metrics is not None:
                     self.metrics.mark_serving()  # stamp vllm:start_timestamp on this edge
+                if self._on_serving is not None:
+                    on_serving, self._on_serving = self._on_serving, None
+                    on_serving()
             if self.node_state == NodeState.SERVING:
                 self.run_state = sup.run_state()
             return
@@ -542,7 +554,7 @@ def _check_requirements(spec: NodeSpec, backend: str) -> None:
             if vram is None:
                 log.warning("cannot read GPU %s's VRAM; skipping the profile's %.0f GiB "
                             "check", gpu, spec.min_vram_gib)
-            elif vram < spec.min_vram_gib:
+            elif vram < spec.min_vram_gib - VRAM_SLACK_GIB:
                 raise SystemExit(
                     f"profile {spec.served_name} needs a GPU with at least "
                     f"{spec.min_vram_gib:g} GiB; GPU {gpu} has {vram:.1f} GiB. Choose a "
@@ -604,12 +616,14 @@ def run_worker(
     backend: str = BACKEND_VLLM,
     transport: str = Transport.DIRECT.value,
     gpu_id: str | None = None,
+    on_serving: Callable[[], None] | None = None,
 ) -> None:
     """Find the manager, fetch + env-negotiate the spec, preflight a port, derive
     identity, then hand off to the coordinator loop. The node_id is a hash of the host id +
     the *actual* backend port, so the port must be chosen before we register.
 
-    `gpu_id` (`--gpu-id` / `$OUMIGO_GPU_ID`) pins the worker to GPUs (`gpus`)."""
+    `gpu_id` (`--gpu-id` / `$OUMIGO_GPU_ID`) pins the worker to GPUs (`gpus`).
+    `on_serving` is called once, when the backend first serves."""
     if backend not in BACKENDS:
         raise SystemExit(f"unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}")
     _refuse_removed_env()
@@ -688,5 +702,5 @@ def run_worker(
     )
     WorkerCoordinator(
         manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend,
-        transport=transport,
+        transport=transport, on_serving=on_serving,
     ).run()

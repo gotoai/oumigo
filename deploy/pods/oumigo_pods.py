@@ -25,7 +25,9 @@ Providers, tried in the order of `search.providers` (or --providers):
          fault) is deleted, skipped by later searches for `vast.avoid_machines_hours`,
          and the next machine is tried. --dry-run only shows what each provider would
          offer. --profile runs another profile than `worker.profile`; either must be in
-         the manager's `catalog.allow`.
+         the manager's `catalog.allow`. Several profiles (a list, largest first) share
+         the pod's GPU: one worker each, and the GPU must hold the sum of their
+         `min_vram_gib`.
 `status` shows the pod as its provider sees it and the worker as the manager sees it.
 `down`   revokes the worker (the router stops sending it requests at once), deletes the
          pod, revokes the join token, and forgets the pod. --avoid also puts a Vast.ai
@@ -64,6 +66,7 @@ import yaml
 from oumigo.common.identity import compute_node_id
 from oumigo.config.catalog import CatalogError
 from oumigo.service.manager.settings import get_catalog
+from oumigo.service.worker.coordinator import VRAM_SLACK_GIB
 
 DEFAULT_CONFIG = Path("/etc/oumigo/pods.yaml")
 DEFAULT_SECRETS = Path("/etc/oumigo/pods.env")
@@ -146,7 +149,7 @@ class Settings:
         self.runpod: dict = cfg.get("runpod") or {}
         self.vast: dict = cfg.get("vast") or {}
         self.manager_url: str = _required(worker, "manager_url", config_path).rstrip("/")
-        self.profile: str | None = profile or worker.get("profile")
+        self.profiles: list[str] = profile_list(profile or worker.get("profile"))
         self.extra_env: dict[str, str] = {k: str(v) for k, v in (worker.get("env") or {}).items()}
         self.token_ttl: str = str(token.get("ttl", "13h"))
         self.token_uses: int = int(token.get("uses", 3))
@@ -161,35 +164,69 @@ class Settings:
         self.control_url = f"http://{'127.0.0.1' if host == '0.0.0.0' else host}:{control.get('port', 7014)}"
         self.vllm_port = int((manager.get("worker") or {}).get("vllm_port") or 7001)
         self.manager = manager
-        self.min_vram_gib: float | None = None   # set by check_profile(), for `up` only
+        self.min_vram_gib: float | None = None   # set by check_profiles(), for `up` only
         state_dir = Path((manager.get("auth") or {}).get("state_dir") or "/var/lib/oumigo")
         self.state_file = state_dir / "pods" / f"{self.name}.json"
 
-    def check_profile(self) -> None:
-        """Refuse a profile the manager doesn't allow; learn the GPU size it needs."""
-        self.min_vram_gib = profile_min_vram(self.manager, self.profile, self.manager_config)
+    def check_profiles(self) -> None:
+        """Refuse profiles the manager doesn't allow; learn the GPU size they need."""
+        self.min_vram_gib = profile_min_vram(self.manager, self.profiles, self.manager_config)
+        if len(self.profiles) > self.token_uses:
+            raise Fail(f"join_token.uses is {self.token_uses}, but each of the "
+                       f"{len(self.profiles)} profiles registers with the token: raise it")
+
+    def node_ids(self, host_id: str) -> list[str]:
+        """The pod's workers, one per profile. Started in turn, each takes the next free
+        port from the fleet's, and the port is part of its node id."""
+        return [compute_node_id(host_id, self.vllm_port + i)
+                for i in range(max(1, len(self.profiles)))]
 
     def within_bound(self, cost) -> bool:
         return self.max_price is None or (cost is not None and float(cost) <= self.max_price + 1e-9)
 
 
-def profile_min_vram(manager: dict, profile_id: str | None, path: Path) -> float | None:
-    """The smallest GPU (GiB) the pod's profile runs on, from the manager's own catalog.
+def profile_list(value) -> list[str]:
+    """`worker.profile` / --profile: one id, a comma-separated string, or a YAML list."""
+    items = value if isinstance(value, list) else str(value or "").split(",")
+    return [str(p).strip() for p in items if str(p).strip()]
 
-    Without a profile the worker runs the fleet default, so that one decides. Checking
-    here means a pod is never rented only for its worker to refuse the GPU.
+
+def profile_min_vram(manager: dict, profile_ids: list[str], path: Path) -> float | None:
+    """The smallest GPU (GiB) the pod's profiles run on, from the manager's own catalog.
+
+    Without a profile the worker runs the fleet default, so that one decides. Several
+    profiles share the GPU, so each needs a fixed `gpu_memory_target_gib` (a share of the
+    GPU cannot be added up), and the GPU must hold the sum of their `min_vram_gib`: each
+    is the smallest GPU worth giving that profile alone, headroom included. Checking here
+    means a pod is never rented only for its workers to refuse the GPU.
     """
     try:
         catalog = get_catalog(manager)
     except CatalogError as exc:
         raise Fail(f"{path}: {exc}") from None
-    chosen = catalog.get(profile_id) if profile_id else catalog.default_profile
-    if chosen is None:
-        if profile_id:
+    if not profile_ids:
+        if catalog.default_profile is None:
+            raise Fail(f"no profile: set worker.profile or --profile, or catalog.default "
+                       f"in {path}")
+        return catalog.default_profile.requires.min_vram_gib
+    chosen = []
+    for profile_id in profile_ids:
+        profile = catalog.get(profile_id)
+        if profile is None:
             raise Fail(f"profile {profile_id} is not in catalog.allow of {path} "
                        f"(allowed: {', '.join(catalog.profiles)})")
-        raise Fail(f"no profile: set worker.profile or --profile, or catalog.default in {path}")
-    return chosen.requires.min_vram_gib
+        chosen.append(profile)
+    if len(chosen) == 1:
+        return chosen[0].requires.min_vram_gib
+    if shares := [p.id for p in chosen if p.engine.gpu_memory_target_gib is None]:
+        raise Fail(f"{', '.join(shares)}: no gpu_memory_target_gib, so a share of the GPU "
+                   "rather than a fixed amount, which cannot share the GPU with other profiles")
+    return sum(p.requires.min_vram_gib or p.engine.gpu_memory_target_gib for p in chosen)
+
+
+def state_node_ids(state: dict) -> list[str]:
+    """The recorded pod's node ids (a state file from before 0.5.6 holds one `node_id`)."""
+    return list(state.get("node_ids") or ([state["node_id"]] if state.get("node_id") else []))
 
 
 def cuda_from_tag(image: str) -> str | None:
@@ -276,7 +313,7 @@ class RunPod:
         return data.get("data") or {}, errors
 
     def offers(self) -> list[tuple[str, float | None]]:
-        """The listed GPU types big enough for the profile and within the price bound, in
+        """The listed GPU types big enough for the profiles and within the price bound, in
         the listed order, with prices.
 
         Prices are RunPod's list prices; the pod's actual price is checked again once it
@@ -294,7 +331,7 @@ class RunPod:
                 log(f"{self.name}: unknown GPU type {gpu!r}, skipped")
                 continue
             if self.s.min_vram_gib and (memory[gpu] or 0) < self.s.min_vram_gib:
-                continue                          # too small for the profile
+                continue                          # too small for the profiles
             cost = listed[gpu] * self.s.gpu_count if listed[gpu] else None
             if not cost:
                 continue                          # not offered in this cloud
@@ -378,9 +415,12 @@ class Vast:
         self.key = s.secrets.get("VAST_API_KEY")
         cfg = s.vast
         self.gpu_names: list[str] = list(cfg.get("gpu_names") or VAST_GPUS)
-        # The profile's minimum is always applied; `min_gpu_ram_gb` can only raise it.
+        # The profiles' minimum is always applied; `min_gpu_ram_gb` can only raise it.
+        # Vast.ai reports what NVML does, a little under the size sold (12282 MiB for a
+        # 12 GB RTX 4070), so a card within VRAM_SLACK_GIB of the minimum fits, as it does
+        # for the worker's own check.
         self.min_gpu_ram_mb = max(float(cfg.get("min_gpu_ram_gb", 0)) * 1000,
-                                  (s.min_vram_gib or 0) * 1024)
+                                  max(0.0, (s.min_vram_gib or 0) - VRAM_SLACK_GIB) * 1024)
         self.min_reliability = float(cfg.get("min_reliability", 0.98))
         self.min_download_mbps = float(cfg.get("min_download_mbps", 500))
         self.max_download_usd_per_tb = cfg.get("max_download_usd_per_tb", 10)
@@ -546,8 +586,8 @@ def manager_worker(s: Settings, node_id: str) -> dict | None:
 
 
 def cmd_dry_run(s: Settings) -> None:
-    s.check_profile()
-    print(f"{s.name}: profile {s.profile or '(fleet default)'}, GPU >= "
+    s.check_profiles()
+    print(f"{s.name}: profile {', '.join(s.profiles) or '(fleet default)'}, GPU >= "
           f"{f'{s.min_vram_gib:g} GiB' if s.min_vram_gib else 'any size'}, "
           f"CUDA >= {s.min_cuda or 'any'}, {s.gpu_count} GPU, "
           f"at most {price(s.max_price) if s.max_price else 'any price'}")
@@ -575,7 +615,7 @@ def cmd_dry_run(s: Settings) -> None:
 
 
 def cmd_up(s: Settings, wait: bool, wait_timeout: float) -> None:
-    s.check_profile()
+    s.check_profiles()
     state = load_state(s)
     if state and provider(s, state["provider"]).get(state["pod_id"]):
         raise Fail(f"pod {state['pod_id']} ({s.name}) is already up on {state['provider']}; "
@@ -594,13 +634,13 @@ def cmd_up(s: Settings, wait: bool, wait_timeout: float) -> None:
     token_id, token = mint_join_token(s, label=f"pod {s.name} {stamp}")
     log(f"minted join token {token_id} (ttl {s.token_ttl}, {s.token_uses} uses)")
 
-    # The worker's identity, the same on any provider and across container restarts.
+    # The workers' identity, the same on any provider and across container restarts.
     host_id = f"{s.name}-{secrets.token_hex(6)}"
-    node_id = compute_node_id(host_id, s.vllm_port)
+    node_ids = s.node_ids(host_id)
     env = {"OUMIGO_MANAGER_URL": s.manager_url, "OUMIGO_JOIN_TOKEN": token,
            "OUMIGO_HOST_ID": host_id, **s.extra_env}
-    if s.profile:
-        env["OUMIGO_MODEL_PROFILE"] = s.profile
+    if s.profiles:
+        env["OUMIGO_MODEL_PROFILE"] = ",".join(s.profiles)
     if s.hf_token:
         env["HF_TOKEN"] = s.hf_token
     # The token stays valid while a pod may still use it (a pod left to start without
@@ -611,16 +651,17 @@ def cmd_up(s: Settings, wait: bool, wait_timeout: float) -> None:
             chosen, pod = find_machine(s, usable, env)
             pod_up = True
             save_state(s, {"name": s.name, "provider": chosen.name, "pod_id": pod["pod_id"],
-                           "host_id": host_id, "node_id": node_id, "join_token_id": token_id,
-                           "profile": s.profile, "gpu": pod["gpu"], "price": pod["price"],
+                           "host_id": host_id, "node_ids": node_ids, "join_token_id": token_id,
+                           "profiles": s.profiles, "gpu": pod["gpu"], "price": pod["price"],
                            "machine": pod.get("machine"),
                            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             log(f"created pod {pod['pod_id']} ({s.name}) on {chosen.name}: {pod['gpu'] or '?'} in "
-                f"{pod['where'] or '?'}, {price(pod['price'])}, expected node {node_id}")
+                f"{pod['where'] or '?'}, {price(pod['price'])}, expected "
+                f"node{'s' if len(node_ids) > 1 else ''} {', '.join(node_ids)}")
             if not wait:
                 return
             try:
-                wait_serving(s, chosen, pod["pod_id"], node_id, wait_timeout)
+                wait_serving(s, chosen, pod["pod_id"], node_ids, wait_timeout)
                 return
             except HostFailed as exc:
                 # The worker never ran, so there is nothing to revoke; the token and the
@@ -664,13 +705,16 @@ def find_machine(s: Settings, usable: list, env: dict[str, str]) -> tuple:
         attempt += 1
 
 
-def wait_serving(s: Settings, p, pod_id: str, node_id: str, timeout: float) -> None:
-    start, last = time.monotonic(), None
+def wait_serving(s: Settings, p, pod_id: str, node_ids: list[str], timeout: float) -> None:
+    """Until every worker of the pod serves. Several start in turn, so a later one shows
+    as not registered while an earlier one loads."""
+    start, last = time.monotonic(), {}
     while time.monotonic() - start < timeout:
-        worker = manager_worker(s, node_id)
-        if worker:
-            state = worker.get("state")
-        else:
+        states = {}
+        for node_id in node_ids:
+            worker = manager_worker(s, node_id)
+            states[node_id] = worker.get("state") if worker else None
+        if None in states.values():
             pod = p.get(pod_id)
             if pod and pod["state"] == "failed":
                 if pod.get("host_fault"):
@@ -680,17 +724,20 @@ def wait_serving(s: Settings, p, pod_id: str, node_id: str, timeout: float) -> N
             if pod is None or pod["state"] == "stopped":
                 detail = f": {pod['detail']}" if pod and pod.get("detail") else ""
                 raise Fail(f"pod {pod_id} is {pod['status'] if pod else 'gone'} "
-                           f"before the worker joined{detail}")
-            state = f"not registered (pod {pod['status']})"
-        if state != last:
-            log(f"worker {node_id}: {state} (+{time.monotonic() - start:.0f}s)")
-            last = state
-        if state == "serving":
+                           f"before its workers joined{detail}")
+            states = {n: state or f"not registered (pod {pod['status']})"
+                      for n, state in states.items()}
+        for node_id, state in states.items():
+            if state != last.get(node_id):
+                log(f"worker {node_id}: {state} (+{time.monotonic() - start:.0f}s)")
+            if state in ("failed", "lost", "stopped"):
+                raise Fail(f"worker {node_id} is {state}; see the pod's logs on {p.name}")
+        last = states
+        if all(state == "serving" for state in states.values()):
             return
-        if state in ("failed", "lost", "stopped"):
-            raise Fail(f"worker {node_id} is {state}; see the pod's logs on {p.name}")
         time.sleep(15)
-    raise Fail(f"worker {node_id} not serving after {timeout:.0f}s")
+    waiting = [n for n, state in last.items() if state != "serving"] or node_ids
+    raise Fail(f"worker {', '.join(waiting)} not serving after {timeout:.0f}s")
 
 
 def cmd_status(s: Settings) -> None:
@@ -707,12 +754,13 @@ def cmd_status(s: Settings) -> None:
               f"created {state['created_at']}")
         if pod["state"] == "failed":
             print(f"  the container cannot start: {pod['detail']}")
-    worker = manager_worker(s, state["node_id"])
-    if worker:
-        print(f"worker {state['node_id']}: {worker.get('state')}, {worker.get('served_name')}, "
-              f"{worker.get('transport')}, gpu {(worker.get('capabilities') or {}).get('gpu')}")
-    else:
-        print(f"worker {state['node_id']}: not registered with the manager")
+    for node_id in state_node_ids(state):
+        worker = manager_worker(s, node_id)
+        if worker:
+            print(f"worker {node_id}: {worker.get('state')}, {worker.get('served_name')}, "
+                  f"{worker.get('transport')}, gpu {(worker.get('capabilities') or {}).get('gpu')}")
+        else:
+            print(f"worker {node_id}: not registered with the manager")
 
 
 def cmd_down(s: Settings, pod_id: str | None, provider_name: str | None,
@@ -739,11 +787,12 @@ def cmd_down(s: Settings, pod_id: str | None, provider_name: str | None,
     # Revoke first: the router stops routing to it and drops its tunnels within seconds,
     # so deleting the pod cannot cut a client's request mid-stream.
     # Deleting the pod is what stops the bill, so a failed revoke only warns.
-    node_id = state.get("node_id")
-    if node_id:
+    node_ids = state_node_ids(state)
+    for node_id in node_ids:
         done = oumigo(s, "node", "revoke", node_id)
         log(f"revoked node {node_id}" if done.returncode == 0
             else f"warning: node revoke failed: {done.stderr.strip()}")
+    if node_ids:
         time.sleep(5)
     else:
         log("warning: the pod's node is unknown, so it is not revoked first")
@@ -753,7 +802,7 @@ def cmd_down(s: Settings, pod_id: str | None, provider_name: str | None,
         p.avoid(machine, f"pod {pod_id} taken down with `down --avoid`")
     if token_id := state.get("join_token_id"):
         oumigo(s, "token", "revoke", token_id)  # fails harmlessly once the token is spent
-    if node_id:
+    for node_id in node_ids:
         # The host id is never reused, so the revocation has done its job.
         oumigo(s, "node", "unrevoke", node_id)
     if state:
@@ -779,7 +828,8 @@ def main() -> None:
                     help="seconds between searches when no machine fits (default 30)")
     up.add_argument("--search-timeout", type=float, metavar="S",
                     help="give up after searching this long; 0 searches once (default 1800)")
-    up.add_argument("--profile", help="catalog profile to run instead of worker.profile")
+    up.add_argument("--profile", help="catalog profile to run instead of worker.profile; "
+                    "comma-separated, largest first, for several on one GPU")
     up.add_argument("--dry-run", action="store_true", help="show what would be tried; rent nothing")
     up.add_argument("--wait", action="store_true", help="block until the worker serves")
     up.add_argument("--wait-timeout", type=float, default=1800, help="seconds (default 1800)")

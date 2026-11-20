@@ -92,18 +92,28 @@ def worker_run(
         help="Inference backend to supervise: 'vllm' (default) or 'transformer' "
         "(HF-transformers server; max_concurrent_requests forced to 1).",
     ),
+    ready_fd: Optional[int] = typer.Option(
+        None, "--ready-fd", hidden=True,
+        help="Internal, for the multi-profile supervisor: write to this file descriptor "
+        "once the backend serves.",
+    ),
 ) -> None:
     """Load the env file, resolve identity, find the manager, register, and supervise the backend.
 
     The env file is applied before anything reads the environment, so the node's own
     vars (OUMIGO_MODEL_PROFILE, MODEL_STORAGE_LOCATION / HF_HOME / HF_TOKEN, plus VLLM_*)
     reach the coordinator and the backend child process it spawns.
+
+    OUMIGO_MODEL_PROFILE may list several profiles, comma-separated and largest first:
+    one worker per profile then runs on this node, each started once the previous one
+    serves (see oumigo.service.worker.multi).
     """
     import logging
 
     from oumigo.common.env import load_env_file
     from oumigo.service.manager.auth import resolve_manager_token  # shared bearer token
     from oumigo.service.worker.coordinator import BACKENDS, run_worker
+    from oumigo.service.worker.multi import parse_profiles, ready_callback, run_profiles
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -131,6 +141,23 @@ def worker_run(
         typer.echo(f"error: unknown --transport {transport!r}; choose direct or tunnel.", err=True)
         raise typer.Exit(2)
 
+    try:
+        profiles = parse_profiles(os.environ.get("OUMIGO_MODEL_PROFILE"))
+    except ValueError as exc:
+        typer.echo(f"error: OUMIGO_MODEL_PROFILE: {exc}", err=True)
+        raise typer.Exit(2)
+    if len(profiles) > 1:
+        # Each child resolves its join token and the manager itself, from these options
+        # and the environment it inherits.
+        args = ["--transport", transport, "--discover-timeout", str(discover_timeout),
+                "--backend", backend]
+        for flag, value in (("--manager-url", manager_url), ("--token-file", token_file),
+                            ("--state-dir", state_dir), ("--env-file", env_file),
+                            ("--gpu-id", gpu_id)):
+            if value is not None:
+                args += [flag, str(value)]
+        raise typer.Exit(run_profiles(profiles, args))
+
     # Join token: $OUMIGO_JOIN_TOKEN, else the v1 names ($OUMIGO_MANAGER_TOKEN / --token-file).
     token = os.environ.get("OUMIGO_JOIN_TOKEN", "").strip() or None
     if token is None:
@@ -150,6 +177,7 @@ def worker_run(
         backend=backend,
         transport=transport,
         gpu_id=gpu_id,
+        on_serving=ready_callback(ready_fd) if ready_fd is not None else None,
     )
 
 

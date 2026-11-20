@@ -53,7 +53,7 @@ script sets these:
 | `OUMIGO_MANAGER_URL` | the manager's public URL |
 | `OUMIGO_JOIN_TOKEN` | a join token minted for this pod |
 | `OUMIGO_HOST_ID` | the worker's identity, made up per pod, so a restarted container rejoins as the same node |
-| `OUMIGO_MODEL_PROFILE` | the catalog profile to run (see [model-catalog.md](model-catalog.md)) |
+| `OUMIGO_MODEL_PROFILE` | the catalog profile to run (see [model-catalog.md](model-catalog.md)); several, comma-separated, share the GPU |
 | `HF_TOKEN` | read-only Hugging Face token, for gated models |
 
 ## 2. Prepare the providers
@@ -142,6 +142,21 @@ catalog and skips listed cards with less memory, on RunPod and Vast.ai alike. A 
 would refuse such a GPU anyway, after the pod was rented. `vast.min_gpu_ram_gb` can only
 raise that floor.
 
+**Several profiles in one pod.** `profile` may be a list, largest first, to run one worker
+per profile on the pod's GPU:
+
+```yaml
+worker:
+  profile: [harrier-oss-v1-0.6b@32k, ruri-v3-310m@8k]
+```
+
+The pod gets them as one comma-separated `OUMIGO_MODEL_PROFILE`, and starts them in that
+order, each once the previous one serves (see
+[model-catalog.md](model-catalog.md#several-profiles-on-one-gpu)). Each profile needs a
+fixed `gpu_memory_target_gib`, and the smallest GPU is then the sum of their
+`min_vram_gib` (here 8 + 4 = 12 GiB). Every worker registers with the join token, so
+`join_token.uses` must be at least the number of profiles; allow for restarts as well.
+
 **Price.** The bound is on the pod's hourly price, disk included. RunPod is checked
 against its list price before asking, and the new pod's actual price again after: a pod
 over the bound is deleted at once. Vast.ai searches within the bound. Two costs fall
@@ -179,8 +194,8 @@ $PODS up --profile gemma-4-12B-it-qat-w4a16-ct@128k --wait   # instead of worker
 ```
 
 **Several pods.** Each settings file runs one pod, named by its `name`. Give each kind
-of worker its own file and pass it with `-c`. For example, an embedding model on a small
-card next to the chat pod
+of worker its own file and pass it with `-c`. For example, two embedding models on one
+12 GB card next to the chat pod
 ([example](../deploy/pods/pods-embed.example.yaml)):
 
 ```bash
@@ -192,14 +207,14 @@ $PODS -c /etc/oumigo/pods-embed.yaml down
 
 1. Mints a join token (`join_token.ttl`, `join_token.uses`) labelled with the pod name.
 2. Asks each provider in turn for an on-demand machine: a listed GPU with at least the
-   profile's `min_vram_gib`, a host whose CUDA
+   profiles' `min_vram_gib`, a host whose CUDA
    version is at least the image's (from the tag, or `min_cuda_version`), within the
    price bound. The first provider with one wins.
 3. If none has one, waits `retry_interval` seconds and asks them all again, for up to
    `timeout` seconds. Then it fails, and the token is revoked.
-4. Records the provider, pod id, expected node id and token id (never the token) in
+4. Records the provider, pod id, expected node ids (one per profile) and token id (never the token) in
    `<auth state dir>/pods/<name>.json`.
-5. With `--wait`, waits until the worker is serving. If the worker fails or does not
+5. With `--wait`, waits until every worker is serving. If a worker fails or does not
    serve within `--wait-timeout` (default 30 minutes), the pod is deleted again: a pod
    that never serves only costs money.
 6. A Vast.ai machine whose Docker cannot start the container at all (for example
@@ -211,7 +226,7 @@ $PODS -c /etc/oumigo/pods-embed.yaml down
 
 **`down`**
 
-1. Revokes the worker on the manager: the router stops sending it requests and closes its
+1. Revokes the workers on the manager: the router stops sending it requests and closes its
    tunnels within seconds, so deleting the pod cannot cut a request mid-stream.
 2. Deletes the pod. Deleting, not stopping: without a volume a stopped pod keeps nothing
    worth paying for.

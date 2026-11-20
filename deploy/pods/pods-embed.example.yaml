@@ -1,15 +1,15 @@
-# oumigo_pods.py settings for an embedding worker on a small rented GPU:
+# oumigo_pods.py settings for the embedding models on one small rented GPU:
 #
 #   oumigo_pods.py -c /etc/oumigo/pods-embed.yaml up --wait
 #
-# The shipped embedding profiles take 0.85 of the GPU, so the pod runs nothing else.
-# Cards smaller than the profile's min_vram_gib are skipped (ruri and harrier@8k: 4 GiB,
-# harrier@32k: 8 GiB), so one GPU list serves all three. Secrets as in pods.example.yaml.
+# The pod runs two profiles, one worker each, on one GPU (oumigo 0.5.6+). The GPU must
+# hold the sum of their min_vram_gib: harrier@32k 8 + ruri 4 = 12 GiB, so 12 GB cards
+# and up; smaller listed cards are skipped. Secrets as in pods.example.yaml.
 
 name: oumigo-embed                         # also names the state file; one pod per name
-image: ghcr.io/<owner>/oumigo-worker:0.5.5-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.6-vllm0.28.0-cu129
 gpu_count: 1
-disk_gb: 40                                # the unpacked image (Vast.ai counts it) + ~2 GB of weights and caches
+disk_gb: 40                                # the unpacked image (Vast.ai counts it) + ~3 GB of weights and caches
 
 search:
   providers:
@@ -30,8 +30,10 @@ runpod:
   # registry_auth_id: <id>                 # RunPod registry credential, for a private image
 
 vast:
-  gpu_names: [RTX 3060, RTX 3070, RTX 3080, RTX 3060 Ti, RTX 3070 Ti, RTX 3080 Ti,
-              RTX A4000, RTX 4060, RTX A5000, RTX 5060, RTX 4060 Ti, RTX 5060 Ti]
+  # Some names come in several sizes (RTX 3080: 10 or 12 GB; 4060 Ti / 5060 Ti: 8 or
+  # 16 GB); only the ones big enough are offered.
+  gpu_names: [RTX 3060, RTX 3080, RTX 3080 Ti, RTX 4070, RTX 4070 Ti, RTX 4060 Ti,
+              RTX 5060 Ti, RTX A4000, RTX A5000]
   min_reliability: 0.98
   min_download_mbps: 500                   # the image is ~9 GB to pull
   max_download_usd_per_tb: 10
@@ -40,13 +42,13 @@ vast:
 
 worker:
   manager_url: https://oumigo.example.com
-  # One of ruri-v3-310m@8k, harrier-oss-v1-0.6b@8k, harrier-oss-v1-0.6b@32k; must be in
-  # the manager's catalog.allow. `up --profile` overrides it. An index built with one
-  # model can only be searched with that model.
-  profile: ruri-v3-310m@8k
+  # Started in this order, largest first; each must be in the manager's catalog.allow.
+  # `up --profile` overrides the list (comma-separated). Clients use harrier@32k: it
+  # accepts everything harrier@8k does and gives the same vectors.
+  profile: [harrier-oss-v1-0.6b@32k, ruri-v3-310m@8k]
 
 join_token:
   ttl: 13h
-  uses: 3
+  uses: 6                                  # each of the 2 workers registers once per container start
 
 manager_config: /etc/oumigo/manager.yaml

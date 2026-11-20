@@ -213,11 +213,33 @@ oumigo worker run --env-file chat.env
 oumigo worker run --env-file embed.env
 ```
 
-Two workers can also share one GPU when their memory adds up: give both the same id, and
-start the larger model first, since vLLM checks at startup that its memory is free. A
-profile with `gpu_memory_target_gib` takes only that much. Keep `OUMIGO_GPU_ID` in the
-per-worker env files, not in your shell: a variable already in the environment wins over
-every env file.
+Keep `OUMIGO_GPU_ID` in the per-worker env files, not in your shell: a variable already
+in the environment wins over every env file.
+
+### Several profiles on one GPU
+
+Several workers can share one GPU when their memory adds up. Each profile then needs a
+fixed `gpu_memory_target_gib`, which is all it takes; a profile that takes a share of
+the GPU (`gpu_memory_utilization`) cannot share it. List the profiles in one
+`OUMIGO_MODEL_PROFILE`, comma-separated and largest first:
+
+```bash
+OUMIGO_MODEL_PROFILE=harrier-oss-v1-0.6b@32k,ruri-v3-310m@8k oumigo worker run
+```
+
+`oumigo worker run` then starts one worker per profile, with the same options and
+environment, each once the previous one serves. The order matters twice: vLLM checks at
+startup that the memory its profile asks for is free, so two models loading at once can
+each count the other's memory as free; and each worker takes the next free port (7001,
+7002, ...), which is part of its node id, so a fixed order keeps every profile the same
+node across restarts. The workers are one unit: if one stops without being asked, the
+others are stopped too and the command exits non-zero, so a container platform or
+systemd restarts the whole set. A signal reaches every worker, which drains as it would
+alone.
+
+The smallest GPU for the set is the sum of the profiles' `min_vram_gib`: 8 + 4 = 12 GiB
+for the example. On a rented GPU, `worker.profile` takes the same list (see
+[gpu-pods.md](gpu-pods.md)).
 
 ## Clients: choosing a model
 

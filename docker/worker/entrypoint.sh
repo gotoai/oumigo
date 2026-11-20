@@ -5,7 +5,9 @@
 #   OUMIGO_JOIN_TOKEN    required (unless the manager runs without worker auth)
 #   OUMIGO_TRANSPORT     default: tunnel
 #   OUMIGO_HOST_ID       stable node identity; default: $RUNPOD_POD_ID when set
-#   OUMIGO_MODEL_PROFILE the catalog profile (= model id) to run; default: the fleet's
+#   OUMIGO_MODEL_PROFILE the catalog profile (= model id) to run; default: the fleet's.
+#                        Several, comma-separated and largest first, share the GPU: one
+#                        worker each, started in turn (oumigo 0.5.6+)
 #   HF_TOKEN             for gated models
 #   MODEL_STORAGE_LOCATION  optional: weights already on this node's disk (file:///...)
 #
