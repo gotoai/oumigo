@@ -102,9 +102,9 @@ OumiGo ships the profiles its maintainers have run, in `src/oumigo/catalog/<vend
 | `Qwen3.8-27B-W8A16@128k-c10` | `GotoAI-Inc/Qwen3.8-27B-W8A16` |
 | `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@256k-c8` | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` |
 | `Qwen3.5-9B@32k-bnb4` | `Qwen/Qwen3.5-9B` |
-| `ruri-v3-310m@8k` (embedding) | `cl-nagoya/ruri-v3-310m` |
-| `harrier-oss-v1-0.6b@8k` (embedding) | `microsoft/harrier-oss-v1-0.6b` |
-| `harrier-oss-v1-0.6b@32k` (embedding) | `microsoft/harrier-oss-v1-0.6b` |
+| `ruri-v3-310m@8k` (embedding) | `GotoAI-Inc/ruri-v3-310m-mirror` (mirror of `cl-nagoya/ruri-v3-310m`) |
+| `harrier-oss-v1-0.6b@8k` (embedding) | `GotoAI-Inc/harrier-oss-v1-0.6b-mirror` (mirror of `microsoft/harrier-oss-v1-0.6b`) |
+| `harrier-oss-v1-0.6b@32k` (embedding) | `GotoAI-Inc/harrier-oss-v1-0.6b-mirror` (mirror of `microsoft/harrier-oss-v1-0.6b`) |
 
 Each file's `tested:` line says what it was verified on. Untested templates to adapt live
 in [`config_examples/catalog/`](../config_examples/catalog/); they are not loaded

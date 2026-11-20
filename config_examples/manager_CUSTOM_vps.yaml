@@ -43,7 +43,7 @@ heartbeat:
 
 # --- Worker auth ---
 # Per-pod join tokens: `oumigo manager token create --ttl 1h --uses 1 -c <this file>`.
-# For a worker that restarts often (a laptop, a container image), create a long-lived one
+# For a worker that restarts often (a personal machine, a container image), create a long-lived one
 # instead: `--ttl never --uses 0 --label <name>`, revocable with `token revoke <id>`.
 # A reusable token (token_file or $OUMIGO_MANAGER_TOKEN) is optional.
 auth:

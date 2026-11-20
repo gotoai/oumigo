@@ -5,7 +5,7 @@ A worker's `node_id` is a stable hash of its *host id* and its *actual* vLLM por
 random UUID the worker persists in its state directory (or `$OUMIGO_HOST_ID`), so
 identity is:
 
-- **stable across restarts and address changes** — a pod or laptop whose IP moves
+- **stable across restarts and address changes** — a pod or machine whose IP moves
   (or a tunnel worker, whose address means nothing to the manager) re-registers as
   itself;
 - **unique per worker on a host** — a homogeneous fleet shares one configured port,

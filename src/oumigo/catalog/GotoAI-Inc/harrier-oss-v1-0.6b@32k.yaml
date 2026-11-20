@@ -1,11 +1,13 @@
 id: harrier-oss-v1-0.6b@32k
-model: microsoft/harrier-oss-v1-0.6b
+# Our byte-identical mirror of microsoft/harrier-oss-v1-0.6b at f9b9dc8, so the
+# service does not depend on the upstream repo staying up (llm-quantizer/mirror/).
+model: GotoAI-Inc/harrier-oss-v1-0.6b-mirror
 description: Harrier OSS v1 0.6B, multilingual text embeddings (1024-d), 32k context
 task: embed
 engine:
   max_model_len: 32768
   # What it needs on any GPU; the rest stays free for other workers. Measured
-  # 2026-11-17 (RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.31.0): 1.87 GiB fixed plus 3.5 GiB
+  # 2026-11-17 (16 GB GPU, vLLM 0.31.0): 1.87 GiB fixed plus 3.5 GiB
   # of KV cache for one 32k input = 5.4 GiB; bursts of 8 x 32,752 tokens ran as fast
   # at 5.3 GiB as at 13.
   gpu_memory_target_gib: 6.0
@@ -27,4 +29,4 @@ requires:
   vllm: '>=0.28'
   # The smallest GPU worth giving it; the target above decides what it takes.
   min_vram_gib: 8
-tested: 'RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99994), 6.5 GiB used'
+tested: '16 GB GPU, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99994), 6.5 GiB used'

@@ -306,8 +306,8 @@ def _nvml_handle(pynvml, device: str):  # type: ignore[no-untyped-def]
 
 
 def probe_gpu_name(device: str | None = None) -> str | None:
-    """One-shot model name of the worker's GPU (e.g. 'Tesla P40', 'NVIDIA GeForce RTX 3080
-    Ti Laptop GPU'), for its reported capabilities: `device`, else the first one it chose,
+    """One-shot model name of the worker's GPU (e.g. 'NVIDIA L4', 'NVIDIA RTX
+    A6000'), for its reported capabilities: `device`, else the first one it chose,
     else GPU 0. NVML first, else nvidia-smi; None when neither is available. Neither path
     initializes a CUDA context (no VRAM cost), so it's safe to call from the coordinator
     alongside the backend's own context.

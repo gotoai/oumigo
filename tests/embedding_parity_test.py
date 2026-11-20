@@ -39,7 +39,7 @@ from oumigo.service.worker.supervisor import VLLMProcess
 
 SHORT = [
     "東京駅から京都駅までの新幹線の所要時間は約2時間15分です。",
-    "日本の首都はどこですか?",
+    "日本一の大都市はどこですか?",
     "光合成は植物が光エネルギーを化学エネルギーに変換する過程である。",
     "How long does the bullet train take from Tokyo to Kyoto?",
     "Photosynthesis converts light energy into chemical energy in plants.",

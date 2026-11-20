@@ -21,4 +21,4 @@ agent:
   stall_timeout: 120.0
 requires:
   min_vram_gib: 15
-tested: RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0
+tested: 16 GB GPU, vLLM 0.28.0

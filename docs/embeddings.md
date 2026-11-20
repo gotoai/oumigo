@@ -13,7 +13,7 @@ embedding profile may add an `embed:` block:
 
 ```yaml
 id: ruri-v3-310m@8k
-model: cl-nagoya/ruri-v3-310m
+model: GotoAI-Inc/ruri-v3-310m-mirror
 description: Ruri v3 310M, Japanese text embeddings (768-d), 8k context
 task: embed                         # served with `vllm serve ... --runner pooling`
 engine:
@@ -43,9 +43,13 @@ embed:
 
 | Id | Weights | Language | Dims | Vectors | VRAM used | Smallest GPU | `tested` |
 |---|---|---|---|---|---|---|---|
-| `ruri-v3-310m@8k` | `cl-nagoya/ruri-v3-310m` | Japanese | 768 | **not normalised** | 1.5 GiB | 4 GiB | RTX 3080 Ti Laptop 16 GB |
-| `harrier-oss-v1-0.6b@8k` | `microsoft/harrier-oss-v1-0.6b` | multilingual | 1024 | unit length | 2.8 GiB | 4 GiB | RTX 3080 Ti Laptop 16 GB |
-| `harrier-oss-v1-0.6b@32k` | `microsoft/harrier-oss-v1-0.6b` | multilingual | 1024 | unit length | 6.5 GiB | 8 GiB | RTX 3080 Ti Laptop 16 GB |
+| `ruri-v3-310m@8k` | `GotoAI-Inc/ruri-v3-310m-mirror` | Japanese | 768 | **not normalised** | 1.5 GiB | 4 GiB | 16 GB GPU |
+| `harrier-oss-v1-0.6b@8k` | `GotoAI-Inc/harrier-oss-v1-0.6b-mirror` | multilingual | 1024 | unit length | 2.8 GiB | 4 GiB | 16 GB GPU |
+| `harrier-oss-v1-0.6b@32k` | `GotoAI-Inc/harrier-oss-v1-0.6b-mirror` | multilingual | 1024 | unit length | 6.5 GiB | 8 GiB | 16 GB GPU |
+
+The weights are GotoAI's byte-identical mirrors of `cl-nagoya/ruri-v3-310m` and
+`microsoft/harrier-oss-v1-0.6b`, each pinned to one upstream revision. The service keeps
+working if an upstream repository is removed or made gated.
 
 **How they were checked.** Each was compared with the model's own sentence-transformers
 pipeline (`tests/embedding_parity_test.py`) on short and long multilingual text, for every
@@ -80,11 +84,11 @@ from openai import OpenAI
 client = OpenAI(base_url="https://oumigo.example.com/v1", api_key="oumigo-key-...")
 docs = client.embeddings.create(
     model="ruri-v3-310m@8k",
-    input=["東京は日本の首都です。", "富士山は日本一高い山です。"],
+    input=["東京は日本一の大都市です。", "富士山は日本一高い山です。"],
     extra_body={"input_type": "document"},
 )
 query = client.embeddings.create(
-    model="ruri-v3-310m@8k", input="日本の首都は?", extra_body={"input_type": "query"})
+    model="ruri-v3-310m@8k", input="日本一の大都市は?", extra_body={"input_type": "query"})
 ```
 
 ### `input_type`
@@ -111,8 +115,8 @@ while a chat model is serving) and, for embedding models, its dimensions and val
 `input_type` names:
 
 ```json
-{"id": "ruri-v3-310m@8k", "object": "model", "owned_by": "cl-nagoya",
- "oumigo": {"weights": "cl-nagoya/ruri-v3-310m", "task": "embed", "max_model_len": 8192,
+{"id": "ruri-v3-310m@8k", "object": "model", "owned_by": "GotoAI-Inc",
+ "oumigo": {"weights": "GotoAI-Inc/ruri-v3-310m-mirror", "task": "embed", "max_model_len": 8192,
             "dimensions": 768, "input_types": ["document", "query", "topic"], "serving": 1}}
 ```
 

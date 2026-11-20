@@ -150,7 +150,7 @@ directly for a zero-math live gauge.
 
 Source: **NVML** (`pynvml`) when importable, else an **`nvidia-smi`** subprocess,
 else silent (CPU-only node). `#N` is the GPU's sequence number; an individual
-reading that a card doesn't support (e.g. power on some laptops) is skipped as a
+reading that a card doesn't support (e.g. power on some mobile GPUs) is skipped as a
 gap, not fatal.
 
 | OumiGo metric | Type | Unit | Description |

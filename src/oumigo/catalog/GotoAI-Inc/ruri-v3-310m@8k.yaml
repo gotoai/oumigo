@@ -1,11 +1,13 @@
 id: ruri-v3-310m@8k
-model: cl-nagoya/ruri-v3-310m
+# Our byte-identical mirror of cl-nagoya/ruri-v3-310m at 18b60fb, so the service does not
+# depend on the upstream repo staying up (llm-quantizer/mirror/).
+model: GotoAI-Inc/ruri-v3-310m-mirror
 description: Ruri v3 310M, Japanese text embeddings (768-d), 8k context
 task: embed
 engine:
   max_model_len: 8192
   # What it needs on any GPU; the rest stays free for other workers. Measured
-  # 2026-11-17 (RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.31.0): about 1.5 GiB in all, with
+  # 2026-11-17 (16 GB GPU, vLLM 0.31.0): about 1.5 GiB in all, with
   # no KV cache (an encoder); bursts of 8 x 8,176 tokens ran the same at every share
   # tried, down to 0.05.
   gpu_memory_target_gib: 2.0
@@ -30,4 +32,4 @@ requires:
   vllm: '>=0.28'
   # The smallest GPU worth giving it; the target above decides what it takes.
   min_vram_gib: 4
-tested: 'RTX 3080 Ti Laptop GPU 16 GB, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99999, fp16; bf16 only 0.9989), 1.5 GiB used'
+tested: '16 GB GPU, vLLM 0.28.0: matches sentence-transformers (cos >= 0.99999, fp16; bf16 only 0.9989), 1.5 GiB used'
