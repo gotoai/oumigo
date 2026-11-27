@@ -38,6 +38,12 @@ def _fmt_transport(row: dict) -> str:
     return f"{text} {rtt:.0f}ms" if rtt is not None else text
 
 
+def _fmt_state(row: dict) -> str:
+    """The node state, plus 'closing' while a close is under way."""
+    state = row["state"]
+    return f"{state} closing" if row.get("closing") and state not in ("stopped", "failed") else state
+
+
 class ManagerConsole:
     """REPL that talks to the control-plane server over HTTP."""
 
@@ -177,7 +183,7 @@ class ManagerConsole:
                 (r.get("capabilities") or {}).get("gpu") or "-",
                 r.get("backend") or "-",
                 _fmt_transport(r),
-                r["state"],
+                _fmt_state(r),
                 r.get("model") or "-",
                 r.get("task") or "-",
                 self._fmt_utc(start),

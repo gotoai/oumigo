@@ -25,7 +25,8 @@ MA_MIN_SAMPLES = 4  # windows with fewer present samples than this are left as g
 
 
 def _trailing_moving_average(
-    data: list[float | None], window: int = MA_WINDOW, min_samples: int = MA_MIN_SAMPLES
+    data: list[float | None], window: int = MA_WINDOW, min_samples: int = MA_MIN_SAMPLES,
+    digits: int = 2,
 ) -> list[float | None]:
     """Smooth a slot-aligned series with a trailing moving average.
 
@@ -37,7 +38,8 @@ def _trailing_moving_average(
     out: list[float | None] = []
     for i in range(len(data)):
         present = [v for v in data[max(0, i - window + 1) : i + 1] if v is not None]
-        out.append(round(sum(present) / len(present), 2) if len(present) >= min_samples else None)
+        out.append(round(sum(present) / len(present), digits)
+                   if len(present) >= min_samples else None)
     return out
 
 

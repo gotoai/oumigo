@@ -110,6 +110,14 @@ class NodeSpec(BaseModel):
     requires_vllm: str | None = Field(
         default=None, description="vLLM version specifier the profile needs, e.g. `>=0.28`.")
 
+    # How long the worker lets in-flight requests finish when it is asked to stop. The
+    # manager sets it from the profile's `agent.turn_timeout` (else the manager's
+    # `agent:` block): a client gives up on a turn after that long anyway.
+    drain_timeout_s: float | None = Field(
+        default=None, gt=0,
+        description="Longest wait for in-flight requests on a stop, in seconds. None: the "
+                    "worker's default. `WK_DRAIN_TIMEOUT` on the worker overrides it.")
+
 
     @field_validator("storage_location", mode="before")
     @classmethod

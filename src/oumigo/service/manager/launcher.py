@@ -17,6 +17,7 @@ import time
 
 import httpx
 
+from oumigo.common.envnames import MG_JOIN_TOKEN
 from oumigo.common.http import local_control_url, loopback_verify
 from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.service.manager.console import ManagerConsole
@@ -33,7 +34,7 @@ def run_with_child_server(
 ) -> None:
     env = dict(os.environ)
     if token is not None:
-        env["OUMIGO_MANAGER_TOKEN"] = token  # pass secret via env, never argv
+        env[MG_JOIN_TOKEN] = token  # pass secret via env, never argv
 
     cmd = [sys.executable, "-m", "oumigo.cli.main", "manager", "serve", *forward_args]
     child = subprocess.Popen(  # noqa: S603 - fixed argv

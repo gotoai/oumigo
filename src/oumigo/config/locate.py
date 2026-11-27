@@ -2,7 +2,7 @@
 
 Resolves *which file* holds the manager config, in precedence order:
 
-    --config-file <path>  >  $OUMIGO_CONFIG_FILE  >  ~/.config/oumigo/manager.yaml
+    --config-file <path>  >  $MG_CONFIG_FILE  >  ~/.config/oumigo/manager.yaml
                                                    >  /etc/oumigo/manager.yaml
 
 First existing file wins. There is a single config file (no config directory) —
@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from oumigo.common.envnames import MG_CONFIG_FILE
+
 CONFIG_FILENAME = "manager.yaml"
 
 
@@ -25,7 +27,7 @@ def config_file_search_path(explicit: Path | str | None = None) -> list[Path]:
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
-    env = os.environ.get("OUMIGO_CONFIG_FILE")
+    env = os.environ.get(MG_CONFIG_FILE)
     if env:
         candidates.append(Path(env).expanduser())
     xdg = os.environ.get("XDG_CONFIG_HOME")

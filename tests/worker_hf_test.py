@@ -710,7 +710,7 @@ async def _resolve_manager_url(manager_url: str | None, discover_timeout: float)
     if not found:
         raise SystemExit(
             f"could not discover a manager on the LAN within {discover_timeout:.0f}s; "
-            "set --manager-url / $OUMIGO_MANAGER_URL (and check the manager isn't --no-mdns)"
+            "set --manager-url / $WK_MANAGER_URL (and check the manager isn't --no-mdns)"
         )
     log.info("discovered manager at %s", found)
     return found
@@ -836,7 +836,7 @@ def main() -> None:
         help="HF model id/path to serve (env: MODEL_ID; falls back to the profile's weights).",
     )
     parser.add_argument(
-        "--profile", default=os.environ.get("OUMIGO_MODEL_PROFILE"),
+        "--profile", default=os.environ.get("WK_MODEL_PROFILE"),
         help="Catalog profile to register with (default: the fleet's default).",
     )
     parser.add_argument(
@@ -861,7 +861,7 @@ def main() -> None:
              "manager's router can reach it; use 127.0.0.1 for a same-host test).",
     )
     parser.add_argument(
-        "--manager-url", default=os.environ.get("OUMIGO_MANAGER_URL"),
+        "--manager-url", default=os.environ.get("WK_MANAGER_URL"),
         help="Manager control-plane URL. If omitted, discover it on the LAN via mDNS.",
     )
     parser.add_argument(
@@ -869,7 +869,7 @@ def main() -> None:
         help="Seconds to browse the LAN for a manager when --manager-url is omitted.",
     )
     parser.add_argument(
-        "--token", default=os.environ.get("OUMIGO_MANAGER_TOKEN"),
+        "--token", default=os.environ.get("WK_JOIN_TOKEN"),
         help="Shared bearer token, if the manager requires auth.",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Log at DEBUG.")

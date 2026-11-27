@@ -589,25 +589,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--manager-url",
-        default=os.environ.get("OUMIGO_MANAGER_URL", "http://127.0.0.1:7014"),
+        default=os.environ.get("WK_MANAGER_URL", "http://127.0.0.1:7014"),
         help="Manager control-plane URL (same host as this stub).",
     )
     parser.add_argument(
-        "--token", default=os.environ.get("OUMIGO_JOIN_TOKEN") or os.environ.get("OUMIGO_MANAGER_TOKEN"),
+        "--token", default=os.environ.get("WK_JOIN_TOKEN"),
         help="Join token, if the manager requires auth (a minted token must allow one "
         "use per stub: --uses N).",
     )
     parser.add_argument(
         "--transport", choices=("direct", "tunnel"),
-        default=os.environ.get("OUMIGO_TRANSPORT", "direct"),
+        default=os.environ.get("WK_TRANSPORT", "direct"),
         help="direct: the router dials each stub; tunnel: each stub dials out to /tunnel.",
     )
     parser.add_argument(
-        "--ca-file", default=os.environ.get("OUMIGO_MANAGER_CA_FILE"),
+        "--ca-file", default=os.environ.get("WK_MANAGER_CA_FILE"),
         help="PEM to trust for an https manager with a private certificate.",
     )
     parser.add_argument(
-        "--profile", default=os.environ.get("OUMIGO_MODEL_PROFILE"),
+        "--profile", default=os.environ.get("WK_MODEL_PROFILE"),
         help="Catalog profile the stubs register with (default: the fleet's default).",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Log at DEBUG.")

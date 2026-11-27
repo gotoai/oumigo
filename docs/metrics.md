@@ -388,11 +388,14 @@ value)` — the long/narrow model below.
 **Backfill instead of loss.** The worker **drains** its buffer into each report and
 clears it only on a 2xx; on failure it **restores the batch and retries** next
 cycle. Because every row carries its grid-slot timestamp, a *late* batch still
-lands in the correct slots. The buffer is bounded to **`capacity_s` (default 30
-min)**: during a sustained outage it drops the **oldest `evict_chunk_s` (default
-5 min)** span whenever a new sample would overflow. A transient blip → *no data
-loss*; only an outage longer than the buffer → a bounded gap. This preserves "gaps
-stay gaps" while recovering blips.
+lands in the correct slots. The buffer keeps only samples within
+**`WK_METRICS_MAX_KEEPING_AGE` (default 60 s)** of the newest one, so it survives one
+failed report. A transient blip → *no data loss*; a longer outage → a gap, and the
+first report afterwards carries at most that last minute, so it stays small (a large
+backlog would exceed a reverse proxy's request-size limit and never get through). A
+worker cut off from its manager receives no requests, so the dropped samples show an
+idle node. The worker warns once when reports start failing and logs once when they
+resume. This preserves "gaps stay gaps" while recovering blips.
 
 **Idempotent ingest.** The manager **upserts by `(node_id, metric, timestamp)`**,
 never appends. A retried/overlapping batch simply rewrites the same slots, so
@@ -483,7 +486,7 @@ Two channels — **heartbeat (10 s, unbuffered, real-time/liveness)** and the
 **metrics batch (historical)** — kept separate. Metrics: three sources (host
 `/proc` + GPU NVML/nvidia-smi + vLLM `/metrics`) · grid-aligned sampling (5 s) ·
 batched report (30 s), drain-on-success / restore-and-retry on failure · worker
-send-buffer bounded to 30 min, evicting the oldest 5 min on overflow · flat
+send-buffer keeping the last 60 s (`WK_METRICS_MAX_KEEPING_AGE`) · flat
 `(node_id, timestamp, metric, value)` rows with `YYYY-MM-DD HH:MM:SS` UTC
 timestamps · manager store = **in-memory sqlite** (`metric_fact`, 24 h), upsert by
 `(node_id, metric, timestamp)` · time-based retention · gaps as gaps · raw
@@ -493,14 +496,17 @@ dashboard is the remaining v1 piece.
 
 ## Deferred / open questions
 
+- **Durable rollups** for the console's long charts are built (5 min / 30 min / 2 h
+  bucket means of GPU utilization, `console_rollups.db`, see [console.md](console.md));
+  other metrics are not rolled up yet.
 - **uPlot dashboard** — the manager's static page + JSON API over the store.
   `GET /metrics/latest` exists; a windowed range/query endpoint is still needed.
 - Optional **on-disk** sqlite for restart durability + retention-policy specifics.
 - Retention is inline-on-ingest today; move to a periodic async sweep if the
   coupling ever becomes unwanted.
 - Optional read-only Prometheus-format `/metrics` interop endpoint.
-- Config surface: grid interval, report interval, and buffer capacity are
-  coordinator kwargs today; plumb them through `manager.yaml` (mirrors the
+- Config surface: grid and report intervals are coordinator kwargs today (the buffer's
+  keeping age is `WK_METRICS_MAX_KEEPING_AGE`); plumb them through `manager.yaml` (mirrors the
   `heartbeat.*` config style).
 - `pynvml` is an optional (unlisted) dependency — add it to the `worker` extra in
   `pyproject.toml` if NVML should be guaranteed rather than falling back to

@@ -36,6 +36,9 @@ class NodeRecord:
     max_concurrent_requests: int | None = None
     transport: str = "direct"  # "direct" (router dials address:port) | "tunnel" (worker dials out)
     tunnel_rtt_ms: float | None = None  # tunnel worker's last reported WebSocket ping RTT
+    # A close was requested (console / `oumigo manager node close`): the router stops
+    # choosing this worker at once, while its heartbeats may still say SERVING.
+    closing: bool = False
 
     @property
     def served_name(self) -> str | None:
@@ -111,6 +114,7 @@ class Registry:
                     max_concurrent_requests if max_concurrent_requests is not None
                     else (existing.max_concurrent_requests if existing else None)),
                 transport=transport,
+                closing=existing.closing if existing else False,
             )
             self._nodes[node_id] = record
             return record
@@ -138,6 +142,15 @@ class Registry:
                 record.max_concurrent_requests = max_concurrent_requests
             if tunnel_rtt_ms is not None:
                 record.tunnel_rtt_ms = tunnel_rtt_ms
+            return True
+
+    def set_closing(self, node_id: str, closing: bool = True) -> bool:
+        """Mark a node as closing (or not). False if it is unknown."""
+        with self._lock:
+            record = self._nodes.get(node_id)
+            if record is None:
+                return False
+            record.closing = closing
             return True
 
     def get(self, node_id: str) -> NodeRecord | None:

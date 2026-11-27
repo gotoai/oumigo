@@ -637,10 +637,10 @@ def cmd_up(s: Settings, wait: bool, wait_timeout: float) -> None:
     # The workers' identity, the same on any provider and across container restarts.
     host_id = f"{s.name}-{secrets.token_hex(6)}"
     node_ids = s.node_ids(host_id)
-    env = {"OUMIGO_MANAGER_URL": s.manager_url, "OUMIGO_JOIN_TOKEN": token,
-           "OUMIGO_HOST_ID": host_id, **s.extra_env}
+    env = {"WK_MANAGER_URL": s.manager_url, "WK_JOIN_TOKEN": token,
+           "WK_HOST_ID": host_id, **s.extra_env}
     if s.profiles:
-        env["OUMIGO_MODEL_PROFILE"] = ",".join(s.profiles)
+        env["WK_MODEL_PROFILE"] = ",".join(s.profiles)
     if s.hf_token:
         env["HF_TOKEN"] = s.hf_token
     # The token stays valid while a pod may still use it (a pod left to start without

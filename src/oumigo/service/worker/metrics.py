@@ -10,9 +10,9 @@ thread-driven loop, so the collector matches that model rather than asyncio):
   (``YYYY-MM-DD HH:MM:SS`` UTC), not the actual read time.
 - **Reporter** wakes every ``report_s`` seconds and ships the whole buffer to the
   manager's ``POST /metrics``. On success the sent rows are gone (the buffer was
-  drained). On failure the rows are restored so the next cycle retries — the buffer
-  keeps up to ``capacity_s`` of history (default 30 min), dropping the oldest
-  ``evict_chunk_s`` span (default 5 min) whenever a new sample would overflow it.
+  drained). On failure the rows are restored so the next cycle retries, but only rows
+  within ``max_age_s`` (default 60 s, `WK_METRICS_MAX_KEEPING_AGE`) of the newest are
+  kept: a report never carries more than that span, however long the manager was gone.
 
 Three metric sources, each degrading to *nothing* (a gap) when unavailable:
 
@@ -673,30 +673,32 @@ class MetricRow:
 
 
 class MetricsBuffer:
-    """Thread-safe, time-bounded store of metric rows (ascending by grid slot).
+    """Thread-safe, age-bounded store of metric rows (ascending by grid slot).
 
-    Rows stay until a successful report drains them. If reporting keeps failing the
-    buffer grows to at most ``capacity_s`` of wall-clock span; a new sample that
-    would overflow that triggers eviction of the oldest ``evict_chunk_s`` span.
+    Rows stay until a successful report drains them, but only while they are within
+    ``max_age_s`` of the newest row: older ones are dropped whenever rows are added or
+    a failed batch is put back. A worker that can't reach its manager gets no requests,
+    so what it would report from an outage is an idle node; keeping only the recent
+    past also keeps every report small, however long the outage was.
     """
 
-    def __init__(self, capacity_s: float = 1800.0, evict_chunk_s: float = 300.0) -> None:
-        self.capacity_s = capacity_s
-        self.evict_chunk_s = evict_chunk_s
+    def __init__(self, max_age_s: float = 60.0) -> None:
+        self.max_age_s = max_age_s
         self._rows: list[MetricRow] = []
         self._lock = threading.Lock()
 
     def append(self, rows: list[MetricRow]) -> None:
-        """Add the newest grid slot's rows, evicting the oldest span if we overflow."""
+        """Add the newest grid slot's rows, dropping rows that are now too old."""
         with self._lock:
             self._rows.extend(rows)
-            self._evict_locked()
+            self._prune_locked()
 
     def restore(self, rows: list[MetricRow]) -> None:
-        """Put a failed batch back at the front (it predates anything sampled since)."""
+        """Put a failed batch back at the front (it predates anything sampled since),
+        keeping only what is still young enough."""
         with self._lock:
             self._rows[:0] = rows
-            self._evict_locked()
+            self._prune_locked()
 
     def drain(self) -> list[MetricRow]:
         """Atomically take everything for a report attempt, leaving the buffer empty."""
@@ -712,21 +714,16 @@ class MetricsBuffer:
         with self._lock:
             return len(self._rows)
 
-    def _evict_locked(self) -> None:
-        # Rows are appended in grid order, so index 0 is the oldest, [-1] the newest.
-        while self._rows and self._rows[-1].grid_epoch - self._rows[0].grid_epoch >= self.capacity_s:
-            cutoff = self._rows[0].grid_epoch + self.evict_chunk_s
-            drop = 0
-            while drop < len(self._rows) and self._rows[drop].grid_epoch < cutoff:
-                drop += 1
-            if drop == 0:  # single slot wider than the chunk; nothing to trim, bail
-                break
-            log.warning(
-                "metrics buffer at capacity (%.0fs); dropping oldest %d rows (%.0fs span)",
-                self.capacity_s,
-                drop,
-                self.evict_chunk_s,
-            )
+    def _prune_locked(self) -> None:
+        # Rows are kept in grid order, so index 0 is the oldest, [-1] the newest.
+        if not self._rows:
+            return
+        cutoff = self._rows[-1].grid_epoch - self.max_age_s
+        drop = 0
+        while drop < len(self._rows) and self._rows[drop].grid_epoch < cutoff:
+            drop += 1
+        if drop:
+            log.debug("metrics buffer: dropped %d rows older than %.0fs", drop, self.max_age_s)
             del self._rows[:drop]
 
 
@@ -751,8 +748,7 @@ class MetricsCollector:
         *,
         grid_s: float = 5.0,
         report_s: float = 30.0,
-        capacity_s: float = 1800.0,
-        evict_chunk_s: float = 300.0,
+        max_age_s: float = 60.0,
         vllm_url: str | None = None,
         worker_start: float | None = None,
         send: SendFn = _default_send,
@@ -764,7 +760,8 @@ class MetricsCollector:
         self.report_s = report_s
         self.vllm_url = vllm_url
         self._send = send
-        self._buffer = MetricsBuffer(capacity_s, evict_chunk_s)
+        self._buffer = MetricsBuffer(max_age_s)
+        self._failing = False  # reports are failing: warn once, and once when they resume
         self._cpu = _CpuSampler()
         self._gpu = _GpuSampler()
         self._req_rate = _RequestRateTracker()
@@ -855,7 +852,16 @@ class MetricsCollector:
         try:
             self._send(self.manager_url, report, self.token)
         except Exception as exc:  # noqa: BLE001 - never let a report failure kill the thread
-            log.warning("metrics report failed (%s); keeping %d points buffered", exc, len(batch))
+            if not self._failing:
+                log.warning("metrics report failed (%s); retrying, keeping only the last "
+                            "%.0fs of metrics until it works again", exc,
+                            self._buffer.max_age_s)
+                self._failing = True
+            else:
+                log.debug("metrics report failed again (%s)", exc)
             self._buffer.restore(batch)
         else:
+            if self._failing:
+                log.info("metrics reports resumed")
+                self._failing = False
             log.debug("metrics: reported %d points", len(batch))

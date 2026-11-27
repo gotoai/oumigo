@@ -1,7 +1,7 @@
 """HTTP client for the worker -> manager control-plane calls.
 
 TLS: an `https://` manager is verified against the system CA store, or against
-`$OUMIGO_MANAGER_CA_FILE` (a PEM file holding the manager's self-signed certificate or
+`$WK_MANAGER_CA_FILE` (a PEM file holding the manager's self-signed certificate or
 private CA) — see `configure_tls`. Verification is never disabled.
 """
 
@@ -12,6 +12,7 @@ import ssl
 
 import httpx
 
+from oumigo.common.envnames import WK_MANAGER_CA_FILE
 from oumigo.config.spec import NodeSpec
 from oumigo.protocol.messages import (
     HeartbeatRequest,
@@ -21,8 +22,7 @@ from oumigo.protocol.messages import (
     RegisterResponse,
 )
 
-
-ENV_CA_FILE = "OUMIGO_MANAGER_CA_FILE"
+ENV_CA_FILE = WK_MANAGER_CA_FILE
 
 _verify: ssl.SSLContext | bool = True  # set by configure_tls; shared by every call here
 
@@ -30,7 +30,7 @@ _verify: ssl.SSLContext | bool = True  # set by configure_tls; shared by every c
 def configure_tls(ca_file: str | None = None) -> ssl.SSLContext:
     """Build (and adopt) the SSL context for talking to the manager.
 
-    ``ca_file`` (default `$OUMIGO_MANAGER_CA_FILE`) adds a trusted PEM — the manager's
+    ``ca_file`` (default `$WK_MANAGER_CA_FILE`) adds a trusted PEM — the manager's
     self-signed certificate or private CA. Without it the system CA store is used, as
     for any public (e.g. Let's Encrypt) certificate behind nginx.
     """

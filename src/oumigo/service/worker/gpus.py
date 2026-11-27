@@ -1,4 +1,4 @@
-"""Which GPUs a worker runs on: `--gpu-id` / `$OUMIGO_GPU_ID`.
+"""Which GPUs a worker runs on: `--gpu-id` / `$WK_GPU_ID`.
 
 A machine with several GPUs can run one worker per GPU. The worker passes its choice to
 the backend as `CUDA_VISIBLE_DEVICES`, and uses the same GPUs for everything it reads
@@ -21,7 +21,9 @@ from __future__ import annotations
 import os
 import re
 
-ENV_GPU_ID = "OUMIGO_GPU_ID"
+from oumigo.common.envnames import WK_GPU_ID
+
+ENV_GPU_ID = WK_GPU_ID
 _ID = re.compile(r"^(\d+|(GPU|MIG)-[0-9A-Za-z-]+)$")
 
 

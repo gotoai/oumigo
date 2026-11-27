@@ -41,7 +41,8 @@ Two roles:
   - **control plane** (`manager.control`): tracks worker registrations and state,
     drives worker lifecycle, reconciles desired vs. actual. Low-frequency,
     correctness-critical.
-  - **dashboard** (`manager.dashboard`): performance & diagnostics — later.
+  - **web console** (`manager.dashboard`): the workers, with a graceful Close, and GPU
+    utilization; see [docs/console.md](docs/console.md).
   - **provisioning** (`oumigo.providers`): how workers come into existence — a
     minimal, lifecycle-shaped `Provider` protocol used by the control plane. Ships
     with `StaticProvider` in two postures: `LAN` (trusted local network) and `CUSTOM`
@@ -132,3 +133,5 @@ oumigo version
 - [docs/model-catalog.md](docs/model-catalog.md) — several models in one fleet: profiles, the catalog, choosing a model (worker and client), upgrading to 0.5.5.
 - [docs/embeddings.md](docs/embeddings.md) — embedding models: `task: embed` profiles, `/v1/embeddings`, `input_type` prompts, the shipped ruri and harrier profiles.
 - [docs/gpu-pods.md](docs/gpu-pods.md) — the worker Docker image and running workers on rented GPUs (RunPod, Vast.ai), by hand or on a schedule.
+- [docs/console.md](docs/console.md) — the manager's web console: admin sign-in, closing workers gracefully, GPU utilization.
+- [docs/environmental_variables.md](docs/environmental_variables.md) — every environment variable: `MG_*` (manager), `WK_*` (worker), the third-party ones, and the names retired in 0.5.8.

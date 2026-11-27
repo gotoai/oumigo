@@ -177,11 +177,11 @@ class WorkerPool:
         return cap if cap is not None else self.default_capacity
 
     def routable(self, record: NodeRecord) -> bool:
-        """SERVING, and (for a tunnel worker) with a tunnel connection up."""
+        """SERVING and not closing, and (for a tunnel worker) with a tunnel connection up."""
         return self._routable(record)
 
     def _routable(self, record: NodeRecord) -> bool:
-        if record.state != NodeState.SERVING.value:
+        if record.state != NodeState.SERVING.value or record.closing:
             return False
         if record.transport == Transport.TUNNEL.value:
             return self.tunnels is not None and self.tunnels.connected(record.node_id) > 0
@@ -425,8 +425,9 @@ def create_router_app(
     def _not_ready(model_id: str | None, eligible: Eligible | None) -> JSONResponse:
         """No SERVING worker for the request: is one on its way, or is there none?"""
         records = [r for r in registry.list() if eligible is None or eligible(r)]
-        starting = [r for r in records if r.state in _STARTING
-                    or (r.state == NodeState.SERVING.value and not pool.routable(r))]
+        starting = [r for r in records if not r.closing and (
+                    r.state in _STARTING
+                    or (r.state == NodeState.SERVING.value and not pool.routable(r)))]
         log.info("no routable worker for %s: %s", model_id or ANY_MODEL,
                  ", ".join(f"{r.node_id}={r.state}" for r in records) or "none registered")
         if starting:

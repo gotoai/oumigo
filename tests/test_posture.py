@@ -28,14 +28,13 @@ def test_is_loopback(host: str, expected: bool) -> None:
 
 def _check(provider: str, **overrides) -> list[str]:
     layout = dict(control_host="127.0.0.1", control_tls=False, data_host="127.0.0.1",
-                  client_auth=True, dashboard_enabled=True, dashboard_host="127.0.0.1")
+                  client_auth=True)
     layout.update(overrides)
     return check_posture(provider, **layout)
 
 
 def test_lan_allows_any_bind() -> None:
-    assert _check("LAN", control_host="0.0.0.0", data_host="0.0.0.0", dashboard_host="0.0.0.0",
-                  client_auth=False) == []
+    assert _check("LAN", control_host="0.0.0.0", data_host="0.0.0.0", client_auth=False) == []
 
 
 def test_custom_loopback_layout_is_ok() -> None:
@@ -47,10 +46,21 @@ def test_custom_public_control_plane_needs_tls() -> None:
     assert _check("CUSTOM", control_host="0.0.0.0", control_tls=True) == []
 
 
-def test_custom_router_and_dashboard_must_stay_local() -> None:
-    problems = _check("CUSTOM", data_host="0.0.0.0", dashboard_host="0.0.0.0")
-    assert len(problems) == 2
-    assert _check("CUSTOM", dashboard_enabled=False, dashboard_host="0.0.0.0") == []
+def test_custom_router_must_stay_local() -> None:
+    problems = _check("CUSTOM", data_host="0.0.0.0")
+    assert len(problems) == 1 and "data_plane.host" in problems[0]
+
+
+@pytest.mark.parametrize("provider", ["LAN", "CUSTOM"])
+def test_web_console_binds_loopback_only_on_any_provider(provider: str) -> None:
+    from oumigo.service.manager.settings import get_dashboard
+
+    assert get_dashboard({"provider": provider}) == (True, "127.0.0.1", 7080)  # default
+    assert get_dashboard({"dashboard": {"host": "::1", "port": 7081}}) == (True, "::1", 7081)
+    with pytest.raises(ValueError, match="binds loopback only"):
+        get_dashboard({"dashboard": {"host": "0.0.0.0"}})
+    # Disabled, its bind address doesn't matter.
+    assert get_dashboard({"dashboard": {"enabled": False, "host": "0.0.0.0"}})[0] is False
 
 
 def test_custom_router_requires_client_auth() -> None:

@@ -27,6 +27,14 @@ from pathlib import Path
 import httpx
 
 from oumigo import discovery
+from oumigo.common.envnames import (
+    WK_DRAIN_TIMEOUT,
+    WK_METRICS_MAX_KEEPING_AGE,
+    WK_MODEL_PROFILE,
+    WK_MODEL_STORAGE_LOCATION,
+    WORKER,
+    refuse_retired,
+)
 from oumigo.config.spec import TASK_EMBED, NodeSpec
 from oumigo.protocol.messages import (
     HeartbeatRequest,
@@ -40,10 +48,9 @@ from oumigo.protocol.messages import (
 from oumigo.protocol.states import NodeState, RunState
 from oumigo.providers.static import CUSTOM
 from oumigo.service.worker import client
-from oumigo.service.worker.identity import resolve_worker_identity
 from oumigo.service.worker.gpus import select_gpus, selected_gpus
+from oumigo.service.worker.identity import resolve_worker_identity
 from oumigo.service.worker.metrics import MetricsCollector, probe_gpu_name, probe_gpu_vram_gib
-from oumigo.service.worker.tunnel import TunnelClient
 from oumigo.service.worker.supervisor import (
     HFProcess,
     PortUnavailable,
@@ -51,6 +58,7 @@ from oumigo.service.worker.supervisor import (
     _ServerProcess,
     find_free_port,
 )
+from oumigo.service.worker.tunnel import TunnelClient
 
 log = logging.getLogger("oumigo.service.worker")
 
@@ -60,7 +68,26 @@ BACKEND_TRANSFORMER = "transformer"
 BACKENDS = (BACKEND_VLLM, BACKEND_TRANSFORMER)
 
 ENV_BACKEND_API_KEY = "VLLM_API_KEY"  # read by vLLM and by the HF server
-ENV_MODEL_PROFILE = "OUMIGO_MODEL_PROFILE"  # the catalog profile this worker runs
+ENV_MODEL_PROFILE = WK_MODEL_PROFILE  # the catalog profile this worker runs
+ENV_DRAIN_TIMEOUT = WK_DRAIN_TIMEOUT  # seconds; overrides the profile's drain limit
+
+# Stopping: how long in-flight requests may finish (unless the profile or
+# $WK_DRAIN_TIMEOUT says otherwise), then how long the backend gets after SIGTERM.
+DEFAULT_DRAIN_TIMEOUT_S = 120.0
+STOP_GRACE_S = 30.0
+
+# Metrics: sampled every METRICS_GRID_S, reported every METRICS_REPORT_S; a sample older
+# than the keeping age (WK_METRICS_MAX_KEEPING_AGE) is dropped instead of sent. The age
+# must cover one report interval plus a sample, or normal reports would lose samples.
+METRICS_GRID_S = 5.0
+METRICS_REPORT_S = 30.0
+DEFAULT_METRICS_MAX_AGE_S = 60.0
+
+# Exit codes of `oumigo worker run`: 0 after a normal stop (a STOP from the manager, or a
+# signal), so a supervisor or container platform can tell a close from a failure.
+EXIT_STOPPED = 0
+EXIT_FAILED = 1     # the backend failed for good, or no port was free
+EXIT_REFUSED = 3    # the manager refused this node (revoked)
 # `min_vram_gib` is a card size as sold, and NVML reports a little less: 12282 MiB for a
 # 12 GB RTX 4070, 8151 MiB for an 8 GB RTX 5060 Ti. A card within this of the size counts
 # as that size. oumigo_pods.py filters rented cards the same way.
@@ -83,14 +110,13 @@ class WorkerCoordinator:
         transport: str = Transport.DIRECT.value,
         max_restarts: int = 3,
         restart_backoff_s: float = 5.0,
-        stop_grace_s: float = 30.0,
-        drain_timeout_s: float = 120.0,
+        stop_grace_s: float = STOP_GRACE_S,
+        drain_timeout_s: float = DEFAULT_DRAIN_TIMEOUT_S,
         metrics_enabled: bool = True,
-        metrics_grid_s: float = 5.0,
-        metrics_report_s: float = 30.0,
-        metrics_capacity_s: float = 1800.0,
-        metrics_evict_chunk_s: float = 300.0,
-        on_serving: Callable[[], None] | None = None,
+        metrics_grid_s: float = METRICS_GRID_S,
+        metrics_report_s: float = METRICS_REPORT_S,
+        metrics_max_age_s: float = DEFAULT_METRICS_MAX_AGE_S,
+        on_serving: Callable[[float], None] | None = None,
     ) -> None:
         self.manager_url = manager_url
         # `token` starts as the join token; registration swaps in this node's own token
@@ -114,8 +140,7 @@ class WorkerCoordinator:
         self.metrics_enabled = metrics_enabled
         self.metrics_grid_s = metrics_grid_s
         self.metrics_report_s = metrics_report_s
-        self.metrics_capacity_s = metrics_capacity_s
-        self.metrics_evict_chunk_s = metrics_evict_chunk_s
+        self.metrics_max_age_s = metrics_max_age_s
 
         self._started_at = time.time()  # worker:start_timestamp (float UTC epoch)
         self.node_state: NodeState = NodeState.REGISTERING
@@ -128,16 +153,18 @@ class WorkerCoordinator:
         self.supervisor: _ServerProcess | None = None
         self.metrics: MetricsCollector | None = None
         self._restarts = 0
-        # Called once, the first time the backend serves (the multi-profile supervisor
-        # starts the next profile then); later restarts don't call it again.
+        # Called once, with the drain limit, the first time the backend serves (the
+        # multi-profile supervisor starts the next profile then); not after restarts.
         self._on_serving = on_serving
+        self._refused = False  # the manager refused this node (revoked)
 
         self._stop = threading.Event()   # graceful stop requested (signal or STOP command)
         self._force = threading.Event()  # second signal: stop draining, kill now
 
     # --- entrypoint ----------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self) -> int:
+        """Run until stopped; returns the exit code (`EXIT_STOPPED` after a normal stop)."""
         self._install_signals()
         assert self.spec is not None  # resolved pre-construction via /spec
         resp = self._register()  # identity + port already chosen; response carries cadence
@@ -153,6 +180,9 @@ class WorkerCoordinator:
         if self.tunnel is not None:
             self.tunnel.stop()
         log.info("coordinator exiting (final state=%s)", self.node_state.value)
+        if self.node_state == NodeState.FAILED:
+            return EXIT_FAILED
+        return EXIT_REFUSED if self._refused else EXIT_STOPPED
 
     # --- main loop -----------------------------------------------------------
 
@@ -188,7 +218,7 @@ class WorkerCoordinator:
                     self.metrics.mark_serving()  # stamp vllm:start_timestamp on this edge
                 if self._on_serving is not None:
                     on_serving, self._on_serving = self._on_serving, None
-                    on_serving()
+                    on_serving(self.drain_timeout_s)
             if self.node_state == NodeState.SERVING:
                 self.run_state = sup.run_state()
             return
@@ -233,7 +263,7 @@ class WorkerCoordinator:
             code = exc.response.status_code
             if code == 401:
                 raise SystemExit(
-                    "registration rejected (401): check the join token (OUMIGO_JOIN_TOKEN) — "
+                    "registration rejected (401): check the join token (WK_JOIN_TOKEN) — "
                     "a minted token may be expired or already used")
             if code == 403:
                 raise SystemExit(f"registration refused (403): {_detail(exc.response)}")
@@ -354,17 +384,16 @@ class WorkerCoordinator:
             self.node_id,
             grid_s=self.metrics_grid_s,
             report_s=self.metrics_report_s,
-            capacity_s=self.metrics_capacity_s,
-            evict_chunk_s=self.metrics_evict_chunk_s,
+            max_age_s=self.metrics_max_age_s,
             vllm_url=vllm_url,
             worker_start=self._started_at,
         )
         self.metrics.start()
         log.info(
-            "metrics collector started (grid=%.0fs, report=%.0fs, buffer=%.0fs)",
+            "metrics collector started (grid=%.0fs, report=%.0fs, keeping at most %.0fs)",
             self.metrics_grid_s,
             self.metrics_report_s,
-            self.metrics_capacity_s,
+            self.metrics_max_age_s,
         )
 
     def _stop_metrics(self) -> None:
@@ -418,6 +447,7 @@ class WorkerCoordinator:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:  # revoked: the manager won't take us back
                 log.error("manager refused this node (%s); shutting down", _detail(exc.response))
+                self._refused = True
                 self._stop.set()
             else:
                 log.warning("heartbeat failed: %s", exc)
@@ -443,13 +473,13 @@ def _apply_env_overrides(spec: NodeSpec) -> NodeSpec:
     """Overlay the node's own env/.env settings onto the manager's spec.
 
     The spec is the manager's copy of a catalog profile, which fixes every start-time
-    setting. Only node properties apply: `MODEL_STORAGE_LOCATION` (where this node keeps
+    setting. Only node properties apply: `WK_MODEL_STORAGE_LOCATION` (where this node keeps
     the weights), `HF_HOME` (with `~`/`$VARS` expanded) and `HF_TOKEN` (blank ->
     anonymous), normalized in `os.environ` so the spawned backend child inherits them.
 
     `storage_location` is a node property for a reason: whether a node has the weights
     on disk is a property of *that node*, not of the fleet. A worker can point at its own
-    copy, or set `MODEL_STORAGE_LOCATION=none` to ignore a fleet-wide location it does
+    copy, or set `WK_MODEL_STORAGE_LOCATION=none` to ignore a fleet-wide location it does
     not have and fall back to the Hub.
 
     Also defaults `VLLM_USE_FLASHINFER_SAMPLER=0` (see below) — the environment/.env
@@ -470,7 +500,7 @@ def _apply_env_overrides(spec: NodeSpec) -> NodeSpec:
     if not os.environ.get("HF_TOKEN", "").strip():
         os.environ.pop("HF_TOKEN", None)  # empty token -> anonymous, not a blank credential
 
-    storage = os.environ.get("MODEL_STORAGE_LOCATION")
+    storage = os.environ.get(WK_MODEL_STORAGE_LOCATION)
     if storage is not None:
         # Re-validated through NodeSpec ("none" -> None), keeping env and config on one
         # code path; a pydantic traceback would be a poor way to report a typo in a .env
@@ -478,26 +508,40 @@ def _apply_env_overrides(spec: NodeSpec) -> NodeSpec:
         try:
             spec = NodeSpec.model_validate({**spec.model_dump(), "storage_location": storage})
         except ValueError as exc:
-            raise SystemExit(f"MODEL_STORAGE_LOCATION={storage!r} is invalid: {exc}")
+            raise SystemExit(f"WK_MODEL_STORAGE_LOCATION={storage!r} is invalid: {exc}")
     _check_local_weights(spec)
     return spec
 
 
-# Variables that chose or reshaped the model before catalog profiles (removed in 0.5.5),
-# with what to do instead.
-_REMOVED_ENV = {
-    "MODEL_NAME": "choose a model with OUMIGO_MODEL_PROFILE",
-    "MAX_MODEL_LEN": "choose a profile with that context length (OUMIGO_MODEL_PROFILE)",
-}
+def _drain_timeout_from_env() -> float | None:
+    """`$WK_DRAIN_TIMEOUT` in seconds, or None when unset or empty."""
+    text = os.environ.get(ENV_DRAIN_TIMEOUT, "").strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = 0.0
+    if not seconds > 0:
+        raise SystemExit(f"{ENV_DRAIN_TIMEOUT}={text!r} must be a positive number of seconds")
+    return seconds
 
 
-def _refuse_removed_env() -> None:
-    """Refuse the removed variables rather than ignore them: an old .env would otherwise
-    start the fleet default while its owner believes they chose another model."""
-    for name, instead in _REMOVED_ENV.items():
-        if os.environ.get(name, "").strip():
-            raise SystemExit(f"{name} is no longer supported (0.5.5); {instead}, and remove "
-                             f"{name} from the environment / .env")
+def _metrics_max_age_from_env() -> float:
+    """`$WK_METRICS_MAX_KEEPING_AGE` in seconds (default 60), at least one report
+    interval plus one sample."""
+    text = os.environ.get(WK_METRICS_MAX_KEEPING_AGE, "").strip()
+    if not text:
+        return DEFAULT_METRICS_MAX_AGE_S
+    floor = METRICS_REPORT_S + METRICS_GRID_S
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = 0.0
+    if not seconds >= floor:
+        raise SystemExit(f"{WK_METRICS_MAX_KEEPING_AGE}={text!r} must be a number of seconds, "
+                         f"at least {floor:g} (one report interval plus one sample)")
+    return seconds
 
 
 def _vram_gb() -> float | None:
@@ -558,7 +602,7 @@ def _check_requirements(spec: NodeSpec, backend: str) -> None:
                 raise SystemExit(
                     f"profile {spec.served_name} needs a GPU with at least "
                     f"{spec.min_vram_gib:g} GiB; GPU {gpu} has {vram:.1f} GiB. Choose a "
-                    "smaller profile with OUMIGO_MODEL_PROFILE.")
+                    "smaller profile with WK_MODEL_PROFILE.")
     if spec.requires_vllm and backend == BACKEND_VLLM:
         try:
             from importlib.metadata import PackageNotFoundError, version
@@ -590,8 +634,8 @@ def _check_local_weights(spec: NodeSpec) -> None:
     if not path.exists():
         raise SystemExit(
             f"storage_location {spec.storage_location} does not exist on this worker "
-            f"({path}). Copy the model there, point MODEL_STORAGE_LOCATION at the right "
-            f"directory, or set MODEL_STORAGE_LOCATION=none to download from the Hub.")
+            f"({path}). Copy the model there, point WK_MODEL_STORAGE_LOCATION at the right "
+            f"directory, or set WK_MODEL_STORAGE_LOCATION=none to download from the Hub.")
     if not path.is_dir():
         raise SystemExit(f"storage_location {spec.storage_location} is not a directory ({path})")
     if not (path / "config.json").is_file():
@@ -616,21 +660,24 @@ def run_worker(
     backend: str = BACKEND_VLLM,
     transport: str = Transport.DIRECT.value,
     gpu_id: str | None = None,
-    on_serving: Callable[[], None] | None = None,
-) -> None:
+    on_serving: Callable[[float], None] | None = None,
+) -> int:
     """Find the manager, fetch + env-negotiate the spec, preflight a port, derive
     identity, then hand off to the coordinator loop. The node_id is a hash of the host id +
     the *actual* backend port, so the port must be chosen before we register.
 
-    `gpu_id` (`--gpu-id` / `$OUMIGO_GPU_ID`) pins the worker to GPUs (`gpus`).
-    `on_serving` is called once, when the backend first serves."""
+    `gpu_id` (`--gpu-id` / `$WK_GPU_ID`) pins the worker to GPUs (`gpus`).
+    `on_serving` is called once, with the drain limit, when the backend first serves.
+    Returns the exit code (`EXIT_STOPPED` after a normal stop)."""
     if backend not in BACKENDS:
         raise SystemExit(f"unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}")
-    _refuse_removed_env()
+    refuse_retired(WORKER)
+    drain_override = _drain_timeout_from_env()
+    metrics_max_age = _metrics_max_age_from_env()
     try:
         chosen = select_gpus(gpu_id) if gpu_id else None
     except ValueError as exc:
-        raise SystemExit(f"--gpu-id / OUMIGO_GPU_ID: {exc}") from None
+        raise SystemExit(f"--gpu-id / WK_GPU_ID: {exc}") from None
 
     if not manager_url:
         log.info("no manager URL provided; discovering via mDNS (up to %.0fs) ...", discover_timeout)
@@ -638,14 +685,14 @@ def run_worker(
         if not manager_url:
             raise SystemExit(
                 f"could not discover a manager on the LAN within {discover_timeout:.0f}s; "
-                "set --manager-url / $OUMIGO_MANAGER_URL"
+                "set --manager-url / $WK_MANAGER_URL"
             )
         log.info("discovered manager at %s", manager_url)
 
     # 1) Fetch the spec of the profile we chose (or the fleet default), then overlay this
     #    node's own settings. The manager decides: a choice it doesn't allow, or no
     #    choice and no default, is a 403 that says what to set.
-    client.configure_tls()  # system CAs, plus $OUMIGO_MANAGER_CA_FILE for a private cert
+    client.configure_tls()  # system CAs, plus $WK_MANAGER_CA_FILE for a private cert
     choice = os.environ.get(ENV_MODEL_PROFILE, "").strip() or None
     try:
         spec, provider = client.fetch_spec(manager_url, token, profile=choice)
@@ -653,7 +700,7 @@ def run_worker(
         code = exc.response.status_code
         if code == 401:
             raise SystemExit(
-                f"manager {manager_url} rejected the join token (401): set OUMIGO_JOIN_TOKEN — "
+                f"manager {manager_url} rejected the join token (401): set WK_JOIN_TOKEN — "
                 "a minted token may be expired, revoked or already used")
         raise SystemExit(f"manager {manager_url} refused /spec (HTTP {code}): {_detail(exc.response)}")
     except Exception as exc:  # noqa: BLE001 - surface any client/server error as a clean exit
@@ -700,7 +747,12 @@ def run_worker(
         state=NodeState.REGISTERING,
         capabilities=NodeCapabilities(gpu=probe_gpu_name(), vram_gb=_vram_gb()),
     )
-    WorkerCoordinator(
+    drain_timeout = drain_override or spec.drain_timeout_s or DEFAULT_DRAIN_TIMEOUT_S
+    log.info("drain limit %.0fs (%s)", drain_timeout,
+             ENV_DRAIN_TIMEOUT if drain_override else
+             "from the manager" if spec.drain_timeout_s else "default")
+    return WorkerCoordinator(
         manager_url, token, node_id, register_req, spec=spec, vllm_port=port, backend=backend,
-        transport=transport, on_serving=on_serving,
+        transport=transport, drain_timeout_s=drain_timeout, on_serving=on_serving,
+        metrics_max_age_s=metrics_max_age,
     ).run()

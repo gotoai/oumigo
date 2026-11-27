@@ -19,7 +19,7 @@ DEFAULT_DATA_PLANE_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so LAN c
 DEFAULT_DATA_PLANE_PORT = 7012
 DEFAULT_VLLM_PORT = 7001
 
-DEFAULT_DASHBOARD_HOST = "0.0.0.0"  # noqa: S104 - bind all interfaces so the LAN can view it
+DEFAULT_DASHBOARD_HOST = "127.0.0.1"  # the web console binds loopback only (SSH tunnel)
 DEFAULT_DASHBOARD_PORT = 7080  # 7070 is commonly taken (AnyDesk); reporting plane uses 7080
 
 DEFAULT_TRUSTED_PROXIES = ["127.0.0.1"]  # whose X-Forwarded-For is believed (nginx on the host)
@@ -89,7 +89,7 @@ def get_trusted_proxies(config: dict) -> list[str]:
 
 def get_tunnel(config: dict) -> tuple[bool, int]:
     """(enabled, pool_spare) from the `tunnel` block. On by default under every provider —
-    each worker opts in with `OUMIGO_TRANSPORT=tunnel`; `enabled: false` refuses them."""
+    each worker opts in with `WK_TRANSPORT=tunnel`; `enabled: false` refuses them."""
     tb = config.get("tunnel") or {}
     return bool(tb.get("enabled", True)), max(0, int(tb.get("pool_spare", DEFAULT_TUNNEL_POOL_SPARE)))
 
@@ -151,17 +151,24 @@ def _opt_seconds(value: object, field: str) -> float | None:
 
 
 def get_dashboard(config: dict) -> tuple[bool, str, int]:
-    """The reporting-plane dashboard's enabled flag + bind host/port from `dashboard`.
+    """The web console's enabled flag + bind host/port from `dashboard`.
 
     Bundled with the manager and on by default; `dashboard.enabled: false` is an
-    escape hatch (e.g. a port conflict). Host/port default to 0.0.0.0:7080.
+    escape hatch (e.g. a port conflict). Host/port default to 127.0.0.1:7080. The
+    console binds loopback only, on any provider: it is reached through an SSH tunnel.
+    Raises ValueError for another bind address.
     """
+    from oumigo.service.manager.posture import is_loopback
+
     db = config.get("dashboard") or {}
-    return (
-        bool(db.get("enabled", True)),
-        str(db.get("host", DEFAULT_DASHBOARD_HOST)),
-        int(db.get("port", DEFAULT_DASHBOARD_PORT)),
-    )
+    enabled = bool(db.get("enabled", True))
+    host = str(db.get("host", DEFAULT_DASHBOARD_HOST))
+    if enabled and not is_loopback(host):
+        raise ValueError(
+            f"dashboard.host is {host!r}: the web console binds loopback only. Set it to "
+            "127.0.0.1 and reach the console through an SSH tunnel "
+            "(ssh -L 7080:127.0.0.1:7080 <manager host>), or set dashboard.enabled: false")
+    return enabled, host, int(db.get("port", DEFAULT_DASHBOARD_PORT))
 
 
 def get_catalog(config: dict) -> FleetCatalog:

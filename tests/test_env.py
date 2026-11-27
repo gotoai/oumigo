@@ -73,19 +73,19 @@ def test_worker_run_loads_env_before_starting(tmp_path, monkeypatch):
 
 def test_worker_options_come_from_the_env_file(tmp_path, monkeypatch):
     # typer reads `envvar=` before the env file is loaded; the documented worker setup
-    # (OUMIGO_MANAGER_URL / OUMIGO_TRANSPORT in .env) must still reach run_worker.
+    # (WK_MANAGER_URL / WK_TRANSPORT in .env) must still reach run_worker.
     from typer.testing import CliRunner
 
     import oumigo.service.worker.coordinator as coordinator
     from oumigo.cli.main import app
 
-    names = ("OUMIGO_MANAGER_URL", "OUMIGO_TRANSPORT", "OUMIGO_DISCOVER_TIMEOUT")
+    names = ("WK_MANAGER_URL", "WK_TRANSPORT", "WK_DISCOVER_TIMEOUT")
     for name in names:
         monkeypatch.setenv(name, "")   # registers the original state, so teardown restores it
         monkeypatch.delenv(name)       # and the env file's values loaded below don't leak
     envf = tmp_path / ".env"
-    envf.write_text("OUMIGO_MANAGER_URL=https://m.example\nOUMIGO_TRANSPORT=tunnel\n"
-                    "OUMIGO_DISCOVER_TIMEOUT=5\n")
+    envf.write_text("WK_MANAGER_URL=https://m.example\nWK_TRANSPORT=tunnel\n"
+                    "WK_DISCOVER_TIMEOUT=5\n")
     called = {}
     monkeypatch.setattr(coordinator, "run_worker", lambda **kw: called.update(kw))
 
@@ -123,7 +123,7 @@ def test_flashinfer_sampler_env_wins_over_default(monkeypatch):
     assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "1"  # explicit opt-in preserved
 
 
-# --- MODEL_STORAGE_LOCATION: per-worker override of where the weights live ---------
+# --- WK_MODEL_STORAGE_LOCATION: per-worker override of where the weights live ---------
 
 
 def test_storage_location_env_overrides_the_fleet_spec(tmp_path, monkeypatch):
@@ -133,7 +133,7 @@ def test_storage_location_env_overrides_the_fleet_spec(tmp_path, monkeypatch):
     local = tmp_path / "weights"
     local.mkdir()
     (local / "config.json").write_text("{}")
-    monkeypatch.setenv("MODEL_STORAGE_LOCATION", f"file://{local}")
+    monkeypatch.setenv("WK_MODEL_STORAGE_LOCATION", f"file://{local}")
 
     spec = _apply_env_overrides(NodeSpec(model="acme/tiny", profile="tiny@8k"))
     assert spec.model_ref == str(local)      # backend loads from disk
@@ -145,7 +145,7 @@ def test_storage_location_env_none_falls_back_to_the_hub(tmp_path, monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
-    monkeypatch.setenv("MODEL_STORAGE_LOCATION", "none")
+    monkeypatch.setenv("WK_MODEL_STORAGE_LOCATION", "none")
     spec = _apply_env_overrides(
         NodeSpec(model="acme/tiny", profile="tiny@8k", storage_location="file:///nonexistent/models/tiny")
     )
@@ -157,7 +157,7 @@ def test_missing_local_weights_fail_before_the_backend_starts(monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
-    monkeypatch.delenv("MODEL_STORAGE_LOCATION", raising=False)
+    monkeypatch.delenv("WK_MODEL_STORAGE_LOCATION", raising=False)
     with pytest.raises(SystemExit, match="does not exist on this worker"):
         _apply_env_overrides(NodeSpec(model="m", profile="m@8k", storage_location="file:///no/such/dir"))
 
@@ -168,7 +168,7 @@ def test_directory_without_config_json_is_rejected(tmp_path, monkeypatch):
 
     empty = tmp_path / "empty"
     empty.mkdir()
-    monkeypatch.delenv("MODEL_STORAGE_LOCATION", raising=False)
+    monkeypatch.delenv("WK_MODEL_STORAGE_LOCATION", raising=False)
     with pytest.raises(SystemExit, match="no config.json"):
         _apply_env_overrides(NodeSpec(model="m", profile="m@8k", storage_location=f"file://{empty}"))
 
@@ -177,30 +177,53 @@ def test_bad_storage_location_env_exits_cleanly(monkeypatch):
     from oumigo.config.spec import NodeSpec
     from oumigo.service.worker.coordinator import _apply_env_overrides
 
-    monkeypatch.setenv("MODEL_STORAGE_LOCATION", "s3://bucket/model")
-    with pytest.raises(SystemExit, match="MODEL_STORAGE_LOCATION"):
+    monkeypatch.setenv("WK_MODEL_STORAGE_LOCATION", "s3://bucket/model")
+    with pytest.raises(SystemExit, match="WK_MODEL_STORAGE_LOCATION"):
         _apply_env_overrides(NodeSpec(model="m", profile="m@8k"))
 
 
-# --- MODEL_NAME / MAX_MODEL_LEN: removed in 0.5.5, refused rather than ignored ------
+# --- retired names (removed in 0.5.5, renamed in 0.5.8): refused rather than ignored -
 
 
-@pytest.mark.parametrize("name,instead", [
-    ("MODEL_NAME", "choose a model with OUMIGO_MODEL_PROFILE"),
-    ("MAX_MODEL_LEN", "choose a profile with that context length"),
+@pytest.mark.parametrize("name,expected", [
+    ("MODEL_NAME", "removed in 0.5.5; choose a model with WK_MODEL_PROFILE"),
+    ("MAX_MODEL_LEN", "removed in 0.5.5; choose a profile with that context length"),
+    ("OUMIGO_MODEL_PROFILE", "renamed to WK_MODEL_PROFILE"),
+    ("MODEL_STORAGE_LOCATION", "renamed to WK_MODEL_STORAGE_LOCATION"),
+    ("OUMIGO_MANAGER_TOKEN", "a worker's join token is now WK_JOIN_TOKEN"),
 ])
-def test_removed_model_variables_stop_the_worker(monkeypatch, name, instead):
+def test_retired_variables_stop_the_worker(monkeypatch, name, expected):
     from oumigo.service.worker.coordinator import run_worker
 
-    monkeypatch.setenv(name, "acme/tiny" if name == "MODEL_NAME" else "8192")
+    monkeypatch.setenv(name, "x")
     # Refused before the manager is even looked for.
-    with pytest.raises(SystemExit, match=f"{name} is no longer supported \\(0.5.5\\); {instead}"):
+    with pytest.raises(SystemExit, match=f"{name} is no longer read: {expected}"):
         run_worker("http://127.0.0.1:1", None)
 
 
-def test_blank_removed_variables_are_not_set(monkeypatch):
-    from oumigo.service.worker.coordinator import _refuse_removed_env
+def test_retired_names_are_checked_per_side_and_all_at_once() -> None:
+    from oumigo.common.envnames import MANAGER, WORKER, refuse_retired, retired_in_env
 
-    monkeypatch.setenv("MODEL_NAME", "  ")
-    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
-    _refuse_removed_env()
+    env = {"OUMIGO_CONFIG_FILE": "/m.yaml", "OUMIGO_HOST_ID": "pod-1", "MODEL_NAME": "  "}
+    assert retired_in_env(MANAGER, env) == [
+        "OUMIGO_CONFIG_FILE is no longer read: renamed to MG_CONFIG_FILE"]
+    assert retired_in_env(WORKER, env) == [
+        "OUMIGO_HOST_ID is no longer read: renamed to WK_HOST_ID"]  # blank MODEL_NAME: unset
+    with pytest.raises(SystemExit, match="(?s)OUMIGO_CONFIG_FILE.*docs/environmental"):
+        refuse_retired(MANAGER, env)
+    refuse_retired(MANAGER, {"MG_CONFIG_FILE": "/m.yaml"})  # new names pass
+
+
+def test_cli_refuses_retired_names(monkeypatch, tmp_path) -> None:
+    from typer.testing import CliRunner
+
+    from oumigo.cli.main import app
+
+    monkeypatch.setenv("OUMIGO_MANAGER_TOKEN", "old")
+    result = CliRunner().invoke(app, ["manager", "token", "list"])
+    assert result.exit_code != 0 and "renamed to MG_JOIN_TOKEN" in str(result.exception)
+    monkeypatch.delenv("OUMIGO_MANAGER_TOKEN")
+    monkeypatch.setattr(os, "environ", dict(os.environ))  # the .env below must not leak
+    (tmp_path / ".env").write_text("OUMIGO_TRANSPORT=tunnel\n")
+    result = CliRunner().invoke(app, ["worker", "run", "--env-file", str(tmp_path / ".env")])
+    assert result.exit_code != 0 and "renamed to WK_TRANSPORT" in str(result.exception)

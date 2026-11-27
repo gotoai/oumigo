@@ -2,7 +2,7 @@
 
 The `node_id` is derived (`oumigo.common.identity.compute_node_id`) from a *host id*
 and the port. The host id is a random UUID minted once and persisted here, or taken
-from `$OUMIGO_HOST_ID` — useful on pods whose disk is wiped on restart (e.g. a RunPod
+from `$WK_HOST_ID` — useful on pods whose disk is wiped on restart (e.g. a RunPod
 container disk) that should still come back as the same node. Same host + same port
 always yields the same id, so restarts don't create phantom nodes, and an address
 change (DHCP, NAT, tunnel) doesn't either.
@@ -25,16 +25,17 @@ import os
 import uuid
 from pathlib import Path
 
+from oumigo.common.envnames import WK_HOST_ID
 from oumigo.common.identity import compute_node_id
 from oumigo.common.state import default_state_dir
 
 STATE_FILE = "incarnations.json"
 HOST_ID_FILE = "host_id"
-ENV_HOST_ID = "OUMIGO_HOST_ID"
+ENV_HOST_ID = WK_HOST_ID
 
 
 def resolve_host_id(directory: Path) -> str:
-    """The host id: `$OUMIGO_HOST_ID` if set, else the persisted UUID (minted on first use)."""
+    """The host id: `$WK_HOST_ID` if set, else the persisted UUID (minted on first use)."""
     env = os.environ.get(ENV_HOST_ID, "").strip()
     if env:
         return env

@@ -35,11 +35,11 @@ round trip to the time to first token, the same as any other transport.
 
 | | `LAN` | `CUSTOM` |
 |---|---|---|
-| mDNS advertising | on | off. Workers need `OUMIGO_MANAGER_URL` |
+| mDNS advertising | on | off. Workers need `WK_MANAGER_URL` |
 | Control plane bind | anything | `127.0.0.1` behind nginx, or built-in TLS (`control_plane.tls_*`) |
 | Router (`data_plane`) bind | anything | `127.0.0.1` only. Remote clients reach it through nginx |
 | Router client auth (`data_plane.client_auth`) | off unless set | **always on**. Clients send a client API key |
-| Dashboard bind | anything | `127.0.0.1` only. View it through an SSH tunnel |
+| Web console bind | `127.0.0.1` only (any provider) | `127.0.0.1` only. View it through an SSH tunnel |
 | Worker auth with no reusable token | disabled (warning) | **enforced**. Workers join with minted tokens |
 | Manager URL a worker accepts | `http://` or `https://` | `https://` only |
 
@@ -154,9 +154,9 @@ oumigo manager token list
 On the worker (`.env` or environment):
 
 ```
-OUMIGO_MANAGER_URL=https://oumigo.example.net
-OUMIGO_TRANSPORT=tunnel
-OUMIGO_JOIN_TOKEN=oumigo-join-...
+WK_MANAGER_URL=https://oumigo.example.net
+WK_TRANSPORT=tunnel
+WK_JOIN_TOKEN=oumigo-join-...
 ```
 
 Then run `oumigo worker run` as usual.
@@ -165,7 +165,7 @@ Then run `oumigo worker run` as usual.
   **node token**, bound to its `node_id` and accepted across manager restarts.
 - For workers you restart often, mint a token with `--uses 0 --ttl never`, or set a
   reusable `auth.token_file`.
-- A pod whose disk is wiped on restart can keep its identity with `OUMIGO_HOST_ID=<any
+- A pod whose disk is wiped on restart can keep its identity with `WK_HOST_ID=<any
   stable string>`. Otherwise it registers as a new node.
 
 ### 4. Give a client an API key
@@ -204,8 +204,8 @@ control_plane:
 ```
 
 - With a private (self-signed) certificate, give workers the PEM:
-  `OUMIGO_MANAGER_CA_FILE=/path/cert.pem`. The certificate's subjectAltName must match the
-  host in `OUMIGO_MANAGER_URL`. Workers never skip verification.
+  `WK_MANAGER_CA_FILE=/path/cert.pem`. The certificate's subjectAltName must match the
+  host in `WK_MANAGER_URL`. Workers never skip verification.
 - uvicorn cannot reload certificates, so renewing them means restarting the manager. That
   drops every tunnel; workers reconnect within seconds.
 
@@ -213,7 +213,7 @@ control_plane:
 
 | Credential | Where it lives | Lifetime |
 |---|---|---|
-| Join token (`OUMIGO_JOIN_TOKEN`) | Operator → worker | Minted: TTL and use count. Reusable: until rotated |
+| Join token (`WK_JOIN_TOKEN`) | Operator → worker | Minted: TTL and use count. Reusable: until rotated |
 | Node token | Issued at registration, held by the worker | Until the node is revoked |
 | Backend API key | Derived per node; the worker's backend requires it | Same as the node |
 | Client API key | Operator → inference client; the router requires it | Until revoked |
@@ -241,7 +241,7 @@ they age out.
 | Symptom | Likely cause |
 |---|---|
 | Worker exits: `rejected the join token (401)` | Token expired, revoked, already used, or mistyped |
-| Worker exits: `certificate verify failed` | Private certificate without `OUMIGO_MANAGER_CA_FILE`, or the URL host isn't in the certificate's subjectAltName |
+| Worker exits: `certificate verify failed` | Private certificate without `WK_MANAGER_CA_FILE`, or the URL host isn't in the certificate's subjectAltName |
 | Worker exits: `requires TLS: use its https:// URL` | `CUSTOM` manager reached over `http://` |
 | Worker SERVING but `tunnel 0/0` in the console | nginx missing the WebSocket `Upgrade` lines, or `tunnel.enabled: false` |
 | `tunnel slot N refused by manager (HTTP 403)` briefly after a manager restart | Normal: tunnels redial before the worker re-registers |

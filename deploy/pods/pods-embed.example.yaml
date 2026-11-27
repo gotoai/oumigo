@@ -7,7 +7,7 @@
 # and up; smaller listed cards are skipped. Secrets as in pods.example.yaml.
 
 name: oumigo-embed                         # also names the state file; one pod per name
-image: ghcr.io/<owner>/oumigo-worker:0.5.7-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.8-vllm0.28.0-cu129
 gpu_count: 1
 disk_gb: 40                                # the unpacked image (Vast.ai counts it) + ~3 GB of weights and caches
 

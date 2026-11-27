@@ -70,22 +70,47 @@ def test_buffer_drain_empties_and_returns_all() -> None:
 
 def test_buffer_restore_prepends_older_batch() -> None:
     buf = MetricsBuffer()
-    buf.append(_rows(200))       # a sample arrives during a failed report
+    buf.append(_rows(130))       # a sample arrives during a failed report
     buf.restore(_rows(100))      # the failed (older) batch comes back
     snap = buf.snapshot()
-    assert [r.grid_epoch for r in snap] == [100, 200]  # ascending order preserved
+    assert [r.grid_epoch for r in snap] == [100, 130]  # ascending order preserved
 
 
-def test_buffer_evicts_oldest_5min_chunk_on_overflow() -> None:
-    # capacity 30 min, evict 5 min chunks; one row per 5 min slot.
-    buf = MetricsBuffer(capacity_s=1800, evict_chunk_s=300)
-    for k in range(7):  # slots at 0,300,...,1800 -> span 1800 hits capacity
-        buf.append(_rows(k * 300))
-    epochs = [r.grid_epoch for r in buf.snapshot()]
-    # The oldest 5-min chunk (epoch 0) is dropped so span stays under capacity.
-    assert 0 not in epochs
-    assert epochs[0] == 300
-    assert buf.snapshot()[-1].grid_epoch - buf.snapshot()[0].grid_epoch < 1800
+def test_buffer_keeps_only_rows_within_the_max_age_of_the_newest() -> None:
+    buf = MetricsBuffer(max_age_s=60)
+    for k in range(20):          # one slot every 5 s for 95 s
+        buf.append(_rows(k * 5, n=2))
+    epochs = sorted({r.grid_epoch for r in buf.snapshot()})
+    assert epochs[0] == 95 - 60 and epochs[-1] == 95   # 13 slots: 35, 40, ... 95
+
+
+def test_buffer_restore_drops_a_failed_batch_that_got_too_old() -> None:
+    buf = MetricsBuffer(max_age_s=60)
+    batch = _rows(0) + _rows(5)  # a report that failed
+    buf.append(_rows(62))        # meanwhile a newer sample
+    buf.restore(batch)
+    assert [r.grid_epoch for r in buf.snapshot()] == [5, 62]  # 0 is more than 60 s older
+
+
+def test_a_long_outage_leaves_a_small_report() -> None:
+    """The manager away for 90 minutes: the next report carries one minute, not 90."""
+    reports: list[MetricsReport] = []
+    up = False
+
+    def send(url: str, rep: MetricsReport, tok: str | None) -> None:
+        if not up:
+            raise RuntimeError("manager down")
+        reports.append(rep)
+
+    col = MetricsCollector("http://m", None, "uuid", max_age_s=60, send=send)
+    for k in range(90 * 12):     # 90 min of 5 s slots, a report attempt every 30 s
+        col._buffer.append(_rows(k * 5, n=40))
+        if k % 6 == 5:
+            col._flush_once()
+    up = True
+    col._flush_once()
+    assert len(reports) == 1
+    assert len(reports[0].points) == 13 * 40  # 13 slots of 40 metrics
 
 
 # --- reporter -------------------------------------------------------------------

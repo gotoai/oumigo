@@ -10,10 +10,10 @@ of it, so it insists on a shape that is safe either way:
 - the **router** binds loopback (it serves plain HTTP; nginx terminates TLS for remote
   clients) and requires client API keys (`data_plane.client_auth`), because a loopback
   bind does not prove that no proxy exposes it;
-- the **dashboard** binds loopback: it has no auth, so view it through an SSH tunnel;
 - worker auth is never disabled (see `oumigo.service.manager.auth`).
 
-`check_posture` returns human-readable violations; the CLI refuses to start on any.
+`check_posture` returns human-readable violations; the CLI refuses to start on any. (The
+web console binds loopback under every provider; `settings.get_dashboard` enforces it.)
 """
 
 from __future__ import annotations
@@ -40,8 +40,6 @@ def check_posture(
     control_tls: bool,
     data_host: str,
     client_auth: bool,
-    dashboard_enabled: bool,
-    dashboard_host: str,
 ) -> list[str]:
     """Return the posture violations for this bind layout (empty = OK)."""
     if provider != CUSTOM:
@@ -63,10 +61,5 @@ def check_posture(
         problems.append(
             "data_plane.client_auth is off: under provider CUSTOM the router always requires "
             "client API keys (create one with `oumigo manager apikey create`)"
-        )
-    if dashboard_enabled and not is_loopback(dashboard_host):
-        problems.append(
-            f"dashboard.host is {dashboard_host!r}: under provider CUSTOM the dashboard must "
-            "bind 127.0.0.1 (view it through an SSH tunnel) or be disabled"
         )
     return problems

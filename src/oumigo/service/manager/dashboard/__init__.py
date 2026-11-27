@@ -1,10 +1,9 @@
-"""Reporting plane — performance & diagnostics dashboard (V1.0).
+"""The OumiGo console — the manager's web UI: Workers (with Close) and GPU Utilization.
 
-A read-only *consumer* of what the control and data planes already collect, not a
-new source of truth. Runs as its own process (fault isolation); pulls ``worker:``
-and ``gpu:`` metrics from the control plane over HTTP and serves a web dashboard,
-rolling the raw 5s points up to minute buckets on the fly (no materialized rollup
-tables in V1.0). vLLM counters are excluded until the safe-transform layer exists.
+Runs as its own process (fault isolation). It reads the fleet and its ``worker:`` /
+``gpu:`` metrics from the control plane over HTTP; its only write is a close request in
+the manager's state-dir auth store, which the running manager acts on. vLLM counters are
+excluded from the charts until the safe-transform layer exists.
 
 Bundled with the manager: `run_server` spawns it automatically as a child process
 (disable via `dashboard.enabled: false` in the manager config). The

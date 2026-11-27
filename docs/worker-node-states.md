@@ -88,7 +88,8 @@ The enum also leaves room to grow a coarse backpressure signal later (e.g.
    `SERVING` throughout.
 6. On `STOP` from the manager:
    - If run-state is `EXECUTING` → `DRAINING`: refuse new work, wait for
-     run-state to fall `EXECUTING → IDLE`, then `STOPPED`.
+     run-state to fall `EXECUTING → IDLE` (at most the drain limit, see
+     [console.md](console.md#drain-limit)), then `STOPPED`.
    - If already `IDLE` (or still `INITIALIZING`/pre-traffic) → nothing to drain →
      straight to `STOPPED`.
 7. After a clean shutdown → `STOPPED`. In a **LAN** provision the coordinator

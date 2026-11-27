@@ -162,7 +162,7 @@ def test_create_worker_reuses_last_manager(monkeypatch):
     assert worker is sentinel
     i = captured["argv"].index("--manager-url")
     assert captured["argv"][i + 1] == "http://10.0.0.1:7014"   # reused manager's URL
-    assert captured["env"]["OUMIGO_MANAGER_TOKEN"] == "tok"     # token inherited
+    assert captured["env"]["WK_JOIN_TOKEN"] == "tok"     # token inherited
 
 
 def test_create_worker_accepts_manager_handle(monkeypatch):
@@ -179,7 +179,7 @@ def test_create_worker_accepts_manager_handle(monkeypatch):
 
     i = captured["argv"].index("--manager-url")
     assert captured["argv"][i + 1] == "http://10.0.0.2:7014"
-    assert captured["env"]["OUMIGO_MANAGER_TOKEN"] == "h-tok"
+    assert captured["env"]["WK_JOIN_TOKEN"] == "h-tok"
 
 
 class _JsonResp:

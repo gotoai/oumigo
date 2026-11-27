@@ -19,6 +19,7 @@ import logging
 import signal
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,28 +34,6 @@ from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.common.state import default_state_dir
 from oumigo.config.catalog import FleetCatalog
 from oumigo.config.spec import NodeSpec
-from oumigo.providers.static import CUSTOM, LAN
-from oumigo.service.manager.access import FailureLimiter, WorkerAllowlist
-from oumigo.service.manager.control.registry import Registry
-from oumigo.service.manager.control.store import MetricStore
-from oumigo.service.manager.credentials import Authenticator, AuthStore
-from oumigo.service.manager.tunnel import TunnelConn, TunnelRegistry
-from oumigo.service.manager.router.server import create_router_app
-from oumigo.service.manager.settings import (
-    get_agent_defaults,
-    get_auth_state_dir,
-    get_catalog,
-    get_client_auth,
-    get_control_tls,
-    get_fleet_agent_defaults,
-    get_dashboard,
-    get_data_plane,
-    get_trusted_proxies,
-    get_tunnel,
-    get_vllm_port,
-    get_worker_allowlist,
-    load_manager_yaml,
-)
 from oumigo.protocol.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
@@ -62,7 +41,31 @@ from oumigo.protocol.messages import (
     RegisterRequest,
     RegisterResponse,
     Transport,
+    WorkerCommand,
 )
+from oumigo.protocol.states import NodeState
+from oumigo.providers.static import CUSTOM, LAN
+from oumigo.service.manager.access import FailureLimiter, WorkerAllowlist
+from oumigo.service.manager.control.registry import NodeRecord, Registry
+from oumigo.service.manager.control.store import MetricStore
+from oumigo.service.manager.credentials import Authenticator, AuthStore
+from oumigo.service.manager.router.server import create_router_app
+from oumigo.service.manager.settings import (
+    get_agent_defaults,
+    get_auth_state_dir,
+    get_catalog,
+    get_client_auth,
+    get_control_tls,
+    get_dashboard,
+    get_data_plane,
+    get_fleet_agent_defaults,
+    get_trusted_proxies,
+    get_tunnel,
+    get_vllm_port,
+    get_worker_allowlist,
+    load_manager_yaml,
+)
+from oumigo.service.manager.tunnel import TunnelConn, TunnelRegistry
 
 log = logging.getLogger("oumigo.service.manager")
 
@@ -84,14 +87,17 @@ def create_app(
     worker_allowlist: list[str] | None = None,
     catalog: FleetCatalog | None = None,
     vllm_port: int | None = None,
+    fleet_agent_defaults: dict[str, float | None] | None = None,
 ) -> FastAPI:
     """Build the control-plane FastAPI app.
 
     `catalog` (required) holds the profiles workers may run (`oumigo.config.catalog`).
-    A worker asks `/spec` for the profile it chose (`OUMIGO_MODEL_PROFILE`), or the
+    A worker asks `/spec` for the profile it chose (`WK_MODEL_PROFILE`), or the
     fleet default when it chose none, and registers with it; the manager checks the
     choice at both steps and takes everything about the model (weights, task,
-    capacity) from its own copy of the profile.
+    capacity) from its own copy of the profile. `fleet_agent_defaults` (the manager's
+    `agent:` block) gives a profile without its own `agent:` its turn timeout, which the
+    worker uses as its drain limit.
 
     If `advertise_port` is set, the app advertises via mDNS from its lifespan, in a
     background task so registration happens after the socket is serving (no race)
@@ -124,9 +130,12 @@ def create_app(
             chosen = catalog.default_profile
             if chosen is None:
                 raise HTTPException(403, "Model profile cannot be resolved: this fleet has no "
-                                         "default; set OUMIGO_MODEL_PROFILE to one of: "
+                                         "default; set WK_MODEL_PROFILE to one of: "
                                          f"{_allowed_list()}")
-        return chosen.node_spec(port_hint)
+        spec = chosen.node_spec(port_hint)
+        agent = (chosen.agent.model_dump() if chosen.agent is not None
+                 else fleet_agent_defaults or {})
+        return spec.model_copy(update={"drain_timeout_s": agent.get("turn_timeout")})
 
     if auth is None:
         auth = Authenticator(AuthStore(), token, wan=provider_name == CUSTOM)
@@ -154,6 +163,18 @@ def create_app(
         if limiter.blocked(host):
             raise HTTPException(status_code=429, detail="too many failed auth attempts")
         request.state.source = host
+
+    def _forget_close_of_previous_run(node_id: str, incarnation: int) -> None:
+        """A close request ends one run of a worker. A registration with a new
+        incarnation is a new run (e.g. its container was restarted), so a request left
+        over from the previous run no longer applies."""
+        existing = registry.get(node_id)
+        if existing is None or existing.incarnation == incarnation:
+            return
+        registry.set_closing(node_id, False)
+        if auth.store.clear_close_request(node_id):
+            log.info("%s (%s) started a new run; its close request is done",
+                     existing.name, node_id)
 
     def _deny(request: Request, node_id: str | None = None) -> HTTPException:
         limiter.record(request.state.source)
@@ -184,6 +205,8 @@ def create_app(
                 asyncio.create_task(_reaper_loop(registry, reaper_timeout, forget_after))
             )
         background.append(asyncio.create_task(_revocation_loop(registry, tunnels, auth.store)))
+        background.append(asyncio.create_task(
+            _close_loop(registry, auth.store, stale_after=_close_stale_after(heartbeat_interval))))
 
         try:
             yield
@@ -236,6 +259,7 @@ def create_app(
         capacity = _capacity(resolved, req.backend)
         if not auth.may_register(authorization, req.node_id):
             raise _deny(request, req.node_id)
+        _forget_close_of_previous_run(req.node_id, req.incarnation)
         registry.register(
             node_id=req.node_id,
             address=req.address,
@@ -281,14 +305,22 @@ def create_app(
         )
         if not known:
             log.warning("heartbeat from unknown node %s (asking it to re-register)", req.node_id)
-        # STOP delivery hook: a future console/router command sets a per-node command
-        # here (HeartbeatResponse.command). None for now — the pull channel is wired,
-        # the trigger is not.
         record = registry.get(req.node_id) if known else None
+        command = None
+        close = auth.store.close_requests().get(req.node_id) if record is not None else None
+        if close is not None:
+            if req.node_state in _CLOSE_DONE:
+                _finish_close(registry, auth.store, record)
+            else:
+                # Stop routing to it now (if the close loop hasn't yet), and tell the
+                # worker to drain and stop.
+                _mark_closing(registry, record, close.requested_by)
+                command = WorkerCommand.STOP
         pool_size = None
         if record is not None and record.transport == Transport.TUNNEL.value:
             pool_size = _pool_size(record.max_concurrent_requests)
-        return HeartbeatResponse(ok=True, known=known, tunnel_pool_size=pool_size)
+        return HeartbeatResponse(ok=True, known=known, command=command,
+                                 tunnel_pool_size=pool_size)
 
     @app.websocket("/tunnel")
     async def tunnel(ws: WebSocket) -> None:
@@ -402,6 +434,66 @@ async def _revocation_loop(
         pass
 
 
+# Node states in which a close request is done: the worker has stopped (or died).
+_CLOSE_DONE = (NodeState.STOPPED, NodeState.FAILED)
+
+
+def _close_stale_after(heartbeat_interval: float) -> float:
+    """How long a close request for a node the manager doesn't know is kept. After a
+    manager restart the registry is empty until workers re-register, within a heartbeat
+    or two, so a request is not dropped for that."""
+    return max(60.0, 3 * heartbeat_interval)
+
+
+def _mark_closing(registry: Registry, record: NodeRecord, requested_by: str) -> None:
+    if not record.closing and registry.set_closing(record.node_id):
+        log.warning("%s (%s) closing: requested by %s", record.name, record.node_id,
+                    requested_by)
+
+
+def _finish_close(registry: Registry, auth_store: AuthStore, record: NodeRecord) -> None:
+    """The worker has stopped: the request is done, and the node is no longer closing
+    (a later run of it must be routable again)."""
+    registry.set_closing(record.node_id, False)
+    if auth_store.clear_close_request(record.node_id):
+        log.warning("%s (%s) closed (%s)", record.name, record.node_id, record.state)
+
+
+async def _close_loop(
+    registry: Registry, auth_store: AuthStore, stale_after: float, interval: float = 2.0
+) -> None:
+    """Act on close requests (written into the auth store by the console or `oumigo
+    manager node close`) on a running manager: mark the node closing so the router stops
+    choosing it at once; its next heartbeat answer then carries STOP. A request is
+    deleted when the node has stopped, or when the node has been unknown for longer than
+    `stale_after`. A node marked closing without a request is routable again."""
+    started = time.time()
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            now = time.time()
+            requests = auth_store.close_requests()
+            for record in registry.list():
+                if record.closing and record.node_id not in requests:
+                    registry.set_closing(record.node_id, False)
+                    log.info("%s (%s) has no close request; routable again",
+                             record.name, record.node_id)
+            for node_id, req in requests.items():
+                record = registry.get(node_id)
+                if record is None:
+                    if now - max(req.requested_at, started) > stale_after:
+                        auth_store.clear_close_request(node_id)
+                        log.warning("close request for unknown node %s dropped (by %s)",
+                                    node_id, req.requested_by)
+                    continue
+                if record.state in {s.value for s in _CLOSE_DONE}:
+                    _finish_close(registry, auth_store, record)
+                else:
+                    _mark_closing(registry, record, req.requested_by)
+    except asyncio.CancelledError:
+        pass
+
+
 def run_server(
     host: str,
     port: int,
@@ -413,13 +505,15 @@ def run_server(
     advertise: bool = True,
     verbose: bool = False,
     config_file: Path | None = None,
+    env_file: Path | None = None,
 ) -> None:
     """Run the manager's control plane **and** data-plane router together.
 
     Both FastAPI apps run on one event loop in this process and share the same
     `Registry`, so the router always routes against live heartbeat state. Blocks
     until SIGINT/SIGTERM. SIGUSR1/SIGUSR2 toggle log verbosity at runtime — used by
-    an attached console in the parent process.
+    an attached console in the parent process. `env_file` (the `.env` the manager loaded)
+    is handed to the web console, whose Create Admin Account page writes there.
     """
     configure_logging(verbose)
 
@@ -462,6 +556,7 @@ def run_server(
         worker_allowlist=allowlist,
         catalog=catalog,
         vllm_port=get_vllm_port(manager_config),
+        fleet_agent_defaults=get_fleet_agent_defaults(manager_config),
     )
     router_app = create_router_app(registry, catalog,
                                    agent_defaults=get_agent_defaults(manager_config),
@@ -498,12 +593,13 @@ def run_server(
         control_opts.update(ssl_certfile=tls[0], ssl_keyfile=tls[1])
         log.info("control plane serves TLS itself (%s)", tls[0])
 
-    # Reporting plane: bundled with the manager, but its own process for fault
-    # isolation (a render hang there must never touch inference or heartbeats). It
-    # pulls from this control plane over loopback, so point it at 127.0.0.1:<port>.
+    # The web console: bundled with the manager, but its own process for fault isolation
+    # (a render hang there must never touch inference or heartbeats). It reads this
+    # control plane over loopback, so point it at 127.0.0.1:<port>.
     dashboard = None
     if dash_enabled:
-        dashboard = _spawn_dashboard(port, dash_host, dash_port, verbose, tls=tls is not None)
+        dashboard = _spawn_dashboard(port, dash_host, dash_port, verbose, tls=tls is not None,
+                                     state_dir=state_dir, env_file=env_file)
 
     log_level = "info" if verbose else "warning"
     try:
@@ -522,9 +618,10 @@ def run_server(
 
 
 def _spawn_dashboard(
-    control_port: int, host: str, port: int, verbose: bool, tls: bool = False
+    control_port: int, host: str, port: int, verbose: bool, tls: bool = False,
+    state_dir: Path | None = None, env_file: Path | None = None,
 ) -> subprocess.Popen | None:
-    """Start the reporting-plane dashboard as a child process, or None if it fails.
+    """Start the web console as a child process, or None if it fails.
 
     Runs in a new session so a terminal Ctrl-C reaches only the manager, which owns
     this child's lifecycle (terminated in `run_server`'s finally). `PR_SET_PDEATHSIG`
@@ -538,6 +635,10 @@ def _spawn_dashboard(
         "--port", str(port),
         "--control-url", local_control_url(control_port, tls),
     ]
+    if state_dir is not None:
+        cmd += ["--state-dir", str(state_dir)]
+    if env_file is not None:
+        cmd += ["--env-file", str(env_file)]
     if verbose:
         cmd.append("--verbose")
     try:
@@ -545,9 +646,9 @@ def _spawn_dashboard(
             cmd, start_new_session=True, preexec_fn=die_with_parent_preexec()
         )
     except OSError as exc:
-        log.warning("reporting-plane dashboard failed to start (%s); continuing without it", exc)
+        log.warning("web console failed to start (%s); continuing without it", exc)
         return None
-    log.info("reporting-plane dashboard on %s:%d (child pid %d)", host, port, child.pid)
+    log.info("web console on %s:%d (child pid %d)", host, port, child.pid)
     return child
 
 

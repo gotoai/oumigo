@@ -66,7 +66,7 @@ def test_spec_without_a_default_needs_a_choice() -> None:
     assert resp.status_code == 403
     assert resp.json()["detail"] == (
         "Model profile cannot be resolved: this fleet has no default; set "
-        "OUMIGO_MODEL_PROFILE to one of: big-model@128k, small-model@32k")
+        "WK_MODEL_PROFILE to one of: big-model@128k, small-model@32k")
     assert client.get("/spec", params={"profile": BIG}).status_code == 200
 
 
@@ -162,7 +162,7 @@ def _profile_spec(**kw) -> NodeSpec:
 
 def test_a_profile_keeps_the_nodes_own_storage(monkeypatch, tmp_path) -> None:
     (tmp_path / "config.json").write_text("{}")
-    monkeypatch.setenv("MODEL_STORAGE_LOCATION", f"file://{tmp_path}")
+    monkeypatch.setenv("WK_MODEL_STORAGE_LOCATION", f"file://{tmp_path}")
     spec = coordinator._apply_env_overrides(_profile_spec())
     assert (spec.model, spec.profile, spec.max_model_len) == ("acme/small-model", SMALL, 32768)
     assert spec.local_path == tmp_path

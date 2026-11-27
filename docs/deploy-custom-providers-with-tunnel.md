@@ -143,13 +143,13 @@ dashboard would be reachable unsafely, or if router client auth is off.
 
 **Models are profiles.** Each allowed profile is one model with every start-time setting
 fixed (context length, memory share, concurrency, vLLM flags), and its id is the model id
-clients request. Each worker picks the profile that fits its GPU (`OUMIGO_MODEL_PROFILE`,
+clients request. Each worker picks the profile that fits its GPU (`WK_MODEL_PROFILE`,
 see [2.2](#22-configure)), or gets the default. OumiGo ships tested profiles; to add your
 own, or a variant with another context length, see [model-catalog.md](model-catalog.md).
 If vLLM runs out of memory while "Capturing CUDA graphs", the profile's
 `gpu_memory_utilization` is too high for that GPU: use or create a profile with a lower one,
 or one with `gpu_memory_target_gib`, which takes the same GiB on any card. A machine with
-several GPUs can run one worker per GPU with `OUMIGO_GPU_ID` (see
+several GPUs can run one worker per GPU with `WK_GPU_ID` (see
 [model-catalog.md](model-catalog.md#workers-choosing-a-gpu)).
 
 ### 1.5 Run it as a service
@@ -317,13 +317,13 @@ environment is optional. The worker runs vLLM with its own interpreter.
 Create `~/oumigo-worker/.env` (mode 0600; it holds a secret):
 
 ```bash
-OUMIGO_MANAGER_URL=https://oumigo.example.com
-OUMIGO_TRANSPORT=tunnel
-OUMIGO_JOIN_TOKEN=oumigo-join-...
-OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
+WK_MANAGER_URL=https://oumigo.example.com
+WK_TRANSPORT=tunnel
+WK_JOIN_TOKEN=oumigo-join-...
+WK_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
 ```
 
-`OUMIGO_MODEL_PROFILE` picks the model this worker runs, from the fleet's allowed list.
+`WK_MODEL_PROFILE` picks the model this worker runs, from the fleet's allowed list.
 Leave it out to get the fleet's default. Everything else about the model (context length,
 memory share, vLLM flags) comes from the profile on the manager.
 
@@ -333,9 +333,9 @@ Optional settings, in the same file:
 |---|---|
 | `HF_TOKEN` | The model is gated on Hugging Face, or to avoid download rate limits |
 | `HF_HOME` | Keep the Hugging Face cache on a large or shared disk |
-| `MODEL_STORAGE_LOCATION` | Weights are on local disk (`file:///path`), or `none` to download despite the fleet's setting |
-| `OUMIGO_HOST_ID` | Containers whose disk is wiped on restart: any stable string keeps the same node identity |
-| `OUMIGO_MANAGER_CA_FILE` | The manager uses a private or self-signed certificate (see [tunnel.md](tunnel.md#without-nginx-built-in-tls)) |
+| `WK_MODEL_STORAGE_LOCATION` | Weights are on local disk (`file:///path`), or `none` to download despite the fleet's setting |
+| `WK_HOST_ID` | Containers whose disk is wiped on restart: any stable string keeps the same node identity |
+| `WK_MANAGER_CA_FILE` | The manager uses a private or self-signed certificate (see [tunnel.md](tunnel.md#without-nginx-built-in-tls)) |
 
 Don't put comments on the same line as a value in `.env`: they become part of the value.
 
@@ -366,13 +366,15 @@ group when it exits, so VRAM is released.
 
 ### 2.4 Watch the fleet
 
-The dashboard and the console stay on the manager host. Reach the dashboard through SSH
-from your own machine:
+The web console and the terminal console stay on the manager host. Reach the web console
+through SSH from your own machine:
 
 ```bash
 ssh -L 7080:127.0.0.1:7080 user@oumigo.example.com
 # then open http://localhost:7080
 ```
+
+Set up its admin sign-in and use Close as described in [console.md](console.md).
 
 ---
 
@@ -420,11 +422,12 @@ it as shared by everyone who has the app.
 | Task | How |
 |---|---|
 | Revoke a client | `om apikey revoke <id>`, effective from the next request |
-| Remove a worker | `om node revoke <node_id>`: the manager drops it and closes its tunnels within seconds; `om node unrevoke` undoes it |
+| Close a worker | **Close** on the console's Workers page, or `om node close <Worker#N or node_id>`: it finishes its requests in progress, then stops ([console.md](console.md)) |
+| Remove a worker | `om node revoke <node_id>`: the manager drops it and closes its tunnels within seconds, cutting off requests in progress; `om node unrevoke` undoes it |
 | Retire a join token | `om token revoke <id>`. Workers that already joined keep working |
-| See workers | The dashboard ([2.4](#24-watch-the-fleet)), or `curl -s 127.0.0.1:7014/workers` on the manager host |
+| See workers | The web console ([2.4](#24-watch-the-fleet)), or `curl -s 127.0.0.1:7014/workers` on the manager host |
 | Upgrade the manager | `pip install -U` in `/opt/oumigo/venv`, then `systemctl restart oumigo-manager`. Workers reconnect on their own; node tokens survive the restart |
-| Add or change a model | Edit `catalog:` (or a profile) and restart the manager; then start or restart the workers that should run it, with `OUMIGO_MODEL_PROFILE` |
+| Add or change a model | Edit `catalog:` (or a profile) and restart the manager; then start or restart the workers that should run it, with `WK_MODEL_PROFILE` |
 | Back up | `/var/lib/oumigo` (signing secret, tokens, keys) and `/etc/oumigo/manager.yaml`. Losing the state directory invalidates every node token and API key |
 
 Keep the manager and the workers on the same OumiGo release. In particular, 0.3.x workers
@@ -434,16 +437,16 @@ cannot join a 0.4.x manager.
 
 | Symptom | Likely cause |
 |---|---|
-| Worker log says `discovering via mDNS` | `OUMIGO_MANAGER_URL` isn't set: check that `.env` is in the directory you run from, or pass `--env-file` |
+| Worker log says `discovering via mDNS` | `WK_MANAGER_URL` isn't set: check that `.env` is in the directory you run from, or pass `--env-file` |
 | Worker exits: `requires TLS: use its https:// URL` | A `CUSTOM` manager reached over `http://` |
 | Worker exits: `rejected the join token (401)` | Token expired, revoked, already used, or mistyped |
-| Worker exits: `certificate verify failed` | The certificate doesn't match the URL's host name, or a private certificate without `OUMIGO_MANAGER_CA_FILE` |
+| Worker exits: `certificate verify failed` | The certificate doesn't match the URL's host name, or a private certificate without `WK_MANAGER_CA_FILE` |
 | Worker SERVING, but clients get `503` and the console shows `tunnel 0/0` | nginx is missing the `Upgrade` / `Connection` lines for `/tunnel` |
 | vLLM: `CUDA out of memory` while capturing CUDA graphs | The profile's `gpu_memory_utilization` is too high for this GPU: use or create a profile with a lower one |
-| Worker exits: `profile … is not allowed in this fleet` | `OUMIGO_MODEL_PROFILE` names a profile missing from `catalog.allow`; the message lists the allowed ones |
+| Worker exits: `profile … is not allowed in this fleet` | `WK_MODEL_PROFILE` names a profile missing from `catalog.allow`; the message lists the allowed ones |
 | Worker exits: `needs a GPU with at least … GiB` | The profile's `requires.min_vram_gib` is larger than this GPU: pick a smaller profile |
-| Worker exits: `needs … GiB of GPU memory; GPU … has …` | The profile's `gpu_memory_target_gib` is larger than this GPU: pick a smaller profile, or another GPU with `OUMIGO_GPU_ID` |
-| vLLM: `Free memory on device … is less than desired GPU memory utilization` | Another process, often a second worker, holds that GPU's memory: start the larger model first, or give this worker another GPU (`OUMIGO_GPU_ID`) |
+| Worker exits: `needs … GiB of GPU memory; GPU … has …` | The profile's `gpu_memory_target_gib` is larger than this GPU: pick a smaller profile, or another GPU with `WK_GPU_ID` |
+| vLLM: `Free memory on device … is less than desired GPU memory utilization` | Another process, often a second worker, holds that GPU's memory: start the larger model first, or give this worker another GPU (`WK_GPU_ID`) |
 | Client gets `404 model_not_found` | The request's `model` isn't a served model id: see `GET /v1/models`, or send `any-model` |
 | Client gets `401 missing or invalid API key` | No `Authorization: Bearer <key>`, a mistyped key, or a revoked key |
 | Client gets `503 model_loading` ("… is starting") | A worker is still loading the model: wait, or watch it in the worker's log |

@@ -1,4 +1,4 @@
-"""Choosing a worker's GPU (`--gpu-id` / OUMIGO_GPU_ID) and the profiles'
+"""Choosing a worker's GPU (`--gpu-id` / WK_GPU_ID) and the profiles'
 `gpu_memory_target_gib`."""
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def test_gpu_ids_must_match_the_profiles_tensor_parallel_size(monkeypatch):
                         lambda *a, **kw: (_spec(tensor_parallel_size=1), "LAN"))
     with pytest.raises(SystemExit, match="names 2 GPU.s., but profile embed@8k runs on 1"):
         coordinator.run_worker("http://manager:7014", None, gpu_id="0,1")
-    with pytest.raises(SystemExit, match="--gpu-id / OUMIGO_GPU_ID: not a GPU id: x"):
+    with pytest.raises(SystemExit, match="--gpu-id / WK_GPU_ID: not a GPU id: x"):
         coordinator.run_worker("http://manager:7014", None, gpu_id="x")
 
 
@@ -118,7 +118,7 @@ def test_the_flag_beats_the_environment_which_beats_the_env_file(tmp_path, monke
     from oumigo.cli.main import app
 
     envf = tmp_path / ".env"
-    envf.write_text("OUMIGO_GPU_ID=2\n")
+    envf.write_text("WK_GPU_ID=2\n")
     called: dict = {}
     monkeypatch.setattr(coordinator, "run_worker", lambda **kw: called.update(kw))
 

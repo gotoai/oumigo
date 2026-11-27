@@ -368,8 +368,8 @@ is supported so far, and any other scheme is rejected at config load.
 The path is checked on the **worker**, not the manager — it is that node's filesystem, so
 the manager cannot validate it. A worker exits at startup with a clear message if the
 directory is missing or holds no `config.json`. Nodes differ: a worker can override the
-fleet value with `MODEL_STORAGE_LOCATION=file:///its/own/path` in its `.env`, or opt out
-of a fleet-wide location entirely with `MODEL_STORAGE_LOCATION=none` and fall back to the
+fleet value with `WK_MODEL_STORAGE_LOCATION=file:///its/own/path` in its `.env`, or opt out
+of a fleet-wide location entirely with `WK_MODEL_STORAGE_LOCATION=none` and fall back to the
 Hub.
 
 **Tool calling** requires vLLM to be started with an auto tool-choice parser, or any

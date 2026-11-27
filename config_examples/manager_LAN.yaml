@@ -4,7 +4,7 @@
 # themselves. For workers elsewhere (clouds, other sites), see manager_CUSTOM_vps.yaml.
 #
 # This is a config file, resolved in precedence order:
-#   --config-file <file>  >  $OUMIGO_CONFIG_FILE  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
+#   --config-file <file>  >  $MG_CONFIG_FILE  >  ~/.config/oumigo/manager.yaml  >  /etc/oumigo/manager.yaml
 #
 # Secrets do NOT belong in this file. Reference them by path (see auth.token_file)
 # or supply them via environment variables / a local .env file.
@@ -30,7 +30,7 @@ heartbeat:
 
 # --- Worker authentication ---
 auth:
-  # File holding a shared join token. $OUMIGO_MANAGER_TOKEN overrides it. If neither is
+  # File holding a shared join token. $MG_JOIN_TOKEN overrides it. If neither is
   # set, worker authentication is DISABLED under LAN and the manager warns.
   token_file: null       # e.g. ./token  or  /etc/oumigo/token
 
@@ -38,7 +38,7 @@ auth:
 # A profile is one model with every start-time setting fixed (context length, memory
 # share, concurrency, vLLM flags), and its id is the model id clients request. Shipped
 # profiles: src/oumigo/catalog/; templates to adapt: config_examples/catalog/. A worker
-# picks one with OUMIGO_MODEL_PROFILE, or gets the default.
+# picks one with WK_MODEL_PROFILE, or gets the default.
 catalog:
   # dirs: [~/.config/oumigo/catalog]   # your own profiles; an id here overrides a shipped one
   allow:

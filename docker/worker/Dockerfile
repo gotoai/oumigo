@@ -4,14 +4,14 @@
 # container's environment at start. Model weights are downloaded on first start, never
 # baked in. The variables it reads are listed in entrypoint.sh.
 #
-#   docker build --build-arg VLLM_VERSION=0.28.0 --build-arg OUMIGO_VERSION=0.5.7 \
-#       -t ghcr.io/<owner>/oumigo-worker:0.5.7-vllm0.28.0 docker/worker
+#   docker build --build-arg VLLM_VERSION=0.28.0 --build-arg OUMIGO_VERSION=0.5.8 \
+#       -t ghcr.io/<owner>/oumigo-worker:0.5.8-vllm0.28.0 docker/worker
 #
 # VLLM_VARIANT picks another vLLM base build. vLLM's default image needs the host driver
 # of its CUDA (13.0: driver 580+); `-cu129` also runs on CUDA 12.9 hosts (driver 575+),
 # which widens the pool of cloud machines that can take the pod:
 #
-#   docker build --build-arg VLLM_VARIANT=-cu129 ... -t ...:0.5.7-vllm0.28.0-cu129 docker/worker
+#   docker build --build-arg VLLM_VARIANT=-cu129 ... -t ...:0.5.8-vllm0.28.0-cu129 docker/worker
 
 ARG VLLM_VERSION=0.28.0
 ARG VLLM_VARIANT=
@@ -19,7 +19,7 @@ FROM vllm/vllm-openai:v${VLLM_VERSION}${VLLM_VARIANT}
 
 ARG VLLM_VERSION
 ARG VLLM_VARIANT
-ARG OUMIGO_VERSION=0.5.7
+ARG OUMIGO_VERSION=0.5.8
 
 # The source label links the published package to the repository on GitHub.
 LABEL org.opencontainers.image.source="https://github.com/gotoai/oumigo" \
@@ -54,7 +54,7 @@ COPY entrypoint.sh /usr/local/bin/oumigo-worker-entrypoint
 RUN chmod 755 /usr/local/bin/oumigo-worker-entrypoint
 
 # Weights, caches and node identity live on the container disk under /data.
-ENV OUMIGO_TRANSPORT=tunnel \
+ENV WK_TRANSPORT=tunnel \
     HF_HOME=/data/hf \
     VLLM_CACHE_ROOT=/data/vllm-cache \
     FLASHINFER_WORKSPACE_BASE=/data/flashinfer \

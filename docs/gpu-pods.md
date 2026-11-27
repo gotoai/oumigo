@@ -50,10 +50,10 @@ script sets these:
 
 | Variable | Purpose |
 |---|---|
-| `OUMIGO_MANAGER_URL` | the manager's public URL |
-| `OUMIGO_JOIN_TOKEN` | a join token minted for this pod |
-| `OUMIGO_HOST_ID` | the worker's identity, made up per pod, so a restarted container rejoins as the same node |
-| `OUMIGO_MODEL_PROFILE` | the catalog profile to run (see [model-catalog.md](model-catalog.md)); several, comma-separated, share the GPU |
+| `WK_MANAGER_URL` | the manager's public URL |
+| `WK_JOIN_TOKEN` | a join token minted for this pod |
+| `WK_HOST_ID` | the worker's identity, made up per pod, so a restarted container rejoins as the same node |
+| `WK_MODEL_PROFILE` | the catalog profile to run (see [model-catalog.md](model-catalog.md)); several, comma-separated, share the GPU |
 | `HF_TOKEN` | read-only Hugging Face token, for gated models |
 
 ## 2. Prepare the providers
@@ -106,7 +106,7 @@ The script refuses to run if this file is readable by anyone but its owner.
 ([example](../deploy/pods/pods.example.yaml)). The parts that choose the machine:
 
 ```yaml
-image: ghcr.io/<owner>/oumigo-worker:0.5.7-vllm0.28.0-cu129
+image: ghcr.io/<owner>/oumigo-worker:0.5.8-vllm0.28.0-cu129
 disk_gb: 80                      # weights + caches; there is no volume
 
 search:
@@ -150,7 +150,7 @@ worker:
   profile: [harrier-oss-v1-0.6b@32k, ruri-v3-310m@8k]
 ```
 
-The pod gets them as one comma-separated `OUMIGO_MODEL_PROFILE`, and starts them in that
+The pod gets them as one comma-separated `WK_MODEL_PROFILE`, and starts them in that
 order, each once the previous one serves (see
 [model-catalog.md](model-catalog.md#several-profiles-on-one-gpu)). Each profile needs a
 fixed `gpu_memory_target_gib`, and the smallest GPU is then the sum of their

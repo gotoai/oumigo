@@ -3,8 +3,8 @@ client API keys.
 
 Four credentials, each with one job:
 
-- **Join token** — what an operator gives a new worker (`OUMIGO_JOIN_TOKEN`). Either the
-  *reusable* fleet token (`OUMIGO_MANAGER_TOKEN` / `auth.token_file`, the v1 shared
+- **Join token** — what an operator gives a new worker (`WK_JOIN_TOKEN`). Either the
+  *reusable* fleet token (`MG_JOIN_TOKEN` / `auth.token_file`, the v1 shared
   token) or a *minted* one from `oumigo manager token create`, which can expire and/or
   be limited to N registrations. Minted tokens are stored only as SHA-256 hashes.
 - **Node token** — issued at registration, bound to one `node_id`:
@@ -22,6 +22,11 @@ The state (signing secret, minted tokens, client keys, revoked nodes) lives in a
 the manager's state directory. The CLI writes to the same file on the manager host —
 filesystem permissions are the admin auth — and the manager reads it per request, so a
 token minted or a node revoked while the manager runs takes effect immediately.
+
+The same file holds **close requests** (`oumigo manager node close`, the console's Close
+button): not credentials, but operator requests to the running manager, written the same
+way. A row means "this worker should drain and stop"; the manager acts on it until the
+worker reports STOPPED, then deletes it.
 """
 
 from __future__ import annotations
@@ -59,6 +64,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at REAL NOT NULL,
     revoked INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS close_requests (
+    node_id TEXT PRIMARY KEY,
+    requested_at REAL NOT NULL,
+    requested_by TEXT NOT NULL
+);
 """
 
 
@@ -92,6 +102,13 @@ class JoinToken:
         if self.expires_at is not None and self.expires_at <= time.time():
             return False
         return self.uses_left is None or self.uses_left > 0
+
+
+@dataclass
+class CloseRequest:
+    node_id: str
+    requested_at: float
+    requested_by: str  # the console's admin login, "console" without sign-in, or "cli"
 
 
 @dataclass
@@ -271,6 +288,32 @@ class AuthStore:
     def revoked_nodes(self) -> set[str]:
         with self._lock:
             return {r[0] for r in self._conn.execute("SELECT node_id FROM revoked_nodes")}
+
+    # --- close requests --------------------------------------------------------
+
+    def request_close(self, node_id: str, requested_by: str) -> None:
+        """Ask the running manager to drain and stop `node_id`. Idempotent: asking again
+        keeps the first request time."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO close_requests (node_id, requested_at, requested_by)"
+                " VALUES (?, ?, ?)",
+                (node_id, time.time(), requested_by),
+            )
+            self._conn.commit()
+
+    def close_requests(self) -> dict[str, CloseRequest]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT node_id, requested_at, requested_by FROM close_requests"
+            ).fetchall()
+        return {r[0]: CloseRequest(r[0], r[1], r[2]) for r in rows}
+
+    def clear_close_request(self, node_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM close_requests WHERE node_id=?", (node_id,))
+            self._conn.commit()
+        return cur.rowcount > 0
 
     # --- derived credentials ---------------------------------------------------
 

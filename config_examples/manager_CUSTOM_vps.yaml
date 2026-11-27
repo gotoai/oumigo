@@ -31,7 +31,7 @@ dashboard:
   host: 127.0.0.1
   port: 7080
 
-# --- Tunnel transport: workers with OUMIGO_TRANSPORT=tunnel dial out to /tunnel ---
+# --- Tunnel transport: workers with WK_TRANSPORT=tunnel dial out to /tunnel ---
 tunnel:
   enabled: true
   pool_spare: 1                 # connections kept beyond each worker's capacity
@@ -45,7 +45,7 @@ heartbeat:
 # Per-pod join tokens: `oumigo manager token create --ttl 1h --uses 1 -c <this file>`.
 # For a worker that restarts often (a personal machine, a container image), create a long-lived one
 # instead: `--ttl never --uses 0 --label <name>`, revocable with `token revoke <id>`.
-# A reusable token (token_file or $OUMIGO_MANAGER_TOKEN) is optional.
+# A reusable token (token_file or $MG_JOIN_TOKEN) is optional.
 auth:
   token_file: null
   state_dir: /var/lib/oumigo    # signing secret, minted tokens, revoked nodes (mode 0600)
@@ -60,7 +60,7 @@ replicas: 1
 # --- Model catalog: which profiles this fleet's workers may run ---
 # A profile is one model with every start-time setting fixed (context length, memory
 # share, concurrency, vLLM flags), and its id is the model id clients request. Shipped
-# profiles: src/oumigo/catalog/. A worker picks one with OUMIGO_MODEL_PROFILE, or gets
+# profiles: src/oumigo/catalog/. A worker picks one with WK_MODEL_PROFILE, or gets
 # the default.
 catalog:
   # dirs: [/etc/oumigo/catalog]   # your own profiles; an id here overrides a shipped one

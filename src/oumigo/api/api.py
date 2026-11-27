@@ -36,6 +36,7 @@ import yaml
 from oumigo import discovery
 from oumigo.api.manager.manager import OumiGoManager
 from oumigo.api.worker.worker import _WORKER_STOP_GRACE_S, OumiGoWorker
+from oumigo.common.envnames import MG_JOIN_TOKEN, WK_JOIN_TOKEN, WK_MODEL_PROFILE
 from oumigo.common.proc import die_with_parent_preexec, terminate
 from oumigo.config.catalog import CATALOG_EXAMPLE, FleetCatalog
 from oumigo.protocol.states import NodeState
@@ -44,11 +45,10 @@ log = logging.getLogger("oumigo.api")
 
 # vLLM/HF child processes inherit the worker's environment, so these env vars set
 # on the spawned `worker run` reach the model server unchanged (see supervisor.py).
-_ENV_MANAGER_TOKEN = "OUMIGO_MANAGER_TOKEN"
 _ENV_HF_HOME = "HF_HOME"
 _ENV_HF_TOKEN = "HF_TOKEN"
 _ENV_VLLM_CACHE = "VLLM_CACHE_ROOT"
-_ENV_MODEL_PROFILE = "OUMIGO_MODEL_PROFILE"
+_ENV_MODEL_PROFILE = WK_MODEL_PROFILE
 
 # Sentinel for "argument not supplied" — lets config_file values fill only the slots
 # the caller left blank, while any explicit value (even a default-looking one) wins.
@@ -146,7 +146,7 @@ def oumigo_get_or_create_manager(
 
     env = dict(os.environ)
     if bearer_token:
-        env[_ENV_MANAGER_TOKEN] = bearer_token  # secret via env, never argv
+        env[MG_JOIN_TOKEN] = bearer_token  # secret via env, never argv
     argv = [
         sys.executable, "-m", "oumigo.cli.main", "manager", "serve",
         "--config-file", config_path,
@@ -214,7 +214,7 @@ def oumigo_create_worker(
     inside a Jupyter notebook and ambiguous when several managers advertise. A passed
     ``manager`` also supplies its ``bearer_token`` when one isn't given here.
 
-    ``profile`` is the catalog profile the worker runs (``OUMIGO_MODEL_PROFILE``); None
+    ``profile`` is the catalog profile the worker runs (``WK_MODEL_PROFILE``); None
     takes the fleet's default (a fleet without one refuses the worker). ``hf_home`` /
     ``vllm_cache_root`` / ``hf_token`` reach the replica via the child's environment
     (``HF_HOME`` / ``VLLM_CACHE_ROOT`` / ``HF_TOKEN``).
@@ -247,7 +247,7 @@ def oumigo_create_worker(
     if profile:
         env[_ENV_MODEL_PROFILE] = profile
     if bearer_token:
-        env[_ENV_MANAGER_TOKEN] = bearer_token
+        env[WK_JOIN_TOKEN] = bearer_token
 
     argv = [
         sys.executable, "-m", "oumigo.cli.main", "worker", "run",

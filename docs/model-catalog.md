@@ -155,17 +155,17 @@ allowed profiles and the default at startup.
 ## Workers: choosing a profile
 
 ```bash
-OUMIGO_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
+WK_MODEL_PROFILE=gemma-4-31B-it-qat-w4a16-ct@128k
 ```
 
 The worker resolves its profile in this order:
 
-1. `OUMIGO_MODEL_PROFILE` is set and allowed: the worker runs it. If the fleet doesn't
+1. `WK_MODEL_PROFILE` is set and allowed: the worker runs it. If the fleet doesn't
    allow it, the worker exits with the list of allowed ids. It never falls back to the
    default: running a model you didn't ask for is worse than stopping.
 2. It is unset: the worker runs the fleet's default.
 3. Nor is there a default: the worker exits with `Model profile cannot be resolved: this
-   fleet has no default; set OUMIGO_MODEL_PROFILE to one of: ...`.
+   fleet has no default; set WK_MODEL_PROFILE to one of: ...`.
 
 The manager makes this decision, not the worker. The worker asks the manager for the
 profile's settings before it registers, and the manager checks the profile again at
@@ -178,22 +178,22 @@ environment:
 
 | Variable | Purpose |
 |---|---|
-| `MODEL_STORAGE_LOCATION` | Weights on this node's disk (`file:///path`), or `none` to download despite a fleet-wide location |
+| `WK_MODEL_STORAGE_LOCATION` | Weights on this node's disk (`file:///path`), or `none` to download despite a fleet-wide location |
 | `HF_HOME`, `HF_TOKEN` | Hugging Face cache and token (gated models) |
 
 `MODEL_NAME` and `MAX_MODEL_LEN` were removed in 0.5.5. A worker with either set exits at
-once, saying to use `OUMIGO_MODEL_PROFILE`; it doesn't ignore them, because an old `.env`
+once, saying to use `WK_MODEL_PROFILE`; it doesn't ignore them, because an old `.env`
 would otherwise start the default model while its owner believes they chose another. For
 a different context length, choose or create a profile with that context.
 
 ## Workers: choosing a GPU
 
 ```bash
-OUMIGO_GPU_ID=1          # or: oumigo worker run --gpu-id 1
+WK_GPU_ID=1          # or: oumigo worker run --gpu-id 1
 ```
 
 On a machine with several GPUs, each worker can run on its own: `--gpu-id` on the command
-line, else `OUMIGO_GPU_ID` in the environment, else in the worker's `.env`. A GPU id is
+line, else `WK_GPU_ID` in the environment, else in the worker's `.env`. A GPU id is
 what `nvidia-smi` shows: its index, counted from 0, or its UUID (`GPU-…`, from
 `nvidia-smi -L`), which stays the same when cards move between slots. A model sharded over
 several GPUs takes a comma-separated list, as many as its `tensor_parallel_size`.
@@ -207,13 +207,13 @@ already set is honoured the same way; with neither, the worker uses GPU 0, as be
 Two workers on one machine, one env file each:
 
 ```bash
-# chat.env:  OUMIGO_MODEL_PROFILE=gemma-4-12B-it-qat-w4a16-ct@128k   OUMIGO_GPU_ID=0
-# embed.env: OUMIGO_MODEL_PROFILE=ruri-v3-310m@8k                    OUMIGO_GPU_ID=1
+# chat.env:  WK_MODEL_PROFILE=gemma-4-12B-it-qat-w4a16-ct@128k   WK_GPU_ID=0
+# embed.env: WK_MODEL_PROFILE=ruri-v3-310m@8k                    WK_GPU_ID=1
 oumigo worker run --env-file chat.env
 oumigo worker run --env-file embed.env
 ```
 
-Keep `OUMIGO_GPU_ID` in the per-worker env files, not in your shell: a variable already
+Keep `WK_GPU_ID` in the per-worker env files, not in your shell: a variable already
 in the environment wins over every env file.
 
 ### Several profiles on one GPU
@@ -221,10 +221,10 @@ in the environment wins over every env file.
 Several workers can share one GPU when their memory adds up. Each profile then needs a
 fixed `gpu_memory_target_gib`, which is all it takes; a profile that takes a share of
 the GPU (`gpu_memory_utilization`) cannot share it. List the profiles in one
-`OUMIGO_MODEL_PROFILE`, comma-separated and largest first:
+`WK_MODEL_PROFILE`, comma-separated and largest first:
 
 ```bash
-OUMIGO_MODEL_PROFILE=harrier-oss-v1-0.6b@32k,ruri-v3-310m@8k oumigo worker run
+WK_MODEL_PROFILE=harrier-oss-v1-0.6b@32k,ruri-v3-310m@8k oumigo worker run
 ```
 
 `oumigo worker run` then starts one worker per profile, with the same options and
@@ -232,10 +232,11 @@ environment, each once the previous one serves. The order matters twice: vLLM ch
 startup that the memory its profile asks for is free, so two models loading at once can
 each count the other's memory as free; and each worker takes the next free port (7001,
 7002, ...), which is part of its node id, so a fixed order keeps every profile the same
-node across restarts. The workers are one unit: if one stops without being asked, the
-others are stopped too and the command exits non-zero, so a container platform or
-systemd restarts the whole set. A signal reaches every worker, which drains as it would
-alone.
+node across restarts. A worker closed by the manager ([console.md](console.md)) exits
+on its own and the others keep serving; the command exits 0 once all have closed. If a
+worker fails instead, the others are stopped too and the command exits non-zero, so a
+container platform or systemd restarts the whole set. A signal reaches every worker,
+which drains as it would alone.
 
 The smallest GPU for the set is the sum of the profiles' `min_vram_gib`: 8 + 4 = 12 GiB
 for the example. On a rented GPU, `worker.profile` takes the same list (see
@@ -331,7 +332,7 @@ time, and raise the model's `agent:` timeouts with it so clients wait as long. A
 |---|---|
 | `manager.yaml` with a `model:` block | **Refused.** Put the model in a profile and list it in `catalog.allow` |
 | `manager.yaml` without `catalog:` (an open fleet) | **Refused.** Add a `catalog:` block |
-| Workers using `MODEL_NAME` | **Refused.** Set `OUMIGO_MODEL_PROFILE` to a profile id |
+| Workers using `MODEL_NAME` | **Refused.** Set `WK_MODEL_PROFILE` to a profile id |
 | Workers using `MAX_MODEL_LEN` | **Refused.** Choose or create a profile with that context |
 | Python API: `oumigo_get_or_create_manager(model=...)` | Removed. Pass `catalog=` or a `config_file` with `catalog:` |
 | Python API: `oumigo_create_worker(model_name=...)` | Removed. Pass `profile=` |
