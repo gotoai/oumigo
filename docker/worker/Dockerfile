@@ -4,14 +4,14 @@
 # container's environment at start. Model weights are downloaded on first start, never
 # baked in. The variables it reads are listed in entrypoint.sh.
 #
-#   docker build --build-arg VLLM_VERSION=0.28.0 --build-arg OUMIGO_VERSION=0.5.9 \
-#       -t ghcr.io/<owner>/oumigo-worker:0.5.9-vllm0.28.0 docker/worker
+#   docker build --build-arg VLLM_VERSION=0.28.0 --build-arg OUMIGO_VERSION=0.6.0 \
+#       -t ghcr.io/<owner>/oumigo-worker:0.6.0-vllm0.28.0 docker/worker
 #
 # VLLM_VARIANT picks another vLLM base build. vLLM's default image needs the host driver
 # of its CUDA (13.0: driver 580+); `-cu129` also runs on CUDA 12.9 hosts (driver 575+),
 # which widens the pool of cloud machines that can take the pod:
 #
-#   docker build --build-arg VLLM_VARIANT=-cu129 ... -t ...:0.5.9-vllm0.28.0-cu129 docker/worker
+#   docker build --build-arg VLLM_VARIANT=-cu129 ... -t ...:0.6.0-vllm0.28.0-cu129 docker/worker
 
 ARG VLLM_VERSION=0.28.0
 ARG VLLM_VARIANT=
@@ -19,7 +19,7 @@ FROM vllm/vllm-openai:v${VLLM_VERSION}${VLLM_VARIANT}
 
 ARG VLLM_VERSION
 ARG VLLM_VARIANT
-ARG OUMIGO_VERSION=0.5.9
+ARG OUMIGO_VERSION=0.6.0
 
 # The source label links the published package to the repository on GitHub.
 LABEL org.opencontainers.image.source="https://github.com/gotoai/oumigo" \
