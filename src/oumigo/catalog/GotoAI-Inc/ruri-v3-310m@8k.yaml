@@ -21,6 +21,11 @@ engine:
   # mean pooling (its sentence-transformers 1_Pooling); pin it.
   - --pooler-config
   - '{"seq_pooling_type":"MEAN"}'
+# Embedding requests take seconds, so a long wait means the model is overloaded: refuse
+# with 503 model_busy after 30 s, not the router's 300 s, and let the client retry
+# (gotoai-api-gateway docs/design_embedding-api-flow-control.md §5).
+caps:
+  max_queue_seconds: 30
 embed:
   dimensions: 768
   # The model card's prefixes; the model's sentence-transformers config defines none.

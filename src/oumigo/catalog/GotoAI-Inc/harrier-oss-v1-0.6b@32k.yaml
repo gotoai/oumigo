@@ -16,6 +16,11 @@ engine:
   dtype: bfloat16
   tensor_parallel_size: 1
   max_concurrent_requests: 8
+# Embedding requests take seconds, so a long wait means the model is overloaded: refuse
+# with 503 model_busy after 30 s, not the router's 300 s, and let the client retry
+# (gotoai-api-gateway docs/design_embedding-api-flow-control.md §5).
+caps:
+  max_queue_seconds: 30
 embed:
   dimensions: 1024
   # From the model's config_sentence_transformers.json. Queries take an instruction;

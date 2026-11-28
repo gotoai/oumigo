@@ -121,6 +121,13 @@ def test_shipped_embedding_profiles_pin_their_pooling_and_prompts() -> None:
     assert (ruri.embed.dimensions, harrier.embed.dimensions) == (768, 1024)
 
 
+def test_shipped_embedding_profiles_refuse_after_a_short_queue_wait() -> None:
+    # Embedding requests take seconds: waiting the router's 300 s only lets a queue grow.
+    embed = {pid: p for pid, p in load_profiles().items() if p.task == "embed"}
+    assert set(embed) == {"ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k", "harrier-oss-v1-0.6b@32k"}
+    assert {p.caps.max_queue_seconds for p in embed.values()} == {30}
+
+
 def test_id_must_match_the_file_name(tmp_path: Path) -> None:
     path = tmp_path / "acme" / "something-else@32k.yaml"
     path.parent.mkdir(parents=True)
